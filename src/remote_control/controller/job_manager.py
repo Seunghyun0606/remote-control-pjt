@@ -218,7 +218,7 @@ class JobManager:
                 job.id,
                 mode=RecoveryMode.START,
                 error=str(exc),
-                assigned_host=requested_host if requested_host != "auto" else None,
+                assigned_host=effective_host if effective_host != "auto" else None,
             )
             return await self.require(job.id)
 
@@ -864,7 +864,11 @@ class JobManager:
         requested_host = (
             work.host_id
             if work is not None and work.task_id and work.host_id
-            else job.requested_host
+            else (
+                job.assigned_host
+                if RecoveryMode(record.mode) == RecoveryMode.RESUME and job.assigned_host
+                else job.requested_host
+            )
         )
         try:
             host_id = await self._resolve_host(job.project_id, requested_host)
