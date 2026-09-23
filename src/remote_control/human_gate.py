@@ -96,8 +96,13 @@ def _from_payload(payload: dict[str, Any]) -> HumanGateRequest | None:
     if not isinstance(question, str) or not question.strip():
         return None
 
-    approval_type = payload.get("type") or payload.get("approval_type") or "human_decision"
-    if not isinstance(approval_type, str) or not approval_type.strip():
+    approval_type = payload.get("approval_type") or payload.get("gate_type") or payload.get("type")
+    if (
+        not isinstance(approval_type, str)
+        or not approval_type.strip()
+        or approval_type.casefold()
+        in {"human_gate", "human.gate", "request_user_input", "request.user_input"}
+    ):
         approval_type = "human_decision"
 
     details = payload.get("details") or payload.get("description") or payload.get("header")
