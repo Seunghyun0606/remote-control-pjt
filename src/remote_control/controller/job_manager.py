@@ -18,6 +18,7 @@ from remote_control.human_gate import (
     extract_human_gate_from_text,
     human_gate_protocol_instruction,
 )
+from remote_control.projects.adapters import NoProjectWork, ProjectAdapterRegistry
 from remote_control.projects.registry import ProjectRegistry
 from remote_control.recovery.models import RecoveryKind, RecoveryMode
 from remote_control.recovery.quota import (
@@ -29,10 +30,11 @@ from remote_control.recovery.quota import (
 from remote_control.runners.base import AgentRunResult, AgentRunner, RunHandle
 from remote_control.runners.codex import extract_session_id
 from remote_control.sessions.registry import SessionRegistry, SessionStatus
-from remote_control.storage.models import ApprovalRecord, JobRecord, RecoveryRecord
+from remote_control.storage.models import ApprovalRecord, JobRecord, ProjectWorkRecord, RecoveryRecord
 from remote_control.storage.repositories import (
     EventRepository,
     JobRepository,
+    ProjectWorkRepository,
     RecoveryRepository,
 )
 from remote_control.transport.runner_ws import RunnerGateway
@@ -74,6 +76,8 @@ class JobManager:
         sessions: SessionRegistry | None = None,
         approvals: ApprovalRegistry | None = None,
         recovery: RecoveryRepository | None = None,
+        project_adapters: ProjectAdapterRegistry | None = None,
+        project_work: ProjectWorkRepository | None = None,
         progress_interval_seconds: int = 300,
         quota_retry_initial_seconds: int = 1800,
         quota_retry_max_seconds: int = 7200,
@@ -88,6 +92,8 @@ class JobManager:
         self.sessions = sessions
         self.approvals = approvals
         self.recovery = recovery
+        self.project_adapters = project_adapters
+        self.project_work = project_work
         self.host_router = HostRouter(hosts) if hosts is not None else None
         self.feedback_policy = FeedbackPolicy()
         self.feedback_throttler = FeedbackThrottler(progress_interval_seconds)
@@ -259,6 +265,11 @@ class JobManager:
 
     async def active_for_user(self, user_id: str) -> list[JobRecord]:
         return await self.jobs.list_active_for_user(user_id)
+
+    async def project_work_for(self, job_id: str) -> ProjectWorkRecord | None:
+        if self.project_work is None:
+            return None
+        return await self.project_work.get(job_id)
 
     async def pending_approvals_for_user(self, user_id: str) -> list[ApprovalRecord]:
         if self.approvals is None:
@@ -690,7 +701,32 @@ class JobManager:
     async def _execute_new(self, job_id: str) -> None:
         try:
             job = await self._transition(job_id, JobState.STARTING)
-            handle = await self._start_new_turn(job, job.instruction)
+            instruction = job.instruction
+            if self.project_adapters is not None:
+                project = self.projects.get(job.project_id)
+                assert job.assigned_host is not None
+                try:
+                    prepared = await self.project_adapters.get(project).prepare(
+                        job_id=job.id,
+                        project=project,
+                        host_id=job.assigned_host,
+                        base_instruction=job.instruction,
+                    )
+                except NoProjectWork as exc:
+                    await self.jobs.update(job_id, result=str(exc), error=None)
+                    await self._transition(job_id, JobState.COMPLETED)
+                    if self.recovery is not None:
+                        await self.recovery.delete(job_id)
+                    await self._notify(job_id, f"✅ 실행 가능한 Project OS 작업이 없습니다.\n\n{exc}")
+                    return
+                instruction = prepared.instruction
+                if prepared.task_id:
+                    await self._notify(
+                        job_id,
+                        f"📌 Project OS Task: {prepared.task_id}\nRole: {prepared.role or '-'}",
+                    )
+
+            handle = await self._start_new_turn(job, instruction)
             await self._set_handle(job_id, handle)
             current = await self.require(job_id)
             if JobState(current.state) != JobState.STARTING:
@@ -781,6 +817,7 @@ class JobManager:
                 return
 
             completed = False
+            finalize_project_os = False
             async with self._job_locks[job_id]:
                 current = await self.require(job_id)
                 if JobState(current.state) in {
@@ -791,17 +828,32 @@ class JobManager:
                     return
                 steering = self._drain_steering(job_id)
                 if steering is None:
-                    await self.jobs.update(
-                        job_id,
-                        result=current_result.final_message,
-                        error=None,
+                    project = self.projects.get(current.project_id)
+                    adapter = (
+                        self.project_adapters.get(project)
+                        if self.project_adapters is not None
+                        else None
                     )
-                    if self.sessions is not None:
-                        await self.sessions.mark(job_id, SessionStatus.IDLE)
-                    await self._transition(job_id, JobState.COMPLETED)
-                    if self.recovery is not None:
-                        await self.recovery.delete(job_id)
-                    completed = True
+                    if adapter is not None and adapter.requires_submission:
+                        await self.jobs.update(
+                            job_id,
+                            result=current_result.final_message,
+                            error=None,
+                        )
+                        await self._transition(job_id, JobState.WAITING_AGENT)
+                        finalize_project_os = True
+                    else:
+                        await self.jobs.update(
+                            job_id,
+                            result=current_result.final_message,
+                            error=None,
+                        )
+                        if self.sessions is not None:
+                            await self.sessions.mark(job_id, SessionStatus.IDLE)
+                        await self._transition(job_id, JobState.COMPLETED)
+                        if self.recovery is not None:
+                            await self.recovery.delete(job_id)
+                        completed = True
                 else:
                     job = await self.require(job_id)
                     await self.events.append(
@@ -811,6 +863,52 @@ class JobManager:
                         host_id=job.assigned_host,
                         payload={"instruction": steering},
                     )
+
+            if finalize_project_os:
+                current = await self.require(job_id)
+                project = self.projects.get(current.project_id)
+                assert current.assigned_host is not None
+                adapter = self.project_adapters.get(project)
+                try:
+                    outcome = await adapter.submit_result(
+                        job_id=job_id,
+                        project=project,
+                        host_id=current.assigned_host,
+                        final_message=current_result.final_message,
+                    )
+                except Exception as exc:
+                    await self.jobs.update(job_id, error=f"Project OS submit failed: {exc}")
+                    if self.sessions is not None:
+                        await self.sessions.mark(job_id, SessionStatus.FAILED)
+                    await self._transition(job_id, JobState.FAILED)
+                    if self.recovery is not None:
+                        await self.recovery.delete(job_id)
+                    await self._notify(
+                        job_id,
+                        f"❌ 구현은 끝났지만 Project OS 결과 제출에 실패했습니다: {exc}",
+                    )
+                    return
+
+                if self.sessions is not None:
+                    await self.sessions.mark(job_id, SessionStatus.IDLE)
+                await self._transition(job_id, JobState.COMPLETED)
+                if self.recovery is not None:
+                    await self.recovery.delete(job_id)
+                work = await self.project_work_for(job_id)
+                task_text = f"\nTask: {work.task_id}" if work and work.task_id else ""
+                next_text = (
+                    f"\nNext Task: {outcome.next_task_id}"
+                    if outcome.next_task_id
+                    else "\nNext Task: -"
+                )
+                await self._notify(
+                    job_id,
+                    "✅ Project OS 구현 handoff를 제출했습니다."
+                    + task_text
+                    + next_text
+                    + _optional_detail(current_result.final_message),
+                )
+                return
 
             if completed:
                 await self._notify(
