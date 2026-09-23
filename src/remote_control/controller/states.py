@@ -29,6 +29,7 @@ _ALLOWED_TRANSITIONS: dict[JobState, set[JobState]] = {
         JobState.CANCELLED,
         JobState.WAITING_HOST,
         JobState.WAITING_QUOTA,
+        JobState.COMPLETED,
     },
     JobState.RUNNING: {
         JobState.WAITING_AGENT,
@@ -45,6 +46,7 @@ _ALLOWED_TRANSITIONS: dict[JobState, set[JobState]] = {
         JobState.WAITING_HOST,
         JobState.FAILED,
         JobState.CANCELLED,
+        JobState.COMPLETED,
     },
     JobState.WAITING_HUMAN: {
         JobState.RUNNING,
