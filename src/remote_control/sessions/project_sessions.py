@@ -141,8 +141,30 @@ class ProjectSessionRegistry:
         async with self._locks[key]:
             current = await self.sessions.active_for(project_id, owner_user_id)
             if current is None:
-                raise KeyError(
-                    f"active project session not found: {project_id}/{owner_user_id}"
+                now = datetime.now(timezone.utc)
+                current = await self.sessions.add(
+                    ProjectSessionRecord(
+                        id=_project_session_id(),
+                        project_id=project_id,
+                        owner_user_id=owner_user_id,
+                        external_session_id=external_session_id,
+                        host_id=host_id,
+                        status=ProjectSessionStatus.ACTIVE.value,
+                        last_job_id=job_id,
+                        locked_by_job_id=job_id,
+                        last_active_at=now,
+                    )
+                )
+                await self.events.append(
+                    "PROJECT_SESSION_MIGRATED",
+                    job_id=job_id,
+                    project_id=project_id,
+                    host_id=host_id,
+                    payload={
+                        "project_session_id": current.id,
+                        "external_session_id": external_session_id,
+                        "owner_user_id": owner_user_id,
+                    },
                 )
             if current.locked_by_job_id not in {None, job_id}:
                 raise ProjectSessionBusyError(
