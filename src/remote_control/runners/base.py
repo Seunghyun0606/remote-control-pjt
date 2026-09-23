@@ -50,4 +50,21 @@ class AgentRunner(ABC):
         host_id: str | None = None,
         on_event: RunEventCallback | None = None,
     ) -> RunHandle:
-        raise NotImplementedError("session resume is implemented in Phase R2")
+        raise NotImplementedError("session resume is not supported by this runner")
+
+    async def steer(
+        self,
+        *,
+        session_id: str,
+        instruction: str,
+        working_directory: Path,
+        host_id: str | None = None,
+        on_event: RunEventCallback | None = None,
+    ) -> RunHandle:
+        return await self.resume(
+            session_id=session_id,
+            instruction=instruction,
+            working_directory=working_directory,
+            host_id=host_id,
+            on_event=on_event,
+        )
