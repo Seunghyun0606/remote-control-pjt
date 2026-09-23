@@ -46,12 +46,16 @@ async def test_plain_text_steers_single_running_job(project_registry, database):
     )
     assert "추가 지시 접수" in steer
 
-    for _ in range(100):
-        current = await manager.require((await manager.list(limit=1))[0].id)
+    job_id = (await manager.list(limit=1))[0].id
+    for _ in range(500):
+        current = await manager.require(job_id)
         if current.state == "COMPLETED":
-            await manager.wait_until_idle(current.id)
             break
         await asyncio.sleep(0.01)
+
+    current = await manager.require(job_id)
+    assert current.state == "COMPLETED"
+    await manager.wait_until_idle(job_id)
 
     assert runner.resumed
     assert "backend" in runner.resumed[0]["instruction"]
