@@ -22,6 +22,10 @@ class _BaseSettings(BaseSettings):
         default="never",
         validation_alias="CODEX_APPROVAL_POLICY",
     )
+    codex_home: str | None = Field(
+        default=None,
+        validation_alias="CODEX_HOME",
+    )
     projectctl_executable: str = Field(
         default="projectctl",
         validation_alias="PROJECTCTL_EXECUTABLE",
