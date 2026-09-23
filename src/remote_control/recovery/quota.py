@@ -31,14 +31,25 @@ def detect_quota_text(text: str | None) -> QuotaSignal | None:
 
 
 def detect_quota_event(event: dict[str, Any]) -> QuotaSignal | None:
+    event_type = str(event.get("type") or event.get("event_type") or "").casefold()
+    typed_limit = "rate_limit" in event_type or "usage_limit" in event_type
+    error_like = (
+        typed_limit
+        or event_type == "raw_output"
+        or "error" in event_type
+        or "failed" in event_type
+        or "failure" in event_type
+    )
+    if not error_like:
+        return None
+
     reset_at = _extract_reset(event)
     for text in _text_values(event):
         signal = detect_quota_text(text)
         if signal is not None:
             return QuotaSignal(message=signal.message, reset_at=reset_at)
 
-    event_type = str(event.get("type") or event.get("event_type") or "").casefold()
-    if "rate_limit" in event_type or "usage_limit" in event_type:
+    if typed_limit:
         return QuotaSignal(
             message=str(event.get("message") or event_type),
             reset_at=reset_at,

@@ -226,6 +226,19 @@ def test_quota_retry_backoff_and_structured_reset():
     assert signal is not None
     assert signal.reset_at == reset
 
+    assert (
+        detect_quota_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "text": "External API returned rate limit exceeded",
+                },
+            }
+        )
+        is None
+    )
+
 
 @pytest.mark.asyncio
 async def test_quota_wait_retries_and_preserves_attempt_count(

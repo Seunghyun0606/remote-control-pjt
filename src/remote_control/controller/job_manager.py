@@ -1049,7 +1049,11 @@ class JobManager:
         quota = (
             QuotaSignal(result.final_message or "quota unavailable", result.retry_at)
             if result.retry_kind == "quota"
-            else detect_quota_text(result.final_message)
+            else (
+                detect_quota_text(result.final_message)
+                if result.returncode != 0
+                else None
+            )
         )
         if quota is not None:
             await self._enter_quota_wait(job_id, quota)
