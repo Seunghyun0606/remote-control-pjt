@@ -4,7 +4,7 @@ import logging
 from typing import Any
 
 from slack_bolt.app.async_app import AsyncApp
-from slack_bolt.adapter.socket_mode.websockets import SocketModeHandler
+from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
 from remote_control.approvals.registry import ApprovalPrompt
 from remote_control.controller.command_router import CommandParseError
@@ -33,7 +33,7 @@ class SlackProvider(MessagingProvider):
         self.allowed_user_ids = allowed_user_ids
         self.controller = controller
         self.app = AsyncApp(token=bot_token)
-        self.handler = SocketModeHandler(self.app, app_token)
+        self.handler = AsyncSocketModeHandler(self.app, app_token)
         self._dm_channels: dict[str, str] = {}
 
         self.app.event("message")(self._handle_message)
