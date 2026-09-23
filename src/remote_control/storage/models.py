@@ -136,3 +136,31 @@ class ProjectWorkRecord(Base):
         default=utcnow,
         onupdate=utcnow,
     )
+
+
+class TelegramProjectTopicRecord(Base):
+    __tablename__ = "telegram_project_topics"
+
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    chat_id: Mapped[str] = mapped_column(String(128), index=True)
+    message_thread_id: Mapped[int] = mapped_column(Integer, index=True)
+    topic_name: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
+class TelegramMessageBindingRecord(Base):
+    __tablename__ = "telegram_message_bindings"
+
+    chat_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    message_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    message_thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    user_id: Mapped[str] = mapped_column(String(128), index=True)
+    project_id: Mapped[str] = mapped_column(String(128), index=True)
+    job_id: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
