@@ -689,7 +689,19 @@ class JobManager:
                 await self.sessions.mark(job_id, SessionStatus.WAITING_HUMAN)
 
         await self._notify_approval(job_id, self.approvals.prompt(approval))
+        asyncio.create_task(
+            self._stop_active_turn_for_human_gate(job_id),
+            name=f"human-gate-stop:{job_id}",
+        )
         return approval
+
+    async def _stop_active_turn_for_human_gate(self, job_id: str) -> None:
+        for _ in range(10):
+            handle = self._handles.get(job_id)
+            if handle is not None:
+                await handle.cancel()
+                return
+            await asyncio.sleep(0)
 
     async def _record_session(self, job_id: str, external_session_id: str) -> None:
         job = await self.require(job_id)
