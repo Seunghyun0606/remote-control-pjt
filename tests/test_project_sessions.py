@@ -10,6 +10,7 @@ from remote_control.sessions.project_sessions import (
     ProjectSessionRegistry,
 )
 from remote_control.sessions.registry import SessionRegistry
+from remote_control.storage.models import JobRecord
 from remote_control.storage.repositories import (
     EventRepository,
     JobRepository,
@@ -195,3 +196,64 @@ async def test_project_sessions_are_separate_by_user(project_registry, database)
     assert session_one is not None
     assert session_two is not None
     assert session_one.id != session_two.id
+
+
+
+@pytest.mark.asyncio
+async def test_legacy_completed_job_seeds_first_project_session(project_registry, database):
+    events, sessions, project_sessions = _registries(database)
+    jobs = JobRepository(database)
+    await jobs.add(
+        JobRecord(
+            id="JOB-LEGACY",
+            project_id="demo",
+            requested_by_channel="telegram",
+            requested_by_user="100",
+            requested_host="lightsail-main",
+            assigned_host="lightsail-main",
+            instruction="old work",
+            state="COMPLETED",
+            external_session_id="legacy-thread",
+        )
+    )
+    runner = FakeAgentRunner(delay=0.01, resume_session_id="legacy-thread")
+    manager = JobManager(
+        projects=project_registry,
+        jobs=jobs,
+        events=events,
+        runner=runner,
+        local_host_id="lightsail-main",
+        sessions=sessions,
+        project_sessions=project_sessions,
+    )
+
+    job = await manager.create(
+        project_id="demo",
+        instruction="continue old context",
+        requested_by_channel="telegram",
+        requested_by_user="100",
+    )
+    await manager.wait_until_idle(job.id)
+
+    assert len(runner.started) == 0
+    assert runner.resumed[0]["session_id"] == "legacy-thread"
+    persistent = await project_sessions.active_for("demo", "100")
+    assert persistent is not None
+    assert persistent.external_session_id == "legacy-thread"
+
+
+@pytest.mark.asyncio
+async def test_inflight_legacy_job_lazily_creates_project_session(database):
+    events, _, project_sessions = _registries(database)
+
+    bound = await project_sessions.bind_for_job(
+        project_id="demo",
+        owner_user_id="100",
+        job_id="JOB-INFLIGHT",
+        external_session_id="thread-inflight",
+        host_id="lightsail-main",
+    )
+
+    assert bound.status == "ACTIVE"
+    assert bound.locked_by_job_id == "JOB-INFLIGHT"
+    assert bound.external_session_id == "thread-inflight"
