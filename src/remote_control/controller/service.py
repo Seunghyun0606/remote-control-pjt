@@ -5,6 +5,7 @@ from remote_control.controller.job_manager import JobManager
 from remote_control.controller.states import JobState
 from remote_control.hosts.registry import HostRegistry
 from remote_control.projects.registry import ProjectRegistry
+from remote_control.storage.models import RecoveryRecord
 
 
 DEFAULT_INSTRUCTION = (
@@ -103,10 +104,14 @@ class ControllerService:
             active = await self.jobs.active_for_user(user_id)
             if not active:
                 return "현재 active Job이 없습니다."
-            return "\n".join(
-                f"{job.id} {job.project_id} {job.state} host={job.assigned_host or '-'}"
-                for job in active
-            )
+            lines = []
+            for job in active:
+                recovery = await self.jobs.recovery_for(job.id)
+                lines.append(
+                    f"{job.id} {job.project_id} {job.state} "
+                    f"host={job.assigned_host or '-'}{_recovery_suffix(recovery)}"
+                )
+            return "\n".join(lines)
         if command.intent == Intent.RUN_PROJECT:
             assert command.project_id is not None
             job = await self.jobs.create(
@@ -126,20 +131,25 @@ class ControllerService:
             jobs = await self.jobs.list(limit=20)
             if not jobs:
                 return "Job이 없습니다."
-            return "\n".join(
-                f"{job.id} {job.project_id} {job.state} host={job.assigned_host or '-'}"
-                for job in jobs
-            )
+            lines = []
+            for job in jobs:
+                recovery = await self.jobs.recovery_for(job.id)
+                lines.append(
+                    f"{job.id} {job.project_id} {job.state} "
+                    f"host={job.assigned_host or '-'}{_recovery_suffix(recovery)}"
+                )
+            return "\n".join(lines)
         if command.intent == Intent.JOB:
             assert command.job_id is not None
             job = await self.jobs.require(command.job_id)
             work = await self.jobs.project_work_for(job.id)
+            recovery = await self.jobs.recovery_for(job.id)
             task_line = f"\nTask: {work.task_id}" if work and work.task_id else ""
             adapter_line = f"\nAdapter: {work.adapter}" if work else ""
             return (
                 f"{job.id}\nProject: {job.project_id}\nState: {job.state}\n"
                 f"Host: {job.assigned_host or '-'}\nSession: {job.external_session_id or '-'}"
-                f"{adapter_line}{task_line}"
+                f"{adapter_line}{task_line}{_recovery_detail(recovery)}"
             )
         if command.intent == Intent.PAUSE:
             job = await self.jobs.select_for_user(
@@ -186,6 +196,27 @@ class ControllerService:
             return f"⏹ {stopped.id} 중지됨 ({stopped.state})"
         raise RuntimeError(f"unsupported intent: {command.intent}")
 
+
+
+def _recovery_suffix(record: RecoveryRecord | None) -> str:
+    if record is None:
+        return ""
+    parts = [f" recovery={record.kind}", f"attempt={record.attempt_count}"]
+    if record.next_retry_at is not None:
+        parts.append(f"retry_at={record.next_retry_at.isoformat()}")
+    return " " + " ".join(parts)
+
+
+def _recovery_detail(record: RecoveryRecord | None) -> str:
+    if record is None:
+        return ""
+    next_retry = record.next_retry_at.isoformat() if record.next_retry_at else "-"
+    return (
+        f"\nRecovery: {record.kind}"
+        f"\nRecovery mode: {record.mode}"
+        f"\nRetry attempt: {record.attempt_count}"
+        f"\nNext retry: {next_retry}"
+    )
 
 def _approval_response_text(
     approval_id: str,
