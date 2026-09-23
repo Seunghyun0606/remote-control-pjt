@@ -14,6 +14,7 @@ from remote_control.controller.service import ControllerService
 from remote_control.hosts.registry import HostRegistry
 from remote_control.messaging.telegram import TelegramProvider
 from remote_control.projects.registry import ProjectRegistry
+from remote_control.recovery.scheduler import RecoveryScheduler
 from remote_control.runners.codex import CodexRunner
 from remote_control.runners.hybrid import HybridAgentRunner
 from remote_control.sessions.registry import SessionRegistry
@@ -24,6 +25,7 @@ from remote_control.storage.repositories import (
     EventRepository,
     HostRepository,
     JobRepository,
+    RecoveryRepository,
     SessionRepository,
 )
 from remote_control.transport.runner_ws import RunnerGateway
@@ -37,7 +39,7 @@ app.add_typer(controller_app, name="controller")
 def controller_start(
     no_telegram: bool = typer.Option(False, "--no-telegram", help="Do not start Telegram polling"),
 ) -> None:
-    """Start the R3 controller."""
+    """Start the R4 controller."""
     asyncio.run(_run_controller(no_telegram=no_telegram))
 
 
@@ -74,6 +76,7 @@ async def _run_controller(*, no_telegram: bool) -> None:
         approvals=ApprovalRepository(db),
         events=events,
     )
+    recovery = RecoveryRepository(db)
 
     local_runner = CodexRunner(
         executable=settings.codex_executable,
@@ -95,9 +98,20 @@ async def _run_controller(*, no_telegram: bool) -> None:
         hosts=hosts,
         sessions=sessions,
         approvals=approvals,
+        recovery=recovery,
         progress_interval_seconds=settings.progress_interval_seconds,
+        quota_retry_initial_seconds=settings.quota_retry_initial_seconds,
+        quota_retry_max_seconds=settings.quota_retry_max_seconds,
+        restart_grace_seconds=settings.restart_grace_seconds,
     )
     controller = ControllerService(projects=projects, jobs=manager, hosts=hosts)
+    scheduler = RecoveryScheduler(
+        jobs=manager,
+        hosts=hosts,
+        interval_seconds=settings.scheduler_interval_seconds,
+    )
+
+    await manager.reconcile_startup()
 
     telegram: TelegramProvider | None = None
     if not no_telegram:
@@ -122,10 +136,12 @@ async def _run_controller(*, no_telegram: bool) -> None:
         log_level="info",
     )
     server = uvicorn.Server(config)
+    await scheduler.start()
 
     try:
         await server.serve()
     finally:
+        await scheduler.stop()
         if telegram is not None:
             await telegram.stop()
         await db.close()
