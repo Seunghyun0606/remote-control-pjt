@@ -14,6 +14,7 @@ from remote_control.controller.service import ControllerService
 from remote_control.hosts.registry import HostRegistry
 from remote_control.messaging.telegram import TelegramProvider
 from remote_control.projects.adapters import ProjectAdapterRegistry
+from remote_control.projects.config import add_project
 from remote_control.projects.operations import (
     HybridProjectOperationExecutor,
     LocalProjectOperationExecutor,
@@ -38,7 +39,43 @@ from remote_control.transport.runner_ws import RunnerGateway
 
 app = typer.Typer(help="Remote Agent Control")
 controller_app = typer.Typer(help="Controller commands")
+project_app = typer.Typer(help="Project registry commands")
 app.add_typer(controller_app, name="controller")
+app.add_typer(project_app, name="project")
+
+
+
+
+@project_app.command("add")
+def project_add(
+    project_id: str = typer.Option(..., "--id", help="Project id"),
+    path: str = typer.Option(..., "--path", help="Working directory on the selected host"),
+    adapter: str = typer.Option("generic_git", "--adapter", help="generic_git or project_os"),
+    host: str | None = typer.Option(None, "--host", help="Execution host id"),
+    name: str | None = typer.Option(None, "--name", help="Display name"),
+    role: str = typer.Option("developer", "--role", help="Project OS role"),
+    actor: str = typer.Option(
+        "remote-control-codex",
+        "--actor",
+        help="Project OS handoff actor",
+    ),
+) -> None:
+    """Register a project in the Remote Control registry."""
+    settings = Settings()
+    project = add_project(
+        settings.config_path,
+        project_id=project_id,
+        name=name,
+        adapter=adapter,
+        host_id=host or settings.host_id,
+        working_directory=path,
+        role=role,
+        actor=actor,
+    )
+    typer.echo(
+        f"registered {project.id} adapter={project.adapter} "
+        f"host={project.default_host} path={project.path_for(project.default_host or '')}"
+    )
 
 
 @controller_app.command("start")
