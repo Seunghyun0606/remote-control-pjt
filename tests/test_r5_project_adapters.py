@@ -14,7 +14,13 @@ from remote_control.projects.models import ProjectDefinition, RepositoryConfig
 from remote_control.projects.operations import LocalProjectOperationExecutor, ProjectOperationError
 from remote_control.projects.registry import ProjectRegistry
 from remote_control.runners.fake import FakeAgentRunner
-from remote_control.storage.repositories import EventRepository, JobRepository, ProjectWorkRepository
+from remote_control.storage.models import JobRecord, ProjectWorkRecord
+from remote_control.storage.repositories import (
+    EventRepository,
+    JobRepository,
+    ProjectWorkRepository,
+    RecoveryRepository,
+)
 from remote_control.transport.protocol import Envelope, message
 from remote_control.transport.runner_ws import RunnerGateway
 
@@ -25,9 +31,11 @@ class FakeProjectOperations:
         *,
         next_task: dict[str, Any] | None = None,
         fail_submit: bool = False,
+        current_tasks: list[str] | None = None,
     ) -> None:
         self.next_task = next_task
         self.fail_submit = fail_submit
+        self.current_tasks = current_tasks or []
         self.calls: list[dict[str, Any]] = []
 
     async def execute(
@@ -60,6 +68,7 @@ class FakeProjectOperations:
                 "project_id": project_id,
                 "project_status": "active",
                 "current_milestone": "M1",
+                "current_tasks": list(self.current_tasks),
             }
         if operation == "project_os_next":
             return {"task": self.next_task}
@@ -246,6 +255,114 @@ async def test_project_os_adapter_refuses_cross_host_continuation(tmp_path, data
             host_id="desktop-main",
             base_instruction="Resume elsewhere.",
         )
+
+
+
+
+@pytest.mark.asyncio
+async def test_project_os_adapter_reconciles_claim_without_duplicate_command(
+    tmp_path,
+    database,
+):
+    operations = FakeProjectOperations(
+        next_task={"id": "TASK-043"},
+        current_tasks=["TASK-043"],
+    )
+    events = EventRepository(database)
+    work = ProjectWorkRepository(database)
+    await work.add(
+        ProjectWorkRecord(
+            job_id="JOB-CLAIM-RECOVERY",
+            adapter="project_os",
+            host_id="lightsail-main",
+            task_id="TASK-043",
+            role="developer",
+            status="SELECTED",
+        )
+    )
+    adapter = ProjectOSAdapter(operations=operations, work=work, events=events)
+    project = project_os_registry(tmp_path).get("demo")
+
+    prepared = await adapter.prepare(
+        job_id="JOB-CLAIM-RECOVERY",
+        project=project,
+        host_id="lightsail-main",
+        base_instruction="Resume after restart.",
+    )
+
+    assert prepared.task_id == "TASK-043"
+    assert "project_os_claim" not in [
+        call["operation"] for call in operations.calls
+    ]
+    record = await work.get("JOB-CLAIM-RECOVERY")
+    assert record is not None
+    assert record.status == "PREPARED"
+
+
+@pytest.mark.asyncio
+async def test_restart_during_project_submit_recovers_finalization_only(
+    tmp_path,
+    database,
+):
+    operations = FakeProjectOperations(next_task=None)
+    events = EventRepository(database)
+    work = ProjectWorkRepository(database)
+    recovery = RecoveryRepository(database)
+    runner = FakeAgentRunner()
+    manager = JobManager(
+        projects=project_os_registry(tmp_path),
+        jobs=JobRepository(database),
+        events=events,
+        runner=runner,
+        local_host_id="lightsail-main",
+        recovery=recovery,
+        project_adapters=ProjectAdapterRegistry(
+            operations=operations,
+            work=work,
+            events=events,
+        ),
+        project_work=work,
+    )
+    job = JobRecord(
+        id="JOB-FINALIZE-RECOVERY",
+        project_id="demo",
+        requested_by_channel="test",
+        requested_by_user="u1",
+        requested_host="lightsail-main",
+        assigned_host="lightsail-main",
+        instruction="Already implemented.",
+        state="WAITING_AGENT",
+        result="implementation complete",
+    )
+    await manager.jobs.add(job)
+    await work.add(
+        ProjectWorkRecord(
+            job_id=job.id,
+            adapter="project_os",
+            host_id="lightsail-main",
+            task_id="TASK-043",
+            role="developer",
+            status="PREPARED",
+        )
+    )
+
+    assert await manager.reconcile_startup() == 1
+    assert (await manager.require(job.id)).state == "WAITING_HOST"
+    recovery_record = await recovery.get(job.id)
+    assert recovery_record is not None
+    assert recovery_record.mode == "FINALIZE"
+
+    await manager.recover_due()
+    assert await wait_for_terminal(manager, job.id) == "COMPLETED"
+    assert runner.started == []
+    assert runner.resumed == []
+
+    record = await work.get(job.id)
+    assert record is not None
+    assert record.status == "SUBMITTED"
+    assert "project_os_submit" in [
+        call["operation"] for call in operations.calls
+    ]
 
 
 @pytest.mark.asyncio
