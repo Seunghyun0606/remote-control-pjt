@@ -2,16 +2,25 @@
 
 ## Responsibility split
 
-Remote Agent Control stores runtime state only: Jobs, Host state, agent process/session metadata and runtime events. Project/product state remains outside this control plane.
+Remote Agent Control stores runtime state only:
 
-## R0 + R1
+- Jobs
+- Hosts
+- Codex Sessions
+- Runtime Events
+- Feedback delivery state
+
+Project/product state remains outside this control plane.
+
+## R0 + R1 + R2
 
 ```text
 Telegram
   |
 ControllerService -> CommandRouter
   |
-  +----> HostRegistry / HostRouter ----> SQLite
+  +----> HostRegistry / HostRouter
+  +----> SessionRegistry
   |
 JobManager
   |
@@ -23,22 +32,60 @@ CodexRunner             Desktop Runner
 Codex CLI               Codex CLI
 ```
 
-The Telegram layer never invokes a shell or Codex directly. The Desktop Runner never exposes an inbound listener; it creates the persistent outbound connection to the Controller.
+## Session lifecycle
 
-## Local vs remote execution
+```text
+new Job
+  ↓
+codex exec
+  ↓
+thread.started
+  ↓
+SessionRegistry
 
-`HybridAgentRunner` preserves one Controller-side `AgentRunner` abstraction.
+pause
+  ↓
+process stop + session preserved
+  ↓
+PAUSED
 
-- assigned host == Controller local host -> `CodexRunner`
-- other connected host -> `RunnerGateway` -> WebSocket Runner
+resume / steering
+  ↓
+codex exec resume <external_session_id>
+  ↓
+same thread preferred
+  ↓ fail
+repository state reload
+  ↓
+new Codex session
+```
 
-## Runtime persistence
+Codex session is an optimization, not Source of Truth.
 
-SQLite contains jobs, events and hosts. Host heartbeat is runtime state and is not written into a project repository or Project OS state.
+## Steering
+
+R2 uses safe turn-boundary steering.
+
+```text
+Messenger instruction
+  ↓
+STEERING_QUEUED event
+  ↓
+current Codex turn completes
+  ↓
+JOB_STEER
+  ↓
+same session resume
+```
+
+This avoids terminating Codex while it may be writing project files.
+
+## Feedback
+
+Raw agent events are stored as runtime events. Messenger receives only selected feedback. Progress is throttled by configuration; important/final events are not treated as raw log streaming.
 
 ## Planned phases
 
-- R2: Codex session registry, resume, steering and throttled progress
 - R3: Human Gate approvals
 - R4: scheduler, quota/host waits and restart reconciliation
 - R5: Project OS adapter through `projectctl`

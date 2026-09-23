@@ -13,13 +13,21 @@ class RunRequest(BaseModel):
     requested_by: str = "api"
 
 
+class ResumeRequest(BaseModel):
+    instruction: str | None = None
+
+
+class SteerRequest(BaseModel):
+    instruction: str
+
+
 def create_app(
     controller: ControllerService,
     *,
     runner_gateway: RunnerGateway | None = None,
     runner_token: str = "",
 ) -> FastAPI:
-    app = FastAPI(title="Remote Agent Control", version="0.2.0")
+    app = FastAPI(title="Remote Agent Control", version="0.3.0")
 
     @app.get("/health")
     async def health() -> dict:
@@ -43,6 +51,25 @@ def create_app(
                 "last_heartbeat": host.last_heartbeat,
             }
             for host in await controller.hosts.list()
+        ]
+
+    @app.get("/sessions")
+    async def sessions() -> list[dict]:
+        if controller.jobs.sessions is None:
+            return []
+        return [
+            {
+                "id": session.id,
+                "job_id": session.job_id,
+                "project_id": session.project_id,
+                "host_id": session.host_id,
+                "agent_type": session.agent_type,
+                "external_session_id": session.external_session_id,
+                "status": session.status,
+                "created_at": session.created_at,
+                "last_active_at": session.last_active_at,
+            }
+            for session in await controller.jobs.sessions.list()
         ]
 
     @app.get("/jobs")
@@ -73,6 +100,31 @@ def create_app(
         except (KeyError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return _job_view(record)
+
+    @app.post("/jobs/{job_id}/pause")
+    async def pause(job_id: str) -> dict:
+        try:
+            return _job_view(await controller.jobs.pause(job_id))
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/jobs/{job_id}/resume", status_code=202)
+    async def resume(job_id: str, request: ResumeRequest) -> dict:
+        try:
+            if request.instruction:
+                record = await controller.jobs.resume(job_id, instruction=request.instruction)
+            else:
+                record = await controller.jobs.resume(job_id)
+            return _job_view(record)
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/jobs/{job_id}/steer", status_code=202)
+    async def steer(job_id: str, request: SteerRequest) -> dict:
+        try:
+            return _job_view(await controller.jobs.steer(job_id, request.instruction))
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/jobs/{job_id}/cancel")
     async def cancel(job_id: str) -> dict:

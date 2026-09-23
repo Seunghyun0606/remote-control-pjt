@@ -63,3 +63,17 @@ class HostRecord(Base):
         default=utcnow,
         onupdate=utcnow,
     )
+
+
+class SessionRecord(Base):
+    __tablename__ = "sessions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    project_id: Mapped[str] = mapped_column(String(128), index=True)
+    host_id: Mapped[str] = mapped_column(String(128), index=True)
+    agent_type: Mapped[str] = mapped_column(String(64), default="codex")
+    external_session_id: Mapped[str] = mapped_column(String(255), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_active_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

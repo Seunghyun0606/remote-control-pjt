@@ -14,6 +14,9 @@ class Intent(StrEnum):
     JOBS = "JOBS"
     JOB = "JOB"
     STOP = "STOP"
+    PAUSE = "PAUSE"
+    RESUME = "RESUME"
+    STEER = "STEER"
     HOSTS = "HOSTS"
     HELP = "HELP"
 
@@ -24,6 +27,7 @@ class Command:
     project_id: str | None = None
     host: str = "auto"
     job_id: str | None = None
+    instruction: str | None = None
 
 
 class CommandParseError(ValueError):
@@ -62,11 +66,17 @@ class CommandRouter:
         if command == "/hosts":
             return Command(Intent.HOSTS)
         if command == "/stop":
-            return Command(Intent.STOP)
+            return Command(Intent.STOP, job_id=_optional_job(args, "/stop"))
+        if command == "/pause":
+            return Command(Intent.PAUSE, job_id=_optional_job(args, "/pause"))
+        if command == "/resume":
+            return Command(Intent.RESUME, job_id=_optional_job(args, "/resume"))
         if command == "/job":
             if len(args) != 1:
                 raise CommandParseError("usage: /job <job-id>")
             return Command(Intent.JOB, job_id=args[0])
+        if command in {"/steer", "/send"}:
+            return self._parse_steer(args)
         if command == "/run":
             if not args:
                 raise CommandParseError("usage: /run <project> [--host <host-id>]")
@@ -84,9 +94,32 @@ class CommandRouter:
 
         raise CommandParseError(f"unknown command: {command}")
 
+    def _parse_steer(self, args: list[str]) -> Command:
+        job_id: str | None = None
+        remaining: list[str] = []
+        index = 0
+        while index < len(args):
+            if args[index] == "--job":
+                if index + 1 >= len(args):
+                    raise CommandParseError("usage: /steer [--job <job-id>] <instruction>")
+                job_id = args[index + 1]
+                index += 2
+                continue
+            remaining.append(args[index])
+            index += 1
+        instruction = " ".join(remaining).strip()
+        if not instruction:
+            raise CommandParseError("usage: /steer [--job <job-id>] <instruction>")
+        return Command(Intent.STEER, job_id=job_id, instruction=instruction)
+
     def _parse_natural(self, text: str) -> Command:
+        normalized = text.casefold().strip()
+        if normalized in {"일시정지", "잠깐 멈춰", "pause"}:
+            return Command(Intent.PAUSE)
+        if normalized in {"재개", "다시 시작", "resume"}:
+            return Command(Intent.RESUME)
+
         project = self.projects.resolve_name(text)
-        normalized = text.casefold()
         run_words = ("진행", "계속", "다음 작업", "실행", "continue", "next", "run")
         if project is not None and any(word in normalized for word in run_words):
             host = "auto"
@@ -97,6 +130,10 @@ class CommandRouter:
                     break
             return Command(Intent.RUN_PROJECT, project_id=project.id, host=host)
 
-        raise CommandParseError(
-            "자연어 명령을 안전하게 해석하지 못했습니다. /run <project> 형식을 사용해 주세요."
-        )
+        return Command(Intent.STEER, instruction=text)
+
+
+def _optional_job(args: list[str], command: str) -> str | None:
+    if len(args) > 1:
+        raise CommandParseError(f"usage: {command} [job-id]")
+    return args[0] if args else None
