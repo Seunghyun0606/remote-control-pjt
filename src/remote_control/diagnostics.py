@@ -76,12 +76,17 @@ def collect_diagnostics(
                 )
             )
 
-    if not settings.home_path and settings.db_url.startswith("sqlite"):
+    home_is_absolute = bool(
+        settings.home_path
+        and Path(settings.home_path).expanduser().is_absolute()
+    )
+    if settings.db_url.startswith("sqlite") and not home_is_absolute:
         items.append(
             DiagnosticItem(
                 "Runtime Home",
                 False,
-                "REMOTE_CONTROL_HOME is unset; relative DB/config paths depend on the launch directory",
+                "Set REMOTE_CONTROL_HOME to an absolute path so relative DB/config paths "
+                "do not depend on the launch directory",
             )
         )
     else:
