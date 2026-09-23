@@ -76,7 +76,7 @@ def collect_diagnostics(
                 )
             )
 
-    if settings.home_path is None and settings.db_url.startswith("sqlite"):
+    if not settings.home_path and settings.db_url.startswith("sqlite"):
         items.append(
             DiagnosticItem(
                 "Runtime Home",
