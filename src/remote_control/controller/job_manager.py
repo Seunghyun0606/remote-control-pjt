@@ -202,8 +202,17 @@ class JobManager:
             },
         )
 
+        effective_host = requested_host
+        if (
+            requested_host == "auto"
+            and project_session is not None
+            and project_session.external_session_id
+            and project_session.host_id
+        ):
+            effective_host = project_session.host_id
+
         try:
-            assigned_host = await self._resolve_host(project_id, requested_host)
+            assigned_host = await self._resolve_host(project_id, effective_host)
         except HostUnavailable as exc:
             await self._enter_host_wait(
                 job.id,
