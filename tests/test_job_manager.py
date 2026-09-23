@@ -29,6 +29,7 @@ async def test_job_completes(project_registry, database):
     for _ in range(100):
         current = await manager.require(job.id)
         if current.state == "COMPLETED":
+            await manager.wait_until_idle(job.id)
             break
         await asyncio.sleep(0.01)
 
@@ -78,4 +79,5 @@ async def test_cancel_running_job(project_registry, database):
         await asyncio.sleep(0.01)
 
     cancelled = await manager.cancel(job.id)
+    await manager.wait_until_idle(job.id)
     assert cancelled.state == "CANCELLED"

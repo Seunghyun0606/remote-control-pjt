@@ -114,6 +114,8 @@ async def wait_for_state(
     for _ in range(attempts):
         job = await manager.require(job_id)
         if job.state == expected:
+            if expected in {"COMPLETED", "FAILED", "CANCELLED"}:
+                await manager.wait_until_idle(job_id)
             return
         await asyncio.sleep(0.01)
     current = await manager.require(job_id)
@@ -239,3 +241,4 @@ async def test_approval_response_rejects_wrong_user(project_registry, database):
         )
 
     await manager.cancel(job.id)
+    await manager.wait_until_idle(job.id)

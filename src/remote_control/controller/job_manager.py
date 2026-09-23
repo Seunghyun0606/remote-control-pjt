@@ -197,6 +197,12 @@ class JobManager:
     async def list(self, limit: int = 50) -> list[JobRecord]:
         return await self.jobs.list(limit=limit)
 
+    async def wait_until_idle(self, job_id: str) -> None:
+        task = self._tasks.get(job_id)
+        if task is None or task.done() or task is asyncio.current_task():
+            return
+        await asyncio.shield(task)
+
     async def active_for_user(self, user_id: str) -> list[JobRecord]:
         return await self.jobs.list_active_for_user(user_id)
 
