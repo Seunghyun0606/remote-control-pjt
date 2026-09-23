@@ -8,6 +8,7 @@ from remote_control.approvals.registry import ApprovalPrompt
 from remote_control.controller.job_manager import JobManager
 from remote_control.human_gate import ApprovalOption
 from remote_control.messaging.slack import (
+    SlackProvider,
     build_approval_blocks,
     encode_approval_value,
     is_authorized,
@@ -136,3 +137,34 @@ async def test_job_notifications_are_isolated_by_messenger_channel(
     assert "slack result" in slack_messages[0][1]
 
     await asyncio.sleep(0)
+
+
+class _SlackResponseLike:
+    def __init__(self, data: dict) -> None:
+        self.data = data
+
+    def get(self, key: str, default=None):
+        return self.data.get(key, default)
+
+
+class _FakeSlackClient:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def conversations_open(self, *, users: str):
+        self.calls.append(users)
+        return _SlackResponseLike({"channel": {"id": "D123"}})
+
+
+@pytest.mark.asyncio
+async def test_slack_dm_channel_accepts_slack_response_like_object():
+    provider = SlackProvider.__new__(SlackProvider)
+    provider._dm_channels = {}
+    provider.app = type("FakeApp", (), {"client": _FakeSlackClient()})()
+
+    first = await provider._dm_channel("U123")
+    second = await provider._dm_channel("U123")
+
+    assert first == "D123"
+    assert second == "D123"
+    assert provider.app.client.calls == ["U123"]
