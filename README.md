@@ -2,7 +2,7 @@
 
 Telegram/Slack에서 **현재 머신의 Codex**를 실행하고, 진행 상태·추가 지시·Human Gate·사용량 제한 복구·Project OS 연동까지 관리하는 Runtime Control Plane입니다.
 
-현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.9.0**입니다.
+현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.10.0**입니다.
 
 ## 전체 개요
 
@@ -65,6 +65,50 @@ Remote Agent Control과 Project OS의 역할도 분리됩니다.
 - read-only Web Dashboard
 
 > Advanced: Controller와 다른 머신을 WebSocket Runner로 연결하는 remote-runner 기능도 유지됩니다. 하지만 **Desktop과 Lightsail을 각각 Messenger로 독립 제어**하려는 경우에는 필요하지 않습니다.
+
+---
+
+## Persistent Project Session
+
+v0.10부터 Remote Control이 Project별 Codex context의 소유자가 됩니다. Project OS에는 Codex session metadata를 저장하지 않습니다.
+
+```text
+Telegram Project Topic / API
+            ↓
+Remote Control Project Session
+            ↓
+Codex thread
+            ↓
+Job 1 → Job 2 → Job 3
+```
+
+같은 사용자와 같은 Project에서 Job이 완료된 뒤 다음 일반 메시지나 `/run`으로 새 Job을 만들면, 기존 Project Session의 `external_session_id`를 새 Job에 연결하고 `codex exec resume <thread-id>`를 사용합니다. 실행 중인 Job이 있는 동안에는 같은 Project Session을 다른 Job이 병렬로 점유할 수 없습니다.
+
+Project Topic에서 사용할 수 있는 명령:
+
+```text
+/session        현재 active Project Session
+/session new    현재 context를 닫고 다음 Job부터 새 Codex thread 사용
+/sessions       최근 Project Session 목록
+```
+
+Session rollover는 이전 Codex thread를 삭제하지 않습니다. Remote Control DB에서는 CLOSED history로 남기고 다음 Job이 새 thread를 생성합니다.
+
+Desktop에서 Telegram이 사용한 Codex thread를 직접 이어서 보려면 Remote Control과 interactive Codex가 같은 `CODEX_HOME`을 사용해야 합니다. `.env`에 예를 들어 다음처럼 지정합니다.
+
+```dotenv
+CODEX_HOME=C:/Users/<you>/.codex
+```
+
+그 후 `/session`에 표시되는 `Codex session` 값을 이용해 같은 머신에서 직접 resume할 수 있습니다.
+
+```powershell
+codex resume --include-non-interactive <codex-session-id>
+```
+
+Remote Runner를 사용하는 경우에도 해당 Runner 프로세스의 `CODEX_HOME`이 실제 Desktop Codex store와 같아야 합니다. Session은 host-local Codex storage에 의존하므로 기존 thread가 있는 Project는 가능한 한 같은 host에서 이어가는 것이 안전합니다.
+
+Resume 시 Codex가 요청한 thread와 다른 `thread.started` ID를 반환하면 Remote Control은 정상 resume으로 인정하지 않습니다. 해당 프로세스를 중단하고 기존 repository state를 다시 읽는 새 Codex thread로 한 번 복구합니다.
 
 ---
 
@@ -232,6 +276,8 @@ TELEGRAM_ALLOWED_USER_IDS=<YOUR_NUMERIC_TELEGRAM_USER_ID>
 CONTROLLER_RUNNER_TOKEN=<GENERATED_RANDOM_SECRET>
 
 CODEX_EXECUTABLE=codex
+# Desktop Codex와 같은 thread store를 공유하려면 동일한 home을 사용합니다.
+CODEX_HOME=C:/Users/<you>/.codex
 GIT_EXECUTABLE=git
 
 REMOTE_CONTROL_SLACK_ENABLED=false
