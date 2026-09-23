@@ -2,7 +2,7 @@
 
 `AgentRunner` is the Controller-side boundary for coding-agent execution.
 
-R2 runner operations:
+Runner operations:
 
 - `start`
 - `resume`
@@ -25,12 +25,14 @@ codex exec resume <SESSION_ID> --json ...
 
 Instructions are passed through stdin rather than shell interpolation.
 
+R3 appends a Remote Control Human Gate protocol to the agent instruction. If a human decision is required, the agent is asked to finish a safe step, emit the marker/JSON request, and stop the turn.
+
 ## HybridAgentRunner
 
 - Controller local Host → local `CodexRunner`
 - remote Host → `RunnerGateway`
 
-Resume and steering keep the same Host because Codex session files/authentication live on that execution Host.
+Resume, steering and Human Gate continuation keep the same Host because Codex session files/authentication live on that execution Host.
 
 ## Remote Runner
 
@@ -41,6 +43,14 @@ The standalone `remote-runner` accepts:
 - `JOB_STEER`
 - `JOB_CANCEL`
 
-It uses the Host's own Codex authentication and sends sanitized structured events back to the Controller.
+It can emit:
+
+- `JOB_PROGRESS`
+- `SESSION_STARTED`
+- `HUMAN_GATE`
+- `JOB_RESULT`
+- `JOB_ERROR`
+
+The Runner sanitizes the event before transport. Human Gate question/details/options are retained; broad raw agent output is not forwarded wholesale.
 
 Codex credentials are never transported through the WebSocket protocol.

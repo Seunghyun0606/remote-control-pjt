@@ -49,6 +49,7 @@ async def test_plain_text_steers_single_running_job(project_registry, database):
     for _ in range(100):
         current = await manager.require((await manager.list(limit=1))[0].id)
         if current.state == "COMPLETED":
+            await manager.wait_until_idle(current.id)
             break
         await asyncio.sleep(0.01)
 

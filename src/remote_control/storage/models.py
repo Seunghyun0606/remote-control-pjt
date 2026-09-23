@@ -77,3 +77,21 @@ class SessionRecord(Base):
     status: Mapped[str] = mapped_column(String(32), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_active_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ApprovalRecord(Base):
+    __tablename__ = "approvals"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(64), index=True)
+    requested_by_user: Mapped[str] = mapped_column(String(128), index=True)
+    approval_type: Mapped[str] = mapped_column(String(64))
+    question: Mapped[str] = mapped_column(Text)
+    details: Mapped[str | None] = mapped_column(Text, nullable=True)
+    options_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    selected_option: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    response_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

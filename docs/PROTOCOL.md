@@ -18,7 +18,7 @@ timestamp
 payload
 ```
 
-R2 still uses protocol version 1.
+R3 continues protocol version 1.
 
 ## Host lifecycle
 
@@ -34,20 +34,9 @@ Runner → Controller:
 - `JOB_STEER`
 - `JOB_CANCEL`
 
-`JOB_RESUME` and `JOB_STEER` both carry:
+`JOB_RESUME` and `JOB_STEER` both carry the external session id, instruction and working directory.
 
-- execution id
-- external session id
-- instruction
-- working directory
-
-The difference is intent: resume continues a paused Job; steer applies user feedback at the next safe turn boundary.
-
-Reserved for later:
-
-- `JOB_PAUSE` as a transport-level primitive
-
-R2 pause currently uses `JOB_CANCEL` for the active process while keeping the Controller Job as `PAUSED` and preserving the Session Registry entry.
+R3 Human Gate decisions reuse `JOB_RESUME`: the Controller sends the human decision as the next instruction on the same session when possible.
 
 ## Runner → Controller
 
@@ -56,7 +45,31 @@ R2 pause currently uses `JOB_CANCEL` for the active process while keeping the Co
 - `JOB_RESULT`
 - `JOB_ERROR`
 - `SESSION_STARTED`
+- `HUMAN_GATE`
 
-Remote progress carries a sanitized subset of the Codex JSON event, enough for session discovery and feedback classification without forwarding the entire raw output to Messenger.
+A `HUMAN_GATE` message is associated with the active execution id and may carry:
 
-R3 adds `HUMAN_GATE`.
+```json
+{
+  "type": "HUMAN_GATE",
+  "execution_id": "...",
+  "session_id": "...",
+  "event": {
+    "type": "HUMAN_GATE",
+    "approval_type": "architecture_change",
+    "question": "Proceed with schema v3?",
+    "details": "Persistent data changes are required.",
+    "options": [
+      {"key": "A", "label": "Keep v2"},
+      {"key": "B", "label": "Migrate to v3"}
+    ]
+  }
+}
+```
+
+The Controller, not the Runner, persists the Approval and owns the `WAITING_HUMAN` state transition.
+
+Reserved for later:
+
+- `JOB_PAUSE` as a dedicated transport primitive
+- running-job reconciliation messages for R4

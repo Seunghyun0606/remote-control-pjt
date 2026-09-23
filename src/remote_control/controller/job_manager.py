@@ -7,18 +7,26 @@ from pathlib import Path
 from typing import Awaitable, Callable
 from uuid import uuid4
 
+from remote_control.approvals.registry import ApprovalPrompt, ApprovalRegistry
 from remote_control.controller.states import JobState, TERMINAL_STATES, validate_transition
 from remote_control.feedback import FeedbackPolicy, FeedbackThrottler
 from remote_control.hosts.registry import HostRegistry
 from remote_control.hosts.router import HostRouter
+from remote_control.human_gate import (
+    HumanGateRequest,
+    extract_human_gate,
+    extract_human_gate_from_text,
+    human_gate_protocol_instruction,
+)
 from remote_control.projects.registry import ProjectRegistry
 from remote_control.runners.base import AgentRunResult, AgentRunner, RunHandle
 from remote_control.runners.codex import extract_session_id
 from remote_control.sessions.registry import SessionRegistry, SessionStatus
-from remote_control.storage.models import JobRecord
+from remote_control.storage.models import ApprovalRecord, JobRecord
 from remote_control.storage.repositories import EventRepository, JobRepository
 
 Notifier = Callable[[str, str], Awaitable[None]]
+ApprovalNotifier = Callable[[str, ApprovalPrompt], Awaitable[None]]
 
 RESUME_INSTRUCTION = (
     "Resume this job from the existing repository and Codex session state. "
@@ -42,6 +50,7 @@ class JobManager:
         local_host_id: str,
         hosts: HostRegistry | None = None,
         sessions: SessionRegistry | None = None,
+        approvals: ApprovalRegistry | None = None,
         progress_interval_seconds: int = 300,
     ) -> None:
         self.projects = projects
@@ -51,6 +60,7 @@ class JobManager:
         self.local_host_id = local_host_id
         self.hosts = hosts
         self.sessions = sessions
+        self.approvals = approvals
         self.host_router = HostRouter(hosts) if hosts is not None else None
         self.feedback_policy = FeedbackPolicy()
         self.feedback_throttler = FeedbackThrottler(progress_interval_seconds)
@@ -59,9 +69,13 @@ class JobManager:
         self._steering: dict[str, list[str]] = defaultdict(list)
         self._job_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._notifier: Notifier | None = None
+        self._approval_notifier: ApprovalNotifier | None = None
 
     def set_notifier(self, notifier: Notifier | None) -> None:
         self._notifier = notifier
+
+    def set_approval_notifier(self, notifier: ApprovalNotifier | None) -> None:
+        self._approval_notifier = notifier
 
     async def create(
         self,
@@ -162,6 +176,8 @@ class JobManager:
         await self._transition(job_id, JobState.CANCELLED)
         if self.sessions is not None:
             await self.sessions.mark(job_id, SessionStatus.CANCELLED)
+        if self.approvals is not None:
+            await self.approvals.cancel_for_job(job_id)
 
         handle = self._handles.get(job_id)
         if handle is not None:
@@ -181,8 +197,111 @@ class JobManager:
     async def list(self, limit: int = 50) -> list[JobRecord]:
         return await self.jobs.list(limit=limit)
 
+    async def wait_until_idle(self, job_id: str) -> None:
+        task = self._tasks.get(job_id)
+        if task is None or task.done() or task is asyncio.current_task():
+            return
+        await asyncio.shield(task)
+
     async def active_for_user(self, user_id: str) -> list[JobRecord]:
         return await self.jobs.list_active_for_user(user_id)
+
+    async def pending_approvals_for_user(self, user_id: str) -> list[ApprovalRecord]:
+        if self.approvals is None:
+            return []
+        return await self.approvals.pending_for_user(user_id)
+
+    async def approval_details(self, approval_id: str, *, user_id: str) -> ApprovalPrompt:
+        if self.approvals is None:
+            raise ValueError("approval registry is not enabled")
+        record = await self.approvals.get(approval_id)
+        if record.requested_by_user != user_id:
+            raise ValueError("approval belongs to another user")
+        return self.approvals.prompt(record)
+
+    async def match_pending_approval(
+        self,
+        user_id: str,
+        text: str,
+    ) -> ApprovalRecord | None:
+        if self.approvals is None:
+            return None
+        pending = await self.approvals.pending_for_user(user_id)
+        if len(pending) != 1:
+            return None
+        record = pending[0]
+        choice = text.strip()
+        if not choice:
+            return None
+        keys = {option.key.casefold() for option in self.approvals.options(record)}
+        if choice.casefold() not in keys:
+            return None
+        return await self.respond_approval(
+            record.id,
+            user_id=user_id,
+            option_key=choice,
+        )
+
+    async def respond_approval(
+        self,
+        approval_id: str,
+        *,
+        user_id: str,
+        option_key: str | None = None,
+        rejected: bool = False,
+        response_text: str | None = None,
+    ) -> ApprovalRecord:
+        if self.approvals is None:
+            raise ValueError("approval registry is not enabled")
+
+        async with self._job_locks[f"approval:{approval_id}"]:
+            record = await self.approvals.get(approval_id)
+            if record.requested_by_user != user_id:
+                raise ValueError("approval belongs to another user")
+            job = await self.require(record.job_id)
+            if JobState(job.state) != JobState.WAITING_HUMAN:
+                raise ValueError(f"job {job.id} is not WAITING_HUMAN")
+            prompt = self.approvals.prompt(record)
+            resolved = await self.approvals.resolve(
+                approval_id,
+                option_key=option_key,
+                rejected=rejected,
+                response_text=response_text,
+            )
+            await self.events.append(
+                "HUMAN_GATE_RESOLVED",
+                job_id=job.id,
+                project_id=job.project_id,
+                host_id=job.assigned_host,
+                payload={
+                    "approval_id": approval_id,
+                    "status": resolved.status,
+                    "selected_option": resolved.selected_option,
+                },
+            )
+
+        previous_task = self._tasks.get(job.id)
+        if previous_task is not None and not previous_task.done():
+            await asyncio.shield(previous_task)
+
+        if job.assigned_host and self.hosts is not None:
+            if not await self.hosts.is_online(job.assigned_host):
+                raise ValueError(
+                    f"host {job.assigned_host!r} is offline; WAITING_HOST recovery is Phase R4"
+                )
+
+        await self._transition(job.id, JobState.RUNNING)
+        if self.sessions is not None:
+            await self.sessions.mark(job.id, SessionStatus.ACTIVE)
+
+        instruction = _approval_instruction(
+            prompt,
+            option_key=resolved.selected_option,
+            rejected=rejected,
+            response_text=response_text,
+        )
+        self._start_task(job.id, self._execute_resume(job.id, instruction))
+        return resolved
 
     async def select_for_user(
         self,
@@ -275,6 +394,10 @@ class JobManager:
     ) -> None:
         current_result = result
         while True:
+            current = await self.require(job_id)
+            if JobState(current.state) == JobState.WAITING_HUMAN:
+                return
+
             if current_result.returncode != 0:
                 await self.jobs.update(job_id, error=current_result.final_message)
                 if self.sessions is not None:
@@ -289,6 +412,9 @@ class JobManager:
 
             completed = False
             async with self._job_locks[job_id]:
+                current = await self.require(job_id)
+                if JobState(current.state) == JobState.WAITING_HUMAN:
+                    return
                 steering = self._drain_steering(job_id)
                 if steering is None:
                     await self.jobs.update(
@@ -361,7 +487,7 @@ class JobManager:
                 operation = self.runner.steer if steering else self.runner.resume
                 handle = await operation(
                     session_id=requested_session_id,
-                    instruction=instruction,
+                    instruction=_with_control_protocol(instruction),
                     working_directory=working_directory,
                     host_id=job.assigned_host,
                     on_event=self._event_callback(job_id),
@@ -390,6 +516,10 @@ class JobManager:
                         )
                     return result
 
+                current = await self.require(job_id)
+                if JobState(current.state) == JobState.WAITING_HUMAN:
+                    return result
+
                 await self.events.append(
                     "SESSION_RESUME_FAILED",
                     job_id=job_id,
@@ -402,6 +532,9 @@ class JobManager:
                     },
                 )
             except Exception as exc:
+                current = await self.require(job_id)
+                if JobState(current.state) == JobState.WAITING_HUMAN:
+                    return None
                 await self.events.append(
                     "SESSION_RESUME_FAILED",
                     job_id=job_id,
@@ -439,7 +572,7 @@ class JobManager:
         working_directory = Path(project.path_for(job.assigned_host)).expanduser()
         return await self.runner.start(
             project_id=job.project_id,
-            instruction=instruction,
+            instruction=_with_control_protocol(instruction),
             working_directory=working_directory,
             host_id=job.assigned_host,
             on_event=self._event_callback(job.id),
@@ -461,7 +594,11 @@ class JobManager:
             result = await handle.wait()
         except asyncio.CancelledError:
             current = await self.require(job_id)
-            if JobState(current.state) in {JobState.PAUSED, JobState.CANCELLED}:
+            if JobState(current.state) in {
+                JobState.PAUSED,
+                JobState.CANCELLED,
+                JobState.WAITING_HUMAN,
+            }:
                 return None
             raise
 
@@ -476,6 +613,15 @@ class JobManager:
             external_session_id=result.session_id or current.external_session_id,
             result=result.final_message,
         )
+
+        current = await self.require(job_id)
+        if (
+            JobState(current.state) == JobState.RUNNING
+            and result.final_message
+            and (gate := extract_human_gate_from_text(result.final_message)) is not None
+        ):
+            await self._enter_human_gate(job_id, gate)
+
         return result
 
     def _event_callback(self, job_id: str):
@@ -492,6 +638,11 @@ class JobManager:
             session_id = extract_session_id(event)
             if session_id:
                 await self._record_session(job_id, session_id)
+
+            gate = extract_human_gate(event)
+            if gate is not None:
+                await self._enter_human_gate(job_id, gate)
+                return
 
             feedback = self.feedback_policy.classify(event)
             if (
@@ -512,6 +663,52 @@ class JobManager:
 
         return on_event
 
+    async def _enter_human_gate(
+        self,
+        job_id: str,
+        request: HumanGateRequest,
+    ) -> ApprovalRecord | None:
+        if self.approvals is None:
+            await self._notify(
+                job_id,
+                "⚠ Human Gate가 발생했지만 Approval Registry가 활성화되지 않았습니다.",
+            )
+            return None
+
+        async with self._job_locks[job_id]:
+            job = await self.require(job_id)
+            state = JobState(job.state)
+            if state == JobState.WAITING_HUMAN:
+                return await self.approvals.pending_for_job(job_id)
+            if state != JobState.RUNNING:
+                return None
+
+            approval = await self.approvals.create(
+                job_id=job.id,
+                project_id=job.project_id,
+                host_id=job.assigned_host,
+                requested_by_user=job.requested_by_user,
+                request=request,
+            )
+            if self.sessions is not None:
+                await self.sessions.mark(job_id, SessionStatus.WAITING_HUMAN)
+            await self._transition(job_id, JobState.WAITING_HUMAN)
+
+        await self._notify_approval(job_id, self.approvals.prompt(approval))
+        asyncio.create_task(
+            self._stop_active_turn_for_human_gate(job_id),
+            name=f"human-gate-stop:{job_id}",
+        )
+        return approval
+
+    async def _stop_active_turn_for_human_gate(self, job_id: str) -> None:
+        for _ in range(10):
+            handle = self._handles.get(job_id)
+            if handle is not None:
+                await handle.cancel()
+                return
+            await asyncio.sleep(0)
+
     async def _record_session(self, job_id: str, external_session_id: str) -> None:
         job = await self.require(job_id)
         if job.assigned_host is None:
@@ -519,12 +716,17 @@ class JobManager:
         if job.external_session_id != external_session_id:
             await self.jobs.update(job_id, external_session_id=external_session_id)
         if self.sessions is not None:
+            status = (
+                SessionStatus.WAITING_HUMAN
+                if JobState(job.state) == JobState.WAITING_HUMAN
+                else SessionStatus.ACTIVE
+            )
             await self.sessions.record(
                 job_id=job_id,
                 project_id=job.project_id,
                 host_id=job.assigned_host,
                 external_session_id=external_session_id,
-                status=SessionStatus.ACTIVE,
+                status=status,
             )
 
     def _drain_steering(self, job_id: str) -> str | None:
@@ -541,7 +743,11 @@ class JobManager:
     async def _handle_cancelled_task(self, job_id: str) -> None:
         current = await self.require(job_id)
         state = JobState(current.state)
-        if state in {JobState.PAUSED, JobState.CANCELLED}:
+        if state in {
+            JobState.PAUSED,
+            JobState.CANCELLED,
+            JobState.WAITING_HUMAN,
+        }:
             return
         if state not in TERMINAL_STATES:
             await self._transition(job_id, JobState.CANCELLED)
@@ -549,7 +755,10 @@ class JobManager:
     async def _fail(self, job_id: str, exc: Exception) -> None:
         current = await self.require(job_id)
         state = JobState(current.state)
-        if state in TERMINAL_STATES or state == JobState.PAUSED:
+        if state in TERMINAL_STATES or state in {
+            JobState.PAUSED,
+            JobState.WAITING_HUMAN,
+        }:
             return
         await self.jobs.update(job_id, error=str(exc))
         if self.sessions is not None:
@@ -586,6 +795,56 @@ class JobManager:
                 f"[{job.project_id} / {job.id}]\n{message}",
             )
 
+    async def _notify_approval(self, job_id: str, approval: ApprovalPrompt) -> None:
+        job = await self.require(job_id)
+        if job.requested_by_channel != "telegram":
+            return
+        if self._approval_notifier is not None:
+            await self._approval_notifier(job.requested_by_user, approval)
+            return
+
+        options = "\n".join(
+            f"{option.key}. {option.label}" for option in approval.options
+        )
+        await self._notify(
+            job_id,
+            f"⚠ Human Gate\n\n{approval.question}\n\n{options}",
+        )
+
+
+def _with_control_protocol(instruction: str) -> str:
+    return f"{instruction.rstrip()}\n\n---\n\n{human_gate_protocol_instruction()}\n"
+
+
+def _approval_instruction(
+    prompt: ApprovalPrompt,
+    *,
+    option_key: str | None,
+    rejected: bool,
+    response_text: str | None,
+) -> str:
+    if rejected:
+        decision = (
+            "Human decision:\n"
+            "The approval request was rejected. Do not perform the gated change. "
+            "Continue with a safe alternative if one exists; otherwise explain the blocker."
+        )
+    else:
+        option = next(
+            (item for item in prompt.options if item.key == option_key),
+            None,
+        )
+        label = option.label if option is not None else option_key or "selected option"
+        decision = (
+            "Human decision:\n"
+            f"Proceed with option {option_key}: {label}."
+        )
+
+    if response_text:
+        decision += f"\nAdditional human note:\n{response_text.strip()}"
+    decision += f"\n\nOriginal question:\n{prompt.question}"
+    return decision
+
 
 def _small_event(event: dict) -> dict:
     allowed: dict = {}
@@ -597,17 +856,44 @@ def _small_event(event: dict) -> dict:
         "error",
         "thread_id",
         "session_id",
+        "question",
+        "prompt",
+        "details",
+        "description",
+        "header",
+        "approval_type",
     ):
         value = event.get(key)
         if isinstance(value, (str, int, float, bool)) or value is None:
             allowed[key] = value
+
+    options = event.get("options")
+    if isinstance(options, list):
+        allowed["options"] = options[:8]
+
     item = event.get("item")
     if isinstance(item, dict):
         clean_item = {}
-        for key in ("type", "text", "content", "command", "status", "exit_code"):
+        for key in (
+            "type",
+            "text",
+            "content",
+            "command",
+            "status",
+            "exit_code",
+            "question",
+            "prompt",
+            "details",
+            "description",
+            "header",
+            "approval_type",
+        ):
             value = item.get(key)
             if isinstance(value, (str, int, float, bool)) or value is None:
                 clean_item[key] = value
+        item_options = item.get("options")
+        if isinstance(item_options, list):
+            clean_item["options"] = item_options[:8]
         allowed["item"] = clean_item
     return allowed
 

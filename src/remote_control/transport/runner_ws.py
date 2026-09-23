@@ -219,7 +219,7 @@ class RunnerGateway:
                 pending.handle.session_id = session_id
             return
 
-        if envelope.type in {"JOB_PROGRESS", "SESSION_STARTED"}:
+        if envelope.type in {"JOB_PROGRESS", "SESSION_STARTED", "HUMAN_GATE"}:
             session_id = payload.get("session_id")
             if isinstance(session_id, str) and session_id:
                 pending.handle.session_id = session_id

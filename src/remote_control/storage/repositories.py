@@ -6,7 +6,13 @@ from typing import Any
 from sqlalchemy import select
 
 from remote_control.storage.db import Database
-from remote_control.storage.models import EventRecord, HostRecord, JobRecord, SessionRecord
+from remote_control.storage.models import (
+    ApprovalRecord,
+    EventRecord,
+    HostRecord,
+    JobRecord,
+    SessionRecord,
+)
 
 
 class JobRepository:
@@ -159,6 +165,63 @@ class SessionRepository:
             record = await session.get(SessionRecord, session_id)
             if record is None:
                 raise KeyError(f"unknown session: {session_id}")
+            for key, value in changes.items():
+                setattr(record, key, value)
+            await session.commit()
+            await session.refresh(record)
+            return record
+
+
+class ApprovalRepository:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def add(self, record: ApprovalRecord) -> ApprovalRecord:
+        async with self.db.sessions() as session:
+            session.add(record)
+            await session.commit()
+            await session.refresh(record)
+            return record
+
+    async def get(self, approval_id: str) -> ApprovalRecord | None:
+        async with self.db.sessions() as session:
+            return await session.get(ApprovalRecord, approval_id)
+
+    async def list(self, limit: int = 100) -> list[ApprovalRecord]:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(ApprovalRecord)
+                .order_by(ApprovalRecord.created_at.desc())
+                .limit(limit)
+            )
+            return list(result.scalars())
+
+    async def pending_for_job(self, job_id: str) -> ApprovalRecord | None:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(ApprovalRecord)
+                .where(ApprovalRecord.job_id == job_id)
+                .where(ApprovalRecord.status == "PENDING")
+                .order_by(ApprovalRecord.created_at.desc())
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
+
+    async def pending_for_user(self, user_id: str) -> list[ApprovalRecord]:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(ApprovalRecord)
+                .where(ApprovalRecord.requested_by_user == user_id)
+                .where(ApprovalRecord.status == "PENDING")
+                .order_by(ApprovalRecord.created_at.desc())
+            )
+            return list(result.scalars())
+
+    async def update(self, approval_id: str, **changes: Any) -> ApprovalRecord:
+        async with self.db.sessions() as session:
+            record = await session.get(ApprovalRecord, approval_id)
+            if record is None:
+                raise KeyError(f"unknown approval: {approval_id}")
             for key, value in changes.items():
                 setattr(record, key, value)
             await session.commit()

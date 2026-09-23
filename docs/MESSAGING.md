@@ -18,15 +18,25 @@ Commands:
 /stop [job-id]
 ```
 
-If there is exactly one RUNNING Job, otherwise-unmatched plain text is treated as steering for that Job.
+If there is exactly one RUNNING Job and no Human Gate is pending, otherwise-unmatched plain text is treated as steering for that Job.
 
-Example:
+## Human Gate
+
+When a Job enters `WAITING_HUMAN`, Telegram sends an inline keyboard with:
+
+- one button per Approval option
+- `Details`
+- `Reject`
+
+The callback always passes through the numeric Telegram user allowlist and the Approval owner check.
+
+If exactly one Approval is pending, the user may send its short option key as text:
 
 ```text
-UI는 건드리지 말고 backend만 수정해
+B
 ```
 
-This is an agent instruction, not a shell command. If there is no matching active Job, it is rejected.
+Other non-command text is blocked while that Human Gate is pending instead of being converted to steering.
 
 ## Feedback policy
 
@@ -34,7 +44,7 @@ Do not stream every low-level Codex event to Telegram.
 
 - Progress feedback is throttled.
 - Command failures can be sent as important feedback.
-- Final completion/failure is always sent.
-- Human-required feedback is implemented in R3.
+- Human-required feedback is immediate.
+- Final completion/failure is immediate.
 
 Default progress limit is one progress delivery per 300 seconds per Job.

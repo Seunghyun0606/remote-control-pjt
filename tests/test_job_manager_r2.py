@@ -24,6 +24,8 @@ async def wait_for_state(
     for _ in range(attempts):
         current = await manager.require(job_id)
         if current.state == expected:
+            if expected in {"COMPLETED", "FAILED", "CANCELLED"}:
+                await manager.wait_until_idle(job_id)
             return
         await asyncio.sleep(0.01)
     current = await manager.require(job_id)

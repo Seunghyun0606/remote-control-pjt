@@ -7,6 +7,7 @@ from pathlib import Path
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
+from remote_control.human_gate import extract_human_gate
 from remote_control.runners.base import RunHandle
 from remote_control.runners.codex import CodexRunner, extract_session_id
 from remote_control.settings import RunnerSettings
@@ -129,10 +130,11 @@ class RunnerDaemon:
                         event={"type": "thread.started", "thread_id": current_session},
                     ),
                 )
+            gate = extract_human_gate(event)
             await self._send(
                 websocket,
                 message(
-                    "JOB_PROGRESS",
+                    "HUMAN_GATE" if gate is not None else "JOB_PROGRESS",
                     execution_id=execution_id,
                     session_id=current_session or seen_session,
                     event=_sanitize_event(event),
@@ -228,13 +230,43 @@ def _sanitize_event(event: dict) -> dict:
         if isinstance(value, str):
             result[key] = _truncate(value, 1200)
 
+    for key in (
+        "question",
+        "prompt",
+        "details",
+        "description",
+        "header",
+        "approval_type",
+    ):
+        value = event.get(key)
+        if isinstance(value, str):
+            result[key] = _truncate(value, 2000)
+
+    options = event.get("options")
+    if isinstance(options, list):
+        result["options"] = options[:8]
+
     item = event.get("item")
     if isinstance(item, dict):
         clean_item: dict = {"type": str(item.get("type") or "")}
-        for key in ("text", "content", "command", "status"):
+        for key in (
+            "text",
+            "content",
+            "command",
+            "status",
+            "question",
+            "prompt",
+            "details",
+            "description",
+            "header",
+            "approval_type",
+        ):
             value = item.get(key)
             if isinstance(value, str):
                 clean_item[key] = _truncate(value, 1200 if key != "command" else 400)
+        item_options = item.get("options")
+        if isinstance(item_options, list):
+            clean_item["options"] = item_options[:8]
         exit_code = item.get("exit_code")
         if isinstance(exit_code, int):
             clean_item["exit_code"] = exit_code
