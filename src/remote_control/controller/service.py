@@ -197,11 +197,10 @@ class ControllerService:
         raise RuntimeError(f"unsupported intent: {command.intent}")
 
 
-
 def _recovery_suffix(record: RecoveryRecord | None) -> str:
     if record is None:
         return ""
-    parts = [f" recovery={record.kind}", f"attempt={record.attempt_count}"]
+    parts = [f"recovery={record.kind}", f"attempt={record.attempt_count}"]
     if record.next_retry_at is not None:
         parts.append(f"retry_at={record.next_retry_at.isoformat()}")
     return " " + " ".join(parts)
