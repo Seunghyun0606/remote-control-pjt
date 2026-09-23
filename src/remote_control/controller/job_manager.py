@@ -866,7 +866,7 @@ class JobManager:
             if work is not None and work.task_id and work.host_id
             else (
                 job.assigned_host
-                if RecoveryMode(record.mode) == RecoveryMode.RESUME and job.assigned_host
+                if job.external_session_id and job.assigned_host
                 else job.requested_host
             )
         )
