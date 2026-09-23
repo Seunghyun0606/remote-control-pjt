@@ -78,6 +78,7 @@ class ProjectOSAdapter(ProjectAdapter):
                 ProjectWorkRecord(
                     job_id=job_id,
                     adapter="project_os",
+                    host_id=host_id,
                     task_id=task_id,
                     role=role,
                     status="SELECTED",
@@ -91,6 +92,11 @@ class ProjectOSAdapter(ProjectAdapter):
                 payload={"task_id": task_id, "role": role},
             )
         else:
+            if current.host_id and current.host_id != host_id:
+                raise ValueError(
+                    f"Project OS task {current.task_id or '-'} is pinned to host "
+                    f"{current.host_id!r}; refusing continuation on {host_id!r}"
+                )
             task_id = current.task_id
             role = current.role or role
             if not task_id:
