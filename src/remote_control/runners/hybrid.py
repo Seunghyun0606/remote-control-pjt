@@ -69,3 +69,29 @@ class HybridAgentRunner(AgentRunner):
             working_directory=working_directory,
             on_event=on_event,
         )
+
+    async def steer(
+        self,
+        *,
+        session_id: str,
+        instruction: str,
+        working_directory: Path,
+        host_id: str | None = None,
+        on_event: RunEventCallback | None = None,
+    ) -> RunHandle:
+        target = host_id or self.local_host_id
+        if target == self.local_host_id:
+            return await self.local_runner.steer(
+                session_id=session_id,
+                instruction=instruction,
+                working_directory=working_directory,
+                host_id=target,
+                on_event=on_event,
+            )
+        return await self.gateway.steer_remote(
+            host_id=target,
+            session_id=session_id,
+            instruction=instruction,
+            working_directory=working_directory,
+            on_event=on_event,
+        )
