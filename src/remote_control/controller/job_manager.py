@@ -287,6 +287,11 @@ class JobManager:
             return None
         return await self.project_work.get(job_id)
 
+    async def recovery_for(self, job_id: str) -> RecoveryRecord | None:
+        if self.recovery is None:
+            return None
+        return await self.recovery.get(job_id)
+
     async def pending_approvals_for_user(self, user_id: str) -> list[ApprovalRecord]:
         if self.approvals is None:
             return []
@@ -1447,7 +1452,8 @@ class JobManager:
 
         await self._notify(
             job_id,
-            f"⏸ Codex 사용량 제한으로 대기합니다. 자동 재시도: {next_retry.isoformat()}",
+            "⏸ Codex 사용량 제한으로 대기합니다. "
+            f"시도 {attempt}, 자동 재시도: {next_retry.isoformat()}",
         )
         asyncio.create_task(self._stop_active_turn(job_id), name=f"quota-stop:{job_id}")
         return record
