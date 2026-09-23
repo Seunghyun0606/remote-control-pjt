@@ -1,0 +1,18 @@
+[Unit]
+Description=Remote Agent Control
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=codex
+WorkingDirectory=/opt/remote-control-pjt
+EnvironmentFile=/opt/remote-control-pjt/.env
+ExecStart=/opt/remote-control-pjt/.venv/bin/remote-control controller start
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
