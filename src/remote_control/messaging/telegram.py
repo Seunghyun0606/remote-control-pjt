@@ -105,11 +105,11 @@ class TelegramProvider(MessagingProvider):
         if query is None or user is None:
             return
 
-        await query.answer()
         if not is_authorized(user.id, self.allowed_user_ids):
             logger.warning("unauthorized telegram callback rejected: %s", user.id)
             await query.answer("권한이 없습니다.", show_alert=True)
             return
+        await query.answer()
 
         try:
             approval_id, action, value = parse_approval_callback(query.data or "")

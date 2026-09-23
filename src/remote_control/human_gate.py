@@ -111,10 +111,7 @@ def _from_payload(payload: dict[str, Any]) -> HumanGateRequest | None:
 
     options = _parse_options(payload.get("options"))
     if not options:
-        options = (
-            ApprovalOption("APPROVE", "Approve"),
-            ApprovalOption("REJECT", "Reject"),
-        )
+        options = (ApprovalOption("APPROVE", "Approve"),)
 
     return HumanGateRequest(
         approval_type=approval_type.strip()[:64],
