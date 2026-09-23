@@ -8,11 +8,13 @@ import pytest
 from remote_control.controller.job_manager import JobManager
 from remote_control.controller.service import ControllerService
 from remote_control.runners.fake import FakeAgentRunner
+from remote_control.sessions.project_sessions import ProjectSessionRegistry
 from remote_control.sessions.registry import SessionRegistry
 from remote_control.storage.models import JobRecord
 from remote_control.storage.repositories import (
     EventRepository,
     JobRepository,
+    ProjectSessionRepository,
     RecoveryRepository,
     SessionRepository,
 )
@@ -166,51 +168,37 @@ async def test_sessions_are_scoped_to_user_and_project(project_registry, databas
         sessions=SessionRepository(database),
         events=events,
     )
+    project_sessions = ProjectSessionRegistry(
+        sessions=ProjectSessionRepository(database),
+        events=events,
+    )
     manager = JobManager(
         projects=project_registry,
         jobs=JobRepository(database),
         events=events,
-        runner=FakeAgentRunner(),
+        runner=FakeAgentRunner(delay=0.01),
         local_host_id="lightsail-main",
         sessions=sessions,
+        project_sessions=project_sessions,
     )
-    own_job = JobRecord(
-        id="JOB-SESSION-1",
+
+    own_job = await manager.create(
         project_id="demo",
+        instruction="work",
         requested_by_channel="telegram",
         requested_by_user="100",
-        requested_host="lightsail-main",
-        assigned_host="lightsail-main",
-        instruction="work",
-        state="COMPLETED",
-        external_session_id="thread-1",
-        result="done",
     )
-    other_job = JobRecord(
-        id="JOB-SESSION-2",
+    other_job = await manager.create(
         project_id="demo",
+        instruction="other",
         requested_by_channel="telegram",
         requested_by_user="200",
-        requested_host="lightsail-main",
-        assigned_host="lightsail-main",
-        instruction="other",
-        state="COMPLETED",
-        external_session_id="thread-2",
     )
-    await manager.jobs.add(own_job)
-    await manager.jobs.add(other_job)
-    own_session = await sessions.record(
-        job_id=own_job.id,
-        project_id="demo",
-        host_id="lightsail-main",
-        external_session_id="thread-1",
-    )
-    await sessions.record(
-        job_id=other_job.id,
-        project_id="demo",
-        host_id="lightsail-main",
-        external_session_id="thread-2",
-    )
+    await manager.wait_until_idle(own_job.id)
+    await manager.wait_until_idle(other_job.id)
+
+    own_session = await project_sessions.active_for("demo", "100")
+    assert own_session is not None
 
     controller = ControllerService(projects=project_registry, jobs=manager)
     listing = await controller.handle_text(
@@ -220,7 +208,9 @@ async def test_sessions_are_scoped_to_user_and_project(project_registry, databas
         project_id="demo",
     )
     assert own_session.id in listing
-    assert "JOB-SESSION-2" not in listing
+    other_session = await project_sessions.active_for("demo", "200")
+    assert other_session is not None
+    assert other_session.id not in listing
 
     detail = await controller.handle_text(
         f"/session {own_session.id}",
@@ -228,8 +218,7 @@ async def test_sessions_are_scoped_to_user_and_project(project_registry, databas
         user_id="100",
         project_id="demo",
     )
-    assert "Codex session: thread-1" in detail
-    assert "Final result: done" in detail
+    assert "Codex session: fake-session" in detail
 
 
 @pytest.mark.asyncio

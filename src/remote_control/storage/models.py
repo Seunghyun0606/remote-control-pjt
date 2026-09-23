@@ -65,6 +65,22 @@ class HostRecord(Base):
     )
 
 
+class ProjectSessionRecord(Base):
+    __tablename__ = "project_sessions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(128), index=True)
+    owner_user_id: Mapped[str] = mapped_column(String(128), index=True)
+    external_session_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    host_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True, default="IDLE")
+    last_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    locked_by_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_active_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class SessionRecord(Base):
     __tablename__ = "sessions"
 

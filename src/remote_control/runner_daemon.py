@@ -24,6 +24,7 @@ class RunnerDaemon:
             executable=settings.codex_executable,
             sandbox=settings.codex_sandbox,
             approval_policy=settings.codex_approval_policy,
+            codex_home=settings.codex_home,
         )
         self.project_operations = LocalProjectOperationExecutor(
             projectctl_executable=settings.projectctl_executable,

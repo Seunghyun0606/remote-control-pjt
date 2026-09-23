@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 from remote_control.executables import ExecutableResolutionError, resolve_executable
@@ -91,10 +92,12 @@ class CodexRunner(AgentRunner):
         executable: str = "codex",
         sandbox: str = "workspace-write",
         approval_policy: str = "never",
+        codex_home: str | None = None,
     ) -> None:
         self.executable = executable
         self.sandbox = sandbox
         self.approval_policy = approval_policy
+        self.codex_home = codex_home
 
     async def start(
         self,
@@ -139,6 +142,7 @@ class CodexRunner(AgentRunner):
             ),
             instruction=instruction,
             on_event=on_event,
+            expected_session_id=session_id,
         )
 
     @staticmethod
@@ -152,15 +156,20 @@ class CodexRunner(AgentRunner):
         *,
         instruction: str,
         on_event: RunEventCallback | None,
+        expected_session_id: str | None = None,
     ) -> RunHandle:
         try:
             resolution = resolve_executable(command[0])
             process_command = resolution.build_command(command[1:])
+            child_env = os.environ.copy()
+            if self.codex_home:
+                child_env["CODEX_HOME"] = self.codex_home
             process = await asyncio.create_subprocess_exec(
                 *process_command,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=child_env,
             )
         except ExecutableResolutionError:
             raise
@@ -180,7 +189,13 @@ class CodexRunner(AgentRunner):
         await process.stdin.drain()
         process.stdin.close()
 
-        reader_task = asyncio.create_task(self._read_result(process, on_event=on_event))
+        reader_task = asyncio.create_task(
+            self._read_result(
+                process,
+                on_event=on_event,
+                expected_session_id=expected_session_id,
+            )
+        )
         return CodexRunHandle(process, reader_task)
 
     async def _read_result(
@@ -188,6 +203,7 @@ class CodexRunner(AgentRunner):
         process: asyncio.subprocess.Process,
         *,
         on_event: RunEventCallback | None,
+        expected_session_id: str | None = None,
     ) -> AgentRunResult:
         assert process.stdout is not None
         assert process.stderr is not None
@@ -206,7 +222,22 @@ class CodexRunner(AgentRunner):
             except json.JSONDecodeError:
                 event = {"type": "raw_output", "text": line}
 
-            session_id = session_id or extract_session_id(event)
+            event_session_id = extract_session_id(event)
+            if (
+                expected_session_id
+                and event_session_id
+                and event_session_id != expected_session_id
+            ):
+                session_id = event_session_id
+                final_message = (
+                    "SESSION_IDENTITY_MISMATCH "
+                    f"expected={expected_session_id} actual={event_session_id}"
+                )
+                if process.returncode is None:
+                    process.terminate()
+                break
+
+            session_id = session_id or event_session_id
             final_message = extract_final_message(event) or final_message
             quota_signal = quota_signal or detect_quota_event(event)
             if on_event is not None:
@@ -218,6 +249,18 @@ class CodexRunner(AgentRunner):
         quota_signal = quota_signal or stderr_quota
         if returncode != 0 and stderr:
             final_message = stderr[-4000:]
+
+        if (
+            expected_session_id
+            and session_id
+            and session_id != expected_session_id
+        ):
+            returncode = returncode if returncode != 0 else 65
+            final_message = (
+                final_message
+                or "SESSION_IDENTITY_MISMATCH "
+                f"expected={expected_session_id} actual={session_id}"
+            )
 
         return AgentRunResult(
             returncode=returncode,

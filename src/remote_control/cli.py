@@ -27,6 +27,7 @@ from remote_control.projects.registry import ProjectRegistry
 from remote_control.recovery.scheduler import RecoveryScheduler
 from remote_control.runners.codex import CodexRunner
 from remote_control.runners.hybrid import HybridAgentRunner
+from remote_control.sessions.project_sessions import ProjectSessionRegistry
 from remote_control.sessions.registry import SessionRegistry
 from remote_control.settings import Settings
 from remote_control.storage.db import Database
@@ -35,6 +36,7 @@ from remote_control.storage.repositories import (
     EventRepository,
     HostRepository,
     JobRepository,
+    ProjectSessionRepository,
     ProjectWorkRepository,
     RecoveryRepository,
     SessionRepository,
@@ -149,6 +151,10 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
         sessions=SessionRepository(db),
         events=events,
     )
+    project_sessions = ProjectSessionRegistry(
+        sessions=ProjectSessionRepository(db),
+        events=events,
+    )
     approvals = ApprovalRegistry(
         approvals=ApprovalRepository(db),
         events=events,
@@ -162,6 +168,7 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
         executable=settings.codex_executable,
         sandbox=settings.codex_sandbox,
         approval_policy=settings.codex_approval_policy,
+        codex_home=settings.codex_home,
     )
     gateway = RunnerGateway()
     runner = HybridAgentRunner(
@@ -192,6 +199,7 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
         local_host_id=settings.host_id,
         hosts=hosts,
         sessions=sessions,
+        project_sessions=project_sessions,
         approvals=approvals,
         recovery=recovery,
         project_adapters=project_adapters,

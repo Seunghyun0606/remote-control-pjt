@@ -12,6 +12,7 @@ from remote_control.storage.models import (
     EventRecord,
     HostRecord,
     JobRecord,
+    ProjectSessionRecord,
     ProjectWorkRecord,
     RecoveryRecord,
     SessionRecord,
@@ -70,6 +71,21 @@ class JobRepository:
                 query = query.where(JobRecord.project_id == project_id)
             result = await session.execute(query.order_by(JobRecord.created_at.desc()))
             return list(result.scalars())
+
+    async def latest_for_user_project(
+        self,
+        user_id: str,
+        project_id: str,
+    ) -> JobRecord | None:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(JobRecord)
+                .where(JobRecord.requested_by_user == user_id)
+                .where(JobRecord.project_id == project_id)
+                .order_by(JobRecord.created_at.desc())
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
 
     async def update(self, job_id: str, **changes: Any) -> JobRecord:
         async with self.db.sessions() as session:
@@ -145,6 +161,77 @@ class HostRepository:
             record = await session.get(HostRecord, host_id)
             if record is None:
                 raise KeyError(f"unknown host: {host_id}")
+            for key, value in changes.items():
+                setattr(record, key, value)
+            await session.commit()
+            await session.refresh(record)
+            return record
+
+
+class ProjectSessionRepository:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def add(self, record: ProjectSessionRecord) -> ProjectSessionRecord:
+        async with self.db.sessions() as session:
+            session.add(record)
+            await session.commit()
+            await session.refresh(record)
+            return record
+
+    async def get(self, session_id: str) -> ProjectSessionRecord | None:
+        async with self.db.sessions() as session:
+            return await session.get(ProjectSessionRecord, session_id)
+
+    async def active_for(
+        self,
+        project_id: str,
+        owner_user_id: str,
+    ) -> ProjectSessionRecord | None:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(ProjectSessionRecord)
+                .where(ProjectSessionRecord.project_id == project_id)
+                .where(ProjectSessionRecord.owner_user_id == owner_user_id)
+                .where(ProjectSessionRecord.status.in_(("IDLE", "ACTIVE")))
+                .where(ProjectSessionRecord.closed_at.is_(None))
+                .order_by(ProjectSessionRecord.last_active_at.desc())
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
+
+    async def list_for_user(
+        self,
+        owner_user_id: str,
+        *,
+        project_id: str | None = None,
+        limit: int = 100,
+    ) -> list[ProjectSessionRecord]:
+        async with self.db.sessions() as session:
+            query = select(ProjectSessionRecord).where(
+                ProjectSessionRecord.owner_user_id == owner_user_id
+            )
+            if project_id is not None:
+                query = query.where(ProjectSessionRecord.project_id == project_id)
+            result = await session.execute(
+                query.order_by(ProjectSessionRecord.last_active_at.desc()).limit(limit)
+            )
+            return list(result.scalars())
+
+    async def list(self, limit: int = 100) -> list[ProjectSessionRecord]:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(ProjectSessionRecord)
+                .order_by(ProjectSessionRecord.last_active_at.desc())
+                .limit(limit)
+            )
+            return list(result.scalars())
+
+    async def update(self, session_id: str, **changes: Any) -> ProjectSessionRecord:
+        async with self.db.sessions() as session:
+            record = await session.get(ProjectSessionRecord, session_id)
+            if record is None:
+                raise KeyError(f"unknown project session: {session_id}")
             for key, value in changes.items():
                 setattr(record, key, value)
             await session.commit()

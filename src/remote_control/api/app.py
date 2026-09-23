@@ -37,7 +37,7 @@ def create_app(
     runner_token: str = "",
     web_ui_enabled: bool = True,
 ) -> FastAPI:
-    app = FastAPI(title="Remote Agent Control", version="0.9.0")
+    app = FastAPI(title="Remote Agent Control", version="0.10.0")
     dashboard = DashboardService(controller)
 
     @app.get("/health")
@@ -91,6 +91,27 @@ def create_app(
                 "last_active_at": session.last_active_at,
             }
             for session in await controller.jobs.sessions.list()
+        ]
+
+    @app.get("/project-sessions")
+    async def project_sessions() -> list[dict]:
+        if controller.jobs.project_sessions is None:
+            return []
+        return [
+            {
+                "id": session.id,
+                "project_id": session.project_id,
+                "owner_user_id": session.owner_user_id,
+                "external_session_id": session.external_session_id,
+                "host_id": session.host_id,
+                "status": session.status,
+                "last_job_id": session.last_job_id,
+                "locked_by_job_id": session.locked_by_job_id,
+                "created_at": session.created_at,
+                "last_active_at": session.last_active_at,
+                "closed_at": session.closed_at,
+            }
+            for session in await controller.jobs.project_sessions.sessions.list()
         ]
 
     @app.get("/recovery")
