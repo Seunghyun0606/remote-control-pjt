@@ -188,3 +188,22 @@ Important R4 events include:
 - `CONTROLLER_RECONCILE_WAIT`
 - `RUNNER_JOB_ADOPTED`
 - `HUMAN_GATE_EXPIRED`
+
+
+## FAILED Job retry
+
+`FAILED` is terminal and is not automatically retried.
+
+Use:
+
+```text
+/retry JOB-...
+```
+
+for a failed `generic_git` Job after fixing the underlying environment/problem.
+
+Remote Control preserves the original FAILED Job and creates a new Job. If the original Job already has a Codex external session ID, the retry Job attempts to resume that session; otherwise it starts a fresh Codex turn using the original instruction.
+
+Project OS Jobs are intentionally excluded from direct retry cloning. Use `/run` so the adapter can re-read canonical Project OS task state.
+
+`WAITING_HOST` and `WAITING_QUOTA` remain automatic recovery states. Their recovery `last_error` is included in `/status` and `/job` diagnostics.
