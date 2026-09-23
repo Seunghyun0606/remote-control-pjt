@@ -50,7 +50,7 @@ def collect_diagnostics(
                 _executable_item(
                     "Projectctl",
                     settings.projectctl_executable,
-                    run_versions,
+                    False,
                 )
             )
 
@@ -98,7 +98,7 @@ def collect_diagnostics(
 def validate_startup(settings: Settings, projects: ProjectRegistry) -> None:
     failures: list[str] = []
     required_names = {"Config", "Codex", "Git", "Projectctl"}
-    for item in collect_diagnostics(settings, projects=projects, run_versions=False):
+    for item in collect_diagnostics(settings, projects=projects, run_versions=True):
         if not item.ok and item.name in required_names:
             failures.append(f"{item.name}: {item.detail}")
     if failures:
