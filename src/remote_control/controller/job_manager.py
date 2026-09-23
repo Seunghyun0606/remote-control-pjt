@@ -612,8 +612,14 @@ class JobManager:
         return True
 
     async def _retry_host(self, job: JobRecord, record: RecoveryRecord) -> bool:
+        work = await self.project_work_for(job.id)
+        requested_host = (
+            work.host_id
+            if work is not None and work.task_id and work.host_id
+            else job.requested_host
+        )
         try:
-            host_id = await self._resolve_host(job.project_id, job.requested_host)
+            host_id = await self._resolve_host(job.project_id, requested_host)
         except HostUnavailable:
             return False
 
