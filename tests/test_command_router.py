@@ -35,3 +35,21 @@ def test_pause_resume_and_steer_commands(project_registry):
     assert steer.intent == Intent.STEER
     assert steer.job_id == "JOB-1"
     assert steer.instruction == "UI는 건드리지 마"
+
+
+def test_retry_sessions_and_doctor_commands(project_registry):
+    router = CommandRouter(project_registry)
+
+    retry = router.parse("/retry JOB-1")
+    assert retry.intent == Intent.RETRY
+    assert retry.job_id == "JOB-1"
+
+    sessions = router.parse("/sessions")
+    assert sessions.intent == Intent.SESSIONS
+
+    session = router.parse("/session SESSION-1")
+    assert session.intent == Intent.SESSION
+    assert session.job_id == "SESSION-1"
+
+    doctor = router.parse("/doctor")
+    assert doctor.intent == Intent.DOCTOR

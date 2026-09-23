@@ -56,6 +56,11 @@ RESTART_RESUME_INSTRUCTION = (
     "and session state, then continue the unfinished work safely without duplicating "
     "already-completed changes."
 )
+RETRY_RESUME_INSTRUCTION = (
+    "Retry the failed Remote Control Job using this existing Codex session. "
+    "Re-inspect the repository state before making changes, do not duplicate completed work, "
+    "and continue the original instruction from the current filesystem state."
+)
 
 
 def _job_id() -> str:
@@ -175,6 +180,79 @@ class JobManager:
         await self._transition(job.id, JobState.ASSIGNED, assigned_host=assigned_host)
         self._start_task(job.id, self._execute_new(job.id))
         return await self.require(job.id)
+
+    async def retry_failed(self, job_id: str) -> JobRecord:
+        original = await self.require(job_id)
+        if JobState(original.state) != JobState.FAILED:
+            raise ValueError(f"job {job_id} is not FAILED")
+
+        project = self.projects.get(original.project_id)
+        if project.adapter == "project_os":
+            raise ValueError(
+                "Project OS Job은 /retry로 복제하지 않습니다. "
+                "/run으로 현재 canonical task state를 다시 평가하세요."
+            )
+
+        retry = JobRecord(
+            id=_job_id(),
+            project_id=original.project_id,
+            requested_by_channel=original.requested_by_channel,
+            requested_by_user=original.requested_by_user,
+            requested_host=original.requested_host,
+            assigned_host=None,
+            instruction=original.instruction,
+            state=JobState.QUEUED.value,
+            external_session_id=original.external_session_id,
+        )
+        await self.jobs.add(retry)
+        await self.events.append(
+            "JOB_RETRY_CREATED",
+            job_id=retry.id,
+            project_id=retry.project_id,
+            payload={
+                "retry_of": original.id,
+                "external_session_id": original.external_session_id,
+            },
+        )
+
+        mode = (
+            RecoveryMode.RESUME
+            if original.external_session_id
+            else RecoveryMode.START
+        )
+        try:
+            assigned_host = await self._resolve_host(
+                retry.project_id,
+                retry.requested_host,
+            )
+        except HostUnavailable as exc:
+            await self._enter_host_wait(
+                retry.id,
+                mode=mode,
+                error=str(exc),
+                assigned_host=(
+                    retry.requested_host
+                    if retry.requested_host != "auto"
+                    else None
+                ),
+                resume_instruction=(
+                    RETRY_RESUME_INSTRUCTION
+                    if mode == RecoveryMode.RESUME
+                    else None
+                ),
+            )
+            return await self.require(retry.id)
+
+        await self._transition(
+            retry.id,
+            JobState.ASSIGNED,
+            assigned_host=assigned_host,
+        )
+        if original.external_session_id:
+            self._start_task(retry.id, self._execute_retry(retry.id))
+        else:
+            self._start_task(retry.id, self._execute_new(retry.id))
+        return await self.require(retry.id)
 
     async def pause(self, job_id: str) -> JobRecord:
         job = await self.require(job_id)
@@ -854,6 +932,26 @@ class JobManager:
                 return
             await self._transition(job_id, JobState.RUNNING)
             result = await self._await_handle(job_id, handle)
+            if result is None:
+                return
+            await self._finish_or_continue(job_id, result)
+        except asyncio.CancelledError:
+            await self._handle_cancelled_task(job_id)
+        except Exception as exc:
+            await self._fail(job_id, exc)
+        finally:
+            self._handles.pop(job_id, None)
+
+    async def _execute_retry(self, job_id: str) -> None:
+        try:
+            await self._transition(job_id, JobState.STARTING)
+            await self._transition(job_id, JobState.RUNNING)
+            if self.sessions is not None:
+                await self.sessions.mark(job_id, SessionStatus.ACTIVE)
+            result = await self._resume_or_fallback(
+                job_id,
+                RETRY_RESUME_INSTRUCTION,
+            )
             if result is None:
                 return
             await self._finish_or_continue(job_id, result)

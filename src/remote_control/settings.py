@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import platform
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -33,6 +34,10 @@ class _BaseSettings(BaseSettings):
 
 
 class Settings(_BaseSettings):
+    home_path: str | None = Field(
+        default=None,
+        validation_alias="REMOTE_CONTROL_HOME",
+    )
     db_url: str = Field(
         default="sqlite+aiosqlite:///./remote-control.db",
         validation_alias="REMOTE_CONTROL_DB_URL",
@@ -98,6 +103,32 @@ class Settings(_BaseSettings):
         default=True,
         validation_alias="REMOTE_CONTROL_WEB_UI_ENABLED",
     )
+
+    @property
+    def resolved_home_path(self) -> Path:
+        if self.home_path:
+            return Path(self.home_path).expanduser().resolve()
+        return Path.cwd().resolve()
+
+    @property
+    def resolved_config_path(self) -> Path:
+        path = Path(self.config_path).expanduser()
+        if path.is_absolute():
+            return path
+        return (self.resolved_home_path / path).resolve()
+
+    @property
+    def resolved_db_url(self) -> str:
+        prefix = "sqlite+aiosqlite:///"
+        if not self.db_url.startswith(prefix):
+            return self.db_url
+        raw_path = self.db_url[len(prefix) :]
+        if raw_path == ":memory:":
+            return self.db_url
+        path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            path = (self.resolved_home_path / path).resolve()
+        return f"{prefix}{path.as_posix()}"
 
     @property
     def telegram_allowed_user_ids(self) -> set[int]:

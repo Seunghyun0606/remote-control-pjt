@@ -86,6 +86,9 @@ class SessionRegistry:
             )
         return updated
 
+    async def get(self, session_id: str) -> SessionRecord | None:
+        return await self.sessions.get(session_id)
+
     async def get_for_job(self, job_id: str) -> SessionRecord | None:
         return await self.sessions.get_for_job(job_id)
 

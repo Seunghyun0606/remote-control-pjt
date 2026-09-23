@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import platform
+from pathlib import Path
+from typing import Annotated
 
 import typer
 import uvicorn
@@ -11,6 +13,7 @@ from remote_control.api.app import create_app
 from remote_control.approvals.registry import ApprovalRegistry
 from remote_control.controller.job_manager import JobManager
 from remote_control.controller.service import ControllerService
+from remote_control.diagnostics import collect_diagnostics, format_diagnostics, validate_startup
 from remote_control.hosts.registry import HostRegistry
 from remote_control.messaging.slack import SlackProvider
 from remote_control.messaging.telegram import TelegramProvider
@@ -47,6 +50,21 @@ app.add_typer(controller_app, name="controller")
 app.add_typer(project_app, name="project")
 
 
+@app.command("doctor")
+def doctor(
+    env_file: Annotated[
+        Path | None,
+        typer.Option("--env-file", help="Explicit .env file path"),
+    ] = None,
+) -> None:
+    """Check local runtime configuration, executables and project paths."""
+    settings = Settings(_env_file=env_file or ".env")
+    projects = (
+        ProjectRegistry.from_yaml(settings.resolved_config_path)
+        if settings.resolved_config_path.exists()
+        else None
+    )
+    typer.echo(format_diagnostics(collect_diagnostics(settings, projects=projects)))
 
 
 @project_app.command("add")
@@ -62,11 +80,15 @@ def project_add(
         "--actor",
         help="Project OS handoff actor",
     ),
+    env_file: Annotated[
+        Path | None,
+        typer.Option("--env-file", help="Explicit .env file path"),
+    ] = None,
 ) -> None:
     """Register a project in the Remote Control registry."""
-    settings = Settings()
+    settings = Settings(_env_file=env_file or ".env")
     project = add_project(
-        settings.config_path,
+        settings.resolved_config_path,
         project_id=project_id,
         name=name,
         adapter=adapter,
@@ -84,24 +106,33 @@ def project_add(
 @controller_app.command("start")
 def controller_start(
     no_telegram: bool = typer.Option(False, "--no-telegram", help="Do not start Telegram polling"),
+    env_file: Annotated[
+        Path | None,
+        typer.Option("--env-file", help="Explicit .env file path"),
+    ] = None,
 ) -> None:
-    """Start the R6 controller."""
-    asyncio.run(_run_controller(no_telegram=no_telegram))
+    """Start the controller."""
+    asyncio.run(_run_controller(no_telegram=no_telegram, env_file=env_file))
 
 
-async def _run_controller(*, no_telegram: bool) -> None:
+async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    settings = Settings()
+    settings = Settings(_env_file=env_file or ".env")
     if not settings.runner_token:
         raise RuntimeError("CONTROLLER_RUNNER_TOKEN is required")
 
-    db = Database(settings.db_url)
-    await db.init()
+    projects = ProjectRegistry.from_yaml(settings.resolved_config_path)
+    validate_startup(settings, projects)
 
-    projects = ProjectRegistry.from_yaml(settings.config_path)
+    logging.info("runtime home: %s", settings.resolved_home_path)
+    logging.info("project config: %s", settings.resolved_config_path)
+    logging.info("database: %s", settings.resolved_db_url)
+
+    db = Database(settings.resolved_db_url)
+    await db.init()
     events = EventRepository(db)
     hosts = HostRegistry(
         hosts=HostRepository(db),
@@ -170,7 +201,18 @@ async def _run_controller(*, no_telegram: bool) -> None:
         quota_retry_max_seconds=settings.quota_retry_max_seconds,
         restart_grace_seconds=settings.restart_grace_seconds,
     )
-    controller = ControllerService(projects=projects, jobs=manager, hosts=hosts)
+    controller = ControllerService(
+        projects=projects,
+        jobs=manager,
+        hosts=hosts,
+        diagnostics=lambda: format_diagnostics(
+            collect_diagnostics(
+                settings,
+                projects=projects,
+                run_versions=False,
+            )
+        ),
+    )
     scheduler = RecoveryScheduler(
         jobs=manager,
         hosts=hosts,

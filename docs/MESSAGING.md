@@ -133,3 +133,19 @@ Default progress limit is one progress delivery per 300 seconds per Job.
 ## Future providers
 
 The Controller Core remains compatible with additional providers such as Discord, OpenClaw/Hermes gateways or another Web messaging surface by implementing the MessagingProvider boundary.
+
+
+## Runtime commands
+
+Additional runtime-oriented commands:
+
+```text
+/retry <failed-job-id>
+/sessions
+/session <session-id>
+/doctor
+```
+
+`/retry` creates a new Job instead of mutating the FAILED history. `/doctor` reports Host, executable resolution, runtime paths, and local project path readiness.
+
+On Windows, npm-installed `codex.cmd` / `codex.ps1` shims are supported by the runtime launcher.

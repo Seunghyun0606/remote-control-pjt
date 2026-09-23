@@ -4,6 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 
+from remote_control.executables import ExecutableResolutionError, resolve_executable
 from remote_control.recovery.quota import detect_quota_event, detect_quota_text
 from remote_control.runners.base import AgentRunResult, AgentRunner, RunEventCallback, RunHandle
 
@@ -152,12 +153,28 @@ class CodexRunner(AgentRunner):
         instruction: str,
         on_event: RunEventCallback | None,
     ) -> RunHandle:
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        try:
+            resolution = resolve_executable(command[0])
+            process_command = resolution.build_command(command[1:])
+            process = await asyncio.create_subprocess_exec(
+                *process_command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except ExecutableResolutionError:
+            raise
+        except OSError as exc:
+            resolved = (
+                resolution.resolved
+                if "resolution" in locals()
+                else command[0]
+            )
+            raise RuntimeError(
+                "Codex executable launch failed: "
+                f"configured={command[0]!r}, resolved={resolved!r}, "
+                f"error={exc}"
+            ) from exc
         assert process.stdin is not None
         process.stdin.write(instruction.encode("utf-8"))
         await process.stdin.drain()

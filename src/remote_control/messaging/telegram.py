@@ -52,6 +52,10 @@ BOT_COMMANDS = (
     BotCommand("status", "현재 active Job 상태"),
     BotCommand("jobs", "최근 Job 목록"),
     BotCommand("job", "특정 Job 상세 조회"),
+    BotCommand("retry", "FAILED Job을 새 Job으로 재시도"),
+    BotCommand("sessions", "최근 Codex Session 목록"),
+    BotCommand("session", "Codex Session 상세 조회"),
+    BotCommand("doctor", "Host와 실행환경 진단"),
     BotCommand("pause", "Job 일시정지"),
     BotCommand("resume", "Job 재개"),
     BotCommand("steer", "실행 중인 Job에 추가 지시"),
@@ -83,6 +87,9 @@ class TelegramProvider(MessagingProvider):
         )
         self.application.add_handler(
             CallbackQueryHandler(self._handle_job_selection, pattern=r"^jobselect:")
+        )
+        self.application.add_handler(
+            CallbackQueryHandler(self._handle_job_action, pattern=r"^jobaction:")
         )
         self.application.add_handler(MessageHandler(filters.TEXT, self._handle_update))
         self.controller.jobs.set_notifier(self.send_message)
@@ -360,6 +367,11 @@ class TelegramProvider(MessagingProvider):
             response = "명령 처리 중 오류가 발생했습니다."
 
         response_project = project_id or extract_project_id(response)
+        action_markup = (
+            build_job_action_markup(response)
+            if command in {"/job", "/session"}
+            else None
+        )
         await self._send_response(
             user_id=user_id,
             chat_id=chat_id,
@@ -367,6 +379,7 @@ class TelegramProvider(MessagingProvider):
             text=response,
             project_id=response_project,
             job_id=extract_job_id(response),
+            reply_markup=action_markup,
         )
 
     async def _handle_callback(
@@ -481,6 +494,52 @@ class TelegramProvider(MessagingProvider):
             logger.exception("telegram job selection failed")
             await query.answer("Job 선택 처리 중 오류가 발생했습니다.", show_alert=True)
 
+    async def _handle_job_action(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        del context
+        query = update.callback_query
+        user = update.effective_user
+        if query is None or user is None or query.message is None:
+            return
+        if not is_authorized(user.id, self.allowed_user_ids):
+            await query.answer("권한이 없습니다.", show_alert=True)
+            return
+
+        try:
+            action, job_id = parse_job_action_callback(query.data or "")
+            project_id = await self._project_for_thread(
+                chat_id=str(query.message.chat_id),
+                message_thread_id=query.message.message_thread_id,
+            )
+            command = (
+                f"/retry {job_id}"
+                if action == "retry"
+                else f"/resume {job_id}"
+            )
+            response = await self.controller.handle_text(
+                command,
+                channel="telegram",
+                user_id=str(user.id),
+                project_id=project_id,
+            )
+            await query.answer("요청을 접수했습니다.")
+            await self._send_response(
+                user_id=str(user.id),
+                chat_id=str(query.message.chat_id),
+                thread_id=query.message.message_thread_id,
+                text=response,
+                project_id=project_id or extract_project_id(response),
+                job_id=extract_job_id(response),
+            )
+        except (CommandParseError, KeyError, ValueError) as exc:
+            await query.answer(str(exc), show_alert=True)
+        except Exception:
+            logger.exception("telegram job action failed")
+            await query.answer("Job 작업 처리 중 오류가 발생했습니다.", show_alert=True)
+
     async def _prompt_job_selection(
         self,
         *,
@@ -581,11 +640,13 @@ class TelegramProvider(MessagingProvider):
         text: str,
         project_id: str | None = None,
         job_id: str | None = None,
+        reply_markup: InlineKeyboardMarkup | None = None,
     ) -> None:
         sent = await self.application.bot.send_message(
             chat_id=int(chat_id),
             text=text,
             message_thread_id=thread_id,
+            reply_markup=reply_markup,
         )
         await self._bind_sent_message(
             user_id=user_id,
@@ -659,6 +720,37 @@ def parse_approval_callback(data: str) -> tuple[str, str, str | None]:
     if action in {"details", "reject"} and len(parts) == 3:
         return approval_id, action, None
     raise ValueError("invalid approval callback")
+
+
+def build_job_action_markup(text: str) -> InlineKeyboardMarkup | None:
+    job_id = extract_job_id(text)
+    if job_id is None:
+        return None
+    state_match = re.search(r"^(?:Job state|State):\s*(\S+)\s*$", text, re.MULTILINE)
+    if state_match is None:
+        return None
+    state = state_match.group(1).upper()
+    if state == "FAILED":
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton("↻ Retry", callback_data=f"jobaction:retry:{job_id}")]]
+        )
+    if state == "PAUSED":
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton("▶ Resume", callback_data=f"jobaction:resume:{job_id}")]]
+        )
+    return None
+
+
+def parse_job_action_callback(data: str) -> tuple[str, str]:
+    parts = data.split(":", 2)
+    if (
+        len(parts) != 3
+        or parts[0] != "jobaction"
+        or parts[1] not in {"retry", "resume"}
+        or not parts[2]
+    ):
+        raise ValueError("invalid Telegram Job action callback")
+    return parts[1], parts[2]
 
 
 def parse_job_selection_callback(data: str) -> tuple[str, str]:
