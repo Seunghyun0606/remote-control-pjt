@@ -1,14 +1,12 @@
 # Runner Protocol
 
-Remote Runner connections are outbound WebSockets from the execution Host to the Controller.
-
 Endpoint:
 
 ```text
 /ws/runner
 ```
 
-Each message uses:
+Each message contains:
 
 ```text
 protocol_version
@@ -18,7 +16,7 @@ timestamp
 payload
 ```
 
-R4 remains additive on protocol version 1.
+R5 remains additive on protocol version 1.
 
 ## Connection lifecycle
 
@@ -28,37 +26,16 @@ Runner → Controller:
 - `RUNNING_JOBS`
 - `HEARTBEAT`
 
-After every reconnect the Runner sends `RUNNING_JOBS` before buffered results.
+## Agent execution
 
-Example:
-
-```json
-{
-  "type": "RUNNING_JOBS",
-  "payload": {
-    "host_id": "desktop-main",
-    "running_jobs": [
-      {"execution_id": "abc", "session_id": "thread-1"}
-    ],
-    "completed_jobs": [
-      {"execution_id": "def", "session_id": "thread-2"}
-    ]
-  }
-}
-```
-
-Heartbeat also carries the current running execution snapshot.
-
-## Controller → Runner
+Controller → Runner:
 
 - `JOB_START`
 - `JOB_RESUME`
 - `JOB_STEER`
 - `JOB_CANCEL`
 
-Human Gate decisions and recovery resumes reuse `JOB_RESUME`.
-
-## Runner → Controller
+Runner → Controller:
 
 - `JOB_ACCEPTED`
 - `JOB_PROGRESS`
@@ -67,27 +44,56 @@ Human Gate decisions and recovery resumes reuse `JOB_RESUME`.
 - `SESSION_STARTED`
 - `HUMAN_GATE`
 
-A `JOB_RESULT` may additionally contain:
+R4 restart adoption continues to use persisted `execution_id` plus `RUNNING_JOBS`.
+
+## R5 Project Operation RPC
+
+Controller → Runner:
 
 ```text
-retry_kind
-retry_at
+PROJECT_OPERATION_REQUEST
+  request_id
+  project_id
+  working_directory
+  operation
+  payload
 ```
 
-R4 uses `retry_kind=host` or `retry_kind=quota` as typed recovery hints. The Controller still owns the resulting Job state transition.
+Runner → Controller:
 
-## Restart adoption
+```text
+PROJECT_OPERATION_RESULT
+  request_id
+  result
+```
 
-The Controller persists remote `execution_id` while a Job is active. When `RUNNING_JOBS` reports the same id after Controller restart, `RunnerGateway.adopt_remote()` recreates the Controller-side waiter without dispatching a duplicate Codex command.
+or:
 
-If no matching execution is reported, normal recovery resume occurs after the restart grace period.
+```text
+PROJECT_OPERATION_ERROR
+  request_id
+  error
+```
+
+`request_id` correlates a short deterministic project operation and is separate from a Codex `execution_id`.
+
+Allowed operation names are enforced on the Runner:
+
+- `git_snapshot`
+- `project_os_status`
+- `project_os_next`
+- `project_os_context`
+- `project_os_claim`
+- `project_os_submit`
+
+The protocol does not expose a generic command/shell message.
+
+If the Runner disconnects, pending Project Operations fail with a recoverable connection error at the Controller boundary.
 
 ## Human Gate
 
 `HUMAN_GATE` remains the structured approval event introduced in R3.
 
-The Controller, not the Runner, persists the Approval and owns `WAITING_HUMAN`.
-
 ## Reserved
 
-`JOB_PAUSE` remains reserved as a dedicated transport primitive. Current pause cancels the active turn while preserving session state.
+`JOB_PAUSE` remains reserved as a dedicated transport primitive.

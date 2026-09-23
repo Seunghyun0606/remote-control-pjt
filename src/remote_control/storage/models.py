@@ -114,3 +114,25 @@ class RecoveryRecord(Base):
         default=utcnow,
         onupdate=utcnow,
     )
+
+
+class ProjectWorkRecord(Base):
+    __tablename__ = "project_work"
+
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    adapter: Mapped[str] = mapped_column(String(64), index=True)
+    host_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    task_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    role: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    result_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    next_task_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )

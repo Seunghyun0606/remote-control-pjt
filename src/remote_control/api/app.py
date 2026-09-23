@@ -34,7 +34,7 @@ def create_app(
     runner_gateway: RunnerGateway | None = None,
     runner_token: str = "",
 ) -> FastAPI:
-    app = FastAPI(title="Remote Agent Control", version="0.5.0")
+    app = FastAPI(title="Remote Agent Control", version="0.6.0")
 
     @app.get("/health")
     async def health() -> dict:
@@ -97,6 +97,24 @@ def create_app(
             }
             for record in await controller.jobs.recovery.list()
         ]
+
+    @app.get("/project-work")
+    async def project_work() -> list[dict]:
+        if controller.jobs.project_work is None:
+            return []
+        return [
+            _project_work_view(record)
+            for record in await controller.jobs.project_work.list()
+        ]
+
+    @app.get("/jobs/{job_id}/project-work")
+    async def project_work_for_job(job_id: str) -> dict:
+        if controller.jobs.project_work is None:
+            raise HTTPException(status_code=404, detail="project work registry is not enabled")
+        record = await controller.jobs.project_work.get(job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="project work not found")
+        return _project_work_view(record)
 
     @app.get("/approvals")
     async def approvals() -> list[dict]:
@@ -276,6 +294,24 @@ def _job_view(job) -> dict:
         "error": job.error,
         "created_at": job.created_at,
         "updated_at": job.updated_at,
+    }
+
+
+def _project_work_view(record) -> dict:
+    return {
+        "job_id": record.job_id,
+        "adapter": record.adapter,
+        "host_id": record.host_id,
+        "task_id": record.task_id,
+        "role": record.role,
+        "status": record.status,
+        "result_path": record.result_path,
+        "next_task_id": record.next_task_id,
+        "error": record.error,
+        "claimed_at": record.claimed_at,
+        "submitted_at": record.submitted_at,
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
     }
 
 

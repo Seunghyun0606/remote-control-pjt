@@ -25,6 +25,7 @@ class ProjectRegistry:
                 id=project_id,
                 name=raw.get("name", project_id),
                 adapter=raw.get("adapter", "generic_git"),
+                adapter_config=dict(raw.get("adapter_config") or {}),
                 repository=RepositoryConfig.model_validate(raw.get("repository") or {}),
                 allowed_hosts=list(raw.get("allowed_hosts") or []),
                 default_host=raw.get("default_host"),

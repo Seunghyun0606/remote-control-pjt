@@ -10,3 +10,18 @@ projects:
       - lightsail-main
       - desktop-main
     default_host: lightsail-main
+
+  project-os-example:
+    name: Project OS Example
+    adapter: project_os
+    adapter_config:
+      role: developer
+      actor: remote-control-codex
+    repository:
+      path:
+        lightsail-main: /home/codex/projects/project-os-example
+        desktop-main: C:/dev/project-os-example
+    allowed_hosts:
+      - lightsail-main
+      - desktop-main
+    default_host: lightsail-main

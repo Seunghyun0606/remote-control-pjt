@@ -2,19 +2,20 @@
 
 ## Responsibility split
 
-Remote Agent Control stores runtime state only:
+Remote Agent Control stores runtime state:
 
 - Jobs
 - Hosts
 - Codex Sessions
 - Approvals
 - Recovery metadata
+- ProjectWork execution bindings
 - Runtime Events
 - Feedback delivery state
 
-Project/product state remains outside this control plane.
+Project/product state remains outside this control plane. When Project OS is used, its canonical state stays under `.project-os` and is accessed through `projectctl`.
 
-## R0 ~ R4
+## R0 ~ R5
 
 ```text
 Telegram
@@ -25,8 +26,19 @@ ControllerService -> CommandRouter
   +----> SessionRegistry
   +----> ApprovalRegistry
   +----> RecoveryRepository
+  +----> ProjectWorkRepository
   |
 JobManager <---- RecoveryScheduler
+  |
+  +----> ProjectAdapterRegistry
+  |       ├─ GenericGitAdapter
+  |       └─ ProjectOSAdapter
+  |              |
+  |         ProjectOperationExecutor
+  |           /             \
+  |       local           remote RPC
+  |        |                 |
+  |     git/projectctl   Desktop Runner
   |
 HybridAgentRunner
   |                         ^
@@ -36,18 +48,57 @@ CodexRunner             Desktop Runner
 Codex CLI               Codex CLI
 ```
 
-## Runtime state
-
-The Job state machine is code-controlled. Relevant recovery states are:
+Dependency direction is one-way:
 
 ```text
-WAITING_HUMAN
-WAITING_HOST
-WAITING_QUOTA
+Remote Control
+   ↓
+Project OS Adapter
+   ↓
+projectctl
+   ↓
+Project OS canonical state
+```
+
+Project OS does not import or depend on Remote Control.
+
+## Project adapters
+
+The adapter is selected from the server-side Project Registry.
+
+`generic_git` builds an execution instruction from Git state and has no Project OS dependency.
+
+`project_os` performs deterministic Task selection/context/claim before Codex and submits the implementation handoff after Codex succeeds.
+
+The LLM does not select its own Task and does not directly mutate Project OS state.
+
+## ProjectWork
+
+ProjectWork is runtime metadata linking one Remote Job to one Project OS task and Host.
+
+It exists to support:
+
+- deterministic continuation
+- host pinning
+- claim reconciliation
+- result-submission recovery
+- diagnostics
+
+It is not the long-term project plan.
+
+## Runtime state
+
+Relevant wait states:
+
+```text
+WAITING_AGENT   adapter finalization
+WAITING_HUMAN   human decision
+WAITING_HOST    execution/project Host unavailable
+WAITING_QUOTA   Codex quota
 PAUSED
 ```
 
-The LLM may emit a signal, but it does not mutate Job state directly.
+State transitions are code-controlled.
 
 ## Session strategy
 
@@ -69,74 +120,40 @@ reload repository state
 new Codex session
 ```
 
-Codex session is an optimization. Repository/filesystem state remains the durable work state.
+Codex session is an optimization. Repository/filesystem state remains the durable implementation state.
+
+## R5 finalization recovery
+
+After Codex succeeds for a Project OS task:
+
+```text
+RUNNING
+  ↓
+WAITING_AGENT
+  ↓ projectctl submit
+COMPLETED
+```
+
+Controller restart during this phase is reconciled as `RecoveryMode.FINALIZE`. It retries adapter submission instead of rerunning the Agent.
+
+Project OS task approval remains separate.
 
 ## Host recovery
 
-```text
-Host unavailable
-  ↓
-WAITING_HOST
-  ↓
-Scheduler / heartbeat
-  ↓
-HostRouter reevaluation
-  ↓
-ASSIGNED
-  ↓
-STARTING / RUNNING
-```
+Before Project OS Task selection, `auto` routing may select any configured online Host.
 
-For `auto` routing, another compatible configured Host may be selected. An explicit Host remains pinned to that Host.
-
-## Quota recovery
-
-```text
-quota signal
-  ↓
-WAITING_QUOTA
-  ↓
-RecoveryRecord.next_retry_at
-  ↓
-Scheduler
-  ↓
-same session resume
-```
-
-Retry attempt count is persisted so repeated quota events increase the backoff until the configured cap.
-
-## Controller restart reconciliation
-
-Remote executions have an `execution_id` persisted in Recovery state.
-
-```text
-Controller restart
-  ↓
-active DB jobs → WAITING_HOST
-  ↓
-remote Runner reconnects
-  ↓
-RUNNING_JOBS
-  ↓
-execution_id match?
-  ├─ yes → adopt existing RemoteRunHandle
-  └─ no  → grace expires → session/repository resume
-```
-
-Local Controller executions cannot survive the Controller process itself. They use session/repository resume.
+After a ProjectWork binding exists, recovery is pinned to its `host_id` to avoid continuing a claimed canonical Task against another checkout.
 
 ## Scheduler
 
-The R4 scheduler periodically:
+The recovery scheduler handles:
 
-- expires stale Host heartbeats
-- expires approvals that have `expires_at`
-- retries `WAITING_HOST`
-- retries `WAITING_QUOTA`
+- stale Host heartbeat expiry
+- Human Gate expiry
+- `WAITING_HOST`
+- `WAITING_QUOTA`
+- Project OS `FINALIZE` recovery through the Host retry path
 
-The current product does not expose a user-facing arbitrary scheduled-job submission model; the R4 Scheduler is the runtime recovery scheduler.
+## Planned phase
 
-## Planned phases
-
-- R5: Project OS adapter through `projectctl`
 - R6: Slack and optional Web UI

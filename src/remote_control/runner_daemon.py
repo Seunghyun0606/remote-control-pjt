@@ -8,6 +8,7 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
 from remote_control.human_gate import extract_human_gate
+from remote_control.projects.operations import LocalProjectOperationExecutor
 from remote_control.runners.base import AgentRunResult, RunHandle
 from remote_control.runners.codex import CodexRunner, extract_session_id
 from remote_control.settings import RunnerSettings
@@ -23,6 +24,11 @@ class RunnerDaemon:
             executable=settings.codex_executable,
             sandbox=settings.codex_sandbox,
             approval_policy=settings.codex_approval_policy,
+        )
+        self.project_operations = LocalProjectOperationExecutor(
+            projectctl_executable=settings.projectctl_executable,
+            git_executable=settings.git_executable,
+            timeout_seconds=settings.project_operation_timeout_seconds,
         )
         self.running: dict[str, RunHandle] = {}
         self.running_sessions: dict[str, str | None] = {}
@@ -116,6 +122,58 @@ class RunnerDaemon:
             handle = self.running.get(execution_id)
             if handle is not None:
                 await handle.cancel()
+        elif envelope.type == "PROJECT_OPERATION_REQUEST":
+            await self._project_operation(websocket, envelope)
+
+    async def _project_operation(
+        self,
+        websocket: ClientConnection,
+        envelope: Envelope,
+    ) -> None:
+        payload = envelope.payload
+        request_id = str(payload.get("request_id") or "")
+        project_id = str(payload.get("project_id") or "")
+        working_directory_text = str(payload.get("working_directory") or "")
+        operation = str(payload.get("operation") or "")
+        operation_payload = payload.get("payload")
+        if not isinstance(operation_payload, dict):
+            operation_payload = {}
+        if not request_id or not project_id or not working_directory_text or not operation:
+            await self._send(
+                websocket,
+                message(
+                    "PROJECT_OPERATION_ERROR",
+                    request_id=request_id,
+                    error="invalid project operation payload",
+                ),
+            )
+            return
+        try:
+            result = await self.project_operations.execute(
+                host_id=self.settings.host_id,
+                project_id=project_id,
+                working_directory=Path(working_directory_text),
+                operation=operation,
+                payload=operation_payload,
+            )
+        except Exception as exc:
+            await self._send(
+                websocket,
+                message(
+                    "PROJECT_OPERATION_ERROR",
+                    request_id=request_id,
+                    error=str(exc),
+                ),
+            )
+            return
+        await self._send(
+            websocket,
+            message(
+                "PROJECT_OPERATION_RESULT",
+                request_id=request_id,
+                result=result,
+            ),
+        )
 
     async def _start_job(
         self,
