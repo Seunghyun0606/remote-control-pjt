@@ -4,17 +4,19 @@ build-backend = "hatchling.build"
 
 [project]
 name = "remote-agent-control"
-version = "0.6.0"
+version = "0.7.0"
 description = "Messenger-driven remote control plane for AI coding agents"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
   "aiosqlite>=0.20,<1",
+  "aiohttp>=3.10,<4",
   "fastapi>=0.115,<1",
   "pydantic>=2.9,<3",
   "pydantic-settings>=2.5,<3",
   "python-telegram-bot>=21.6,<23",
+  "slack-bolt>=1.30,<2",
   "PyYAML>=6.0,<7",
   "SQLAlchemy>=2.0,<3",
   "typer>=0.12,<1",

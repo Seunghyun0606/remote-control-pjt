@@ -107,14 +107,30 @@ class JobManager:
         self._handles: dict[str, RunHandle] = {}
         self._steering: dict[str, list[str]] = defaultdict(list)
         self._job_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
-        self._notifier: Notifier | None = None
-        self._approval_notifier: ApprovalNotifier | None = None
+        self._notifiers: dict[str, Notifier] = {}
+        self._approval_notifiers: dict[str, ApprovalNotifier] = {}
 
-    def set_notifier(self, notifier: Notifier | None) -> None:
-        self._notifier = notifier
+    def set_notifier(
+        self,
+        notifier: Notifier | None,
+        *,
+        channel: str = "telegram",
+    ) -> None:
+        if notifier is None:
+            self._notifiers.pop(channel, None)
+            return
+        self._notifiers[channel] = notifier
 
-    def set_approval_notifier(self, notifier: ApprovalNotifier | None) -> None:
-        self._approval_notifier = notifier
+    def set_approval_notifier(
+        self,
+        notifier: ApprovalNotifier | None,
+        *,
+        channel: str = "telegram",
+    ) -> None:
+        if notifier is None:
+            self._approval_notifiers.pop(channel, None)
+            return
+        self._approval_notifiers[channel] = notifier
 
     async def create(
         self,
@@ -1601,21 +1617,25 @@ class JobManager:
         return updated
 
     async def _notify(self, job_id: str, message: str) -> None:
-        if self._notifier is None:
-            return
         job = await self.require(job_id)
-        if job.requested_by_channel == "telegram":
-            await self._notifier(
-                job.requested_by_user,
-                f"[{job.project_id} / {job.id}]\n{message}",
-            )
+        notifier = self._notifiers.get(job.requested_by_channel)
+        if notifier is None:
+            return
+        work = await self.project_work_for(job_id)
+        scope = [job.project_id]
+        if work is not None and work.task_id:
+            scope.append(work.task_id)
+        scope.append(job.id)
+        await notifier(
+            job.requested_by_user,
+            f"[{' / '.join(scope)}]\n{message}",
+        )
 
     async def _notify_approval(self, job_id: str, approval: ApprovalPrompt) -> None:
         job = await self.require(job_id)
-        if job.requested_by_channel != "telegram":
-            return
-        if self._approval_notifier is not None:
-            await self._approval_notifier(job.requested_by_user, approval)
+        approval_notifier = self._approval_notifiers.get(job.requested_by_channel)
+        if approval_notifier is not None:
+            await approval_notifier(job.requested_by_user, approval)
             return
 
         options = "\n".join(

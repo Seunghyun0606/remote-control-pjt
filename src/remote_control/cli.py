@@ -12,6 +12,7 @@ from remote_control.approvals.registry import ApprovalRegistry
 from remote_control.controller.job_manager import JobManager
 from remote_control.controller.service import ControllerService
 from remote_control.hosts.registry import HostRegistry
+from remote_control.messaging.slack import SlackProvider
 from remote_control.messaging.telegram import TelegramProvider
 from remote_control.projects.adapters import ProjectAdapterRegistry
 from remote_control.projects.config import add_project
@@ -82,7 +83,7 @@ def project_add(
 def controller_start(
     no_telegram: bool = typer.Option(False, "--no-telegram", help="Do not start Telegram polling"),
 ) -> None:
-    """Start the R5 controller."""
+    """Start the R6 controller."""
     asyncio.run(_run_controller(no_telegram=no_telegram))
 
 
@@ -174,21 +175,43 @@ async def _run_controller(*, no_telegram: bool) -> None:
 
     await manager.reconcile_startup()
 
+    if not no_telegram and not settings.telegram_bot_token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is required unless --no-telegram is used")
+    if settings.slack_enabled:
+        if not settings.slack_bot_token or not settings.slack_app_token:
+            raise RuntimeError(
+                "SLACK_BOT_TOKEN and SLACK_APP_TOKEN are required when Slack is enabled"
+            )
+        if not settings.slack_allowed_user_ids:
+            raise RuntimeError(
+                "SLACK_ALLOWED_USER_IDS is required when Slack is enabled"
+            )
+
     telegram: TelegramProvider | None = None
     if not no_telegram:
-        if not settings.telegram_bot_token:
-            raise RuntimeError("TELEGRAM_BOT_TOKEN is required unless --no-telegram is used")
+        assert settings.telegram_bot_token is not None
         telegram = TelegramProvider(
             token=settings.telegram_bot_token,
             allowed_user_ids=settings.telegram_allowed_user_ids,
             controller=controller,
         )
-        await telegram.start()
+
+    slack: SlackProvider | None = None
+    if settings.slack_enabled:
+        assert settings.slack_bot_token is not None
+        assert settings.slack_app_token is not None
+        slack = SlackProvider(
+            bot_token=settings.slack_bot_token,
+            app_token=settings.slack_app_token,
+            allowed_user_ids=settings.slack_allowed_user_ids,
+            controller=controller,
+        )
 
     api = create_app(
         controller,
         runner_gateway=gateway,
         runner_token=settings.runner_token,
+        web_ui_enabled=settings.web_ui_enabled,
     )
     config = uvicorn.Config(
         api,
@@ -197,14 +220,21 @@ async def _run_controller(*, no_telegram: bool) -> None:
         log_level="info",
     )
     server = uvicorn.Server(config)
-    await scheduler.start()
+    started_providers = []
 
     try:
+        await scheduler.start()
+        if telegram is not None:
+            await telegram.start()
+            started_providers.append(telegram)
+        if slack is not None:
+            await slack.start()
+            started_providers.append(slack)
         await server.serve()
     finally:
+        for provider in reversed(started_providers):
+            await provider.stop()
         await scheduler.stop()
-        if telegram is not None:
-            await telegram.stop()
         await db.close()
 
 

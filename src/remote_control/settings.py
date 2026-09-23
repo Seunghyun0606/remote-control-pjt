@@ -78,6 +78,26 @@ class Settings(_BaseSettings):
         default="",
         validation_alias="TELEGRAM_ALLOWED_USER_IDS",
     )
+    slack_enabled: bool = Field(
+        default=False,
+        validation_alias="REMOTE_CONTROL_SLACK_ENABLED",
+    )
+    slack_bot_token: str | None = Field(
+        default=None,
+        validation_alias="SLACK_BOT_TOKEN",
+    )
+    slack_app_token: str | None = Field(
+        default=None,
+        validation_alias="SLACK_APP_TOKEN",
+    )
+    slack_allowed_user_ids_raw: str = Field(
+        default="",
+        validation_alias="SLACK_ALLOWED_USER_IDS",
+    )
+    web_ui_enabled: bool = Field(
+        default=True,
+        validation_alias="REMOTE_CONTROL_WEB_UI_ENABLED",
+    )
 
     @property
     def telegram_allowed_user_ids(self) -> set[int]:
@@ -91,6 +111,14 @@ class Settings(_BaseSettings):
             raise ValueError(
                 "TELEGRAM_ALLOWED_USER_IDS must be a comma-separated list of integers"
             ) from exc
+
+    @property
+    def slack_allowed_user_ids(self) -> set[str]:
+        return {
+            part.strip()
+            for part in self.slack_allowed_user_ids_raw.split(",")
+            if part.strip()
+        }
 
 
 class RunnerSettings(_BaseSettings):

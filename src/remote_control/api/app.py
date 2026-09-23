@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
+from remote_control.api.dashboard import DashboardService, render_dashboard_html
 from remote_control.controller.service import ControllerService
 from remote_control.transport.protocol import Envelope
 from remote_control.transport.runner_ws import RunnerGateway
@@ -33,12 +35,24 @@ def create_app(
     *,
     runner_gateway: RunnerGateway | None = None,
     runner_token: str = "",
+    web_ui_enabled: bool = True,
 ) -> FastAPI:
-    app = FastAPI(title="Remote Agent Control", version="0.6.0")
+    app = FastAPI(title="Remote Agent Control", version="0.7.0")
+    dashboard = DashboardService(controller)
 
     @app.get("/health")
     async def health() -> dict:
         return {"status": "ok"}
+
+    @app.get("/dashboard")
+    async def dashboard_snapshot() -> dict:
+        return await dashboard.snapshot()
+
+    if web_ui_enabled:
+
+        @app.get("/ui", response_class=HTMLResponse)
+        async def dashboard_ui() -> str:
+            return render_dashboard_html()
 
     @app.get("/projects")
     async def projects() -> list[dict]:

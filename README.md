@@ -8,11 +8,11 @@ Messenger에서 Lightsail/Desktop의 AI coding agent를 안전하게 실행하�
 - **Remote Agent Control**: 어디서/어떻게 실행하는지, Job/Host/Session/Approval/Recovery runtime 상태
 - **Codex**: 실제 구현 작업 수행
 
-현재 **R0 ~ R5**까지 구현되어 있습니다.
+현재 **R0 ~ R6**까지 구현되어 있습니다.
 
 ```text
-Telegram
-   ↓
+Telegram / Slack
+       ↓
 Controller
    ├─ Job / Host / Session / Approval / Recovery / ProjectWork
    ├─ Recovery Scheduler
@@ -23,6 +23,8 @@ Controller
    └─ WebSocket Gateway
             ↑ outbound only
        Desktop Runner → Codex CLI / projectctl
+
+Browser → /ui read-only dashboard
 ```
 
 ## Quick Start
@@ -48,6 +50,16 @@ REMOTE_CONTROL_HOST_ID=lightsail-main
 
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_ALLOWED_USER_IDS=123456789
+
+# Optional Slack Socket Mode
+REMOTE_CONTROL_SLACK_ENABLED=false
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+SLACK_ALLOWED_USER_IDS=U12345678
+
+# Optional read-only dashboard
+REMOTE_CONTROL_WEB_UI_ENABLED=true
+
 CONTROLLER_RUNNER_TOKEN=<long-random-secret>
 
 CODEX_EXECUTABLE=codex
@@ -61,7 +73,7 @@ Controller:
 remote-control controller start
 ```
 
-Telegram 없이 API만:
+Telegram 없이 API/Slack만 사용하려면:
 
 ```bash
 remote-control controller start --no-telegram
@@ -117,7 +129,9 @@ projects:
 
 Messenger에서 임의 filesystem path를 전달할 수 없습니다.
 
-## Telegram 사용
+## Messenger 사용
+
+Telegram과 Slack DM에서 같은 명령을 사용합니다.
 
 ```text
 /projects
@@ -148,6 +162,26 @@ Messenger에서 임의 filesystem path를 전달할 수 없습니다.
 /stop
 /stop JOB-...
 ```
+
+## R6 Slack / Web Dashboard
+
+Slack은 Socket Mode를 사용하므로 Slack 이벤트 수신을 위해 Controller에 별도 public webhook 포트를 열 필요가 없습니다. Telegram과 Slack을 동시에 켜도 Job 알림은 작업을 시작한 messenger channel로만 전달됩니다.
+
+Slack MVP는 1:1 DM을 기준으로 합니다.
+
+- App-Level Token: `connections:write`
+- Bot scopes: `chat:write`, `im:history`, `im:write`
+- Bot event: `message.im`
+- `SLACK_ALLOWED_USER_IDS`에 허용할 Slack User ID 등록
+
+Web Dashboard:
+
+```text
+GET /ui
+GET /dashboard
+```
+
+`/ui`는 runtime 상태를 5초마다 갱신하는 **read-only** 화면입니다. 프로젝트/Host/Job/Human Gate를 볼 수 있지만 명령 실행 버튼은 제공하지 않습니다. 기본 HTTP bind가 `127.0.0.1`이므로 외부 공개 시에는 별도 인증 reverse proxy/private network를 사용해야 합니다.
 
 ## R5 Project OS 실행 흐름
 
@@ -241,6 +275,8 @@ Desktop Runner는 Controller로 outbound WebSocket만 연결합니다. Project O
 
 ```text
 GET /health
+GET /dashboard
+GET /ui  # REMOTE_CONTROL_WEB_UI_ENABLED=true
 GET /projects
 GET /hosts
 GET /jobs
@@ -255,14 +291,14 @@ HTTP API는 기본적으로 `127.0.0.1`에 bind합니다.
 
 ## Security 핵심
 
-- Telegram 사용자 allowlist
+- Telegram / Slack 사용자 allowlist
 - Messenger text → shell 변환 금지
 - Codex/process 실행은 direct argv
 - Project working directory는 server-side registry에서만 결정
 - Project Operation은 whitelist만 허용
 - task/role/actor 식별자 validation
 - Codex auth는 각 실행 Host 로컬에만 존재
-- Desktop Runner는 outbound-only
+- Desktop Runner와 Slack Socket Mode 연결은 outbound-only
 - Project OS canonical YAML은 `projectctl`만 변경
 
 ## 상세 문서
@@ -273,11 +309,13 @@ HTTP API는 기본적으로 `127.0.0.1`에 bind합니다.
 - [Sessions and Feedback](docs/SESSIONS_AND_FEEDBACK.md)
 - [Human Gate](docs/HUMAN_GATE.md)
 - [Messaging](docs/MESSAGING.md)
+- [Web Dashboard](docs/WEB_UI.md)
 - [Runners](docs/RUNNERS.md)
 - [Protocol](docs/PROTOCOL.md)
 - [Security](docs/SECURITY.md)
 - [R4 Manual Smoke Test](docs/SMOKE_TEST_R4.md)
 - [R5 Manual Smoke Test](docs/SMOKE_TEST_R5.md)
+- [R6 Manual Smoke Test](docs/SMOKE_TEST_R6.md)
 
 ## Roadmap
 
@@ -287,6 +325,6 @@ HTTP API는 기본적으로 `127.0.0.1`에 bind합니다.
 - [x] R3 — Human Gate
 - [x] R4 — retry / quota / restart recovery
 - [x] R5 — Project OS adapter
-- [ ] R6 — Slack / Web UI
+- [x] R6 — Slack / Web UI
 
-Package version: **0.6.0**
+Package version: **0.7.0**

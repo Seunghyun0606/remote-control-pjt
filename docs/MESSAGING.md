@@ -1,8 +1,16 @@
 # Messaging
 
-Telegram remains the first messaging provider.
+R6 supports multiple Messenger providers without coupling Controller Core to one vendor.
 
-Commands:
+```text
+Telegram ─┐
+          ├─> ControllerService -> validated Job -> Runner
+Slack ────┘
+```
+
+The same command parser and Job ownership rules are used for every provider.
+
+## Commands
 
 ```text
 /projects
@@ -18,33 +26,76 @@ Commands:
 /stop [job-id]
 ```
 
-If there is exactly one RUNNING Job and no Human Gate is pending, otherwise-unmatched plain text is treated as steering for that Job.
+If there is exactly one eligible active Job and no Human Gate is pending, unmatched plain text can be treated as steering for that Job.
 
-## Human Gate
+## Channel-specific notifications
 
-When a Job enters `WAITING_HUMAN`, Telegram sends an inline keyboard with:
+JobManager keeps a notifier registry keyed by the Job's `requested_by_channel`.
 
-- one button per Approval option
-- `Details`
-- `Reject`
+This prevents one provider from overwriting another when Telegram and Slack are enabled together.
 
-The callback always passes through the numeric Telegram user allowlist and the Approval owner check.
+Later progress, recovery, Human Gate and final notifications return only through the provider that created the Job.
 
-If exactly one Approval is pending, the user may send its short option key as text:
+When ProjectWork has a task id, notification headers include it:
 
 ```text
-B
+[project / TASK-043 / JOB-...]
 ```
 
-Other non-command text is blocked while that Human Gate is pending instead of being converted to steering.
+## Telegram
+
+Telegram uses polling and a numeric user-ID allowlist.
+
+Human Gate replies use inline keyboard callbacks. Every callback passes both:
+
+- Telegram allowlist validation
+- Approval owner validation
+
+## Slack
+
+Slack uses Bolt for Python in Socket Mode.
+
+The Controller creates an outbound WebSocket connection to Slack, so Slack event delivery does not require opening a public inbound webhook port.
+
+R6 Slack MVP is DM-first.
+
+Recommended Slack app configuration:
+
+1. Enable Socket Mode.
+2. Create an App-Level Token with `connections:write`.
+3. Add Bot scopes:
+   - `chat:write`
+   - `im:history`
+   - `im:write`
+4. Subscribe to the Bot event `message.im`.
+5. Enable the App Home Messages tab if users will message the app there.
+6. Put allowed Slack user IDs in `SLACK_ALLOWED_USER_IDS`.
+
+Environment:
+
+```dotenv
+REMOTE_CONTROL_SLACK_ENABLED=true
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+SLACK_ALLOWED_USER_IDS=U12345678,U87654321
+```
+
+Immediate command responses are sent to the conversation where the command arrived. Later Job notifications are sent by DM to the originating Slack user.
+
+Slack Human Gate messages use Block Kit buttons for options, Details and Reject.
 
 ## Feedback policy
 
-Do not stream every low-level Codex event to Telegram.
+Low-level Codex events are not streamed directly.
 
 - Progress feedback is throttled.
-- Command failures can be sent as important feedback.
+- Important failures are immediate.
 - Human-required feedback is immediate.
 - Final completion/failure is immediate.
+- Host/quota recovery changes are explicit.
 
 Default progress limit is one progress delivery per 300 seconds per Job.
+
+## Future providers
+
+The Controller Core remains compatible with additional providers such as Discord, OpenClaw/Hermes gateways or another Web messaging surface by implementing the MessagingProvider boundary.

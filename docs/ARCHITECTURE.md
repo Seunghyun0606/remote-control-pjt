@@ -15,11 +15,11 @@ Remote Agent Control stores runtime state:
 
 Project/product state remains outside this control plane. When Project OS is used, its canonical state stays under `.project-os` and is accessed through `projectctl`.
 
-## R0 ~ R5
+## R0 ~ R6
 
 ```text
-Telegram
-  |
+Telegram / Slack
+      |
 ControllerService -> CommandRouter
   |
   +----> HostRegistry / HostRouter
@@ -46,6 +46,8 @@ HybridAgentRunner
 CodexRunner             Desktop Runner
   |                         |
 Codex CLI               Codex CLI
+
+Browser -> FastAPI /ui -> DashboardService (read-only)
 ```
 
 Dependency direction is one-way:
@@ -154,6 +156,14 @@ The recovery scheduler handles:
 - `WAITING_QUOTA`
 - Project OS `FINALIZE` recovery through the Host retry path
 
-## Planned phase
+## R6 messaging and dashboard
 
-- R6: Slack and optional Web UI
+Messaging providers register notification callbacks by channel. Telegram and Slack can run simultaneously without replacing each other's notifier.
+
+Slack uses outbound Socket Mode. Provider-specific payloads stop at the messaging boundary; ControllerService receives normalized text plus channel/user identity.
+
+DashboardService aggregates runtime repositories for `GET /dashboard` and the optional `GET /ui` page. It is read-only and does not mutate Job or Project OS state.
+
+## Roadmap state
+
+R0 through R6 are implemented. Future messaging or gateway integrations should continue to depend on MessagingProvider and ControllerService rather than moving vendor logic into JobManager.
