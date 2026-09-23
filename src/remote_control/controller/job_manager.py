@@ -135,8 +135,10 @@ class JobManager:
         if not instruction:
             raise ValueError("steering instruction must not be empty")
         job = await self.require(job_id)
-        if JobState(job.state) != JobState.RUNNING:
-            raise ValueError(f"job {job_id} is not RUNNING")
+        state = JobState(job.state)
+        steerable = {JobState.ASSIGNED, JobState.STARTING, JobState.RUNNING}
+        if state not in steerable:
+            raise ValueError(f"job {job_id} cannot accept steering in state {state.value}")
         self._steering[job_id].append(instruction)
         await self.events.append(
             "STEERING_QUEUED",
