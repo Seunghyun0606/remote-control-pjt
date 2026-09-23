@@ -5,6 +5,8 @@ projects:
     repository:
       path:
         lightsail-main: /home/codex/projects/example
+        desktop-main: C:/dev/example
     allowed_hosts:
       - lightsail-main
+      - desktop-main
     default_host: lightsail-main

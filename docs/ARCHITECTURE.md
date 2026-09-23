@@ -2,36 +2,42 @@
 
 ## Responsibility split
 
-Remote Agent Control stores only runtime state: jobs, agent process/session metadata, runtime events and later host heartbeats/approvals.
+Remote Agent Control stores runtime state only: Jobs, Host state, agent process/session metadata and runtime events. Project/product state remains outside this control plane.
 
-Project/product state remains outside this control plane. Project OS integration will be an optional adapter in Phase R5.
-
-## R0
+## R0 + R1
 
 ```text
 Telegram
   |
-  v
-MessagingProvider
-  |
-  v
 ControllerService -> CommandRouter
   |
-  v
-JobManager -> SQLite event/job store
+  +----> HostRegistry / HostRouter ----> SQLite
   |
-  v
-AgentRunner (CodexRunner)
+JobManager
   |
-  v
-Codex CLI on the same Lightsail host
+HybridAgentRunner
+  |                         ^
+  | local                   | outbound WebSocket
+CodexRunner             Desktop Runner
+  |                         |
+Codex CLI               Codex CLI
 ```
 
-The Telegram layer never invokes a shell or Codex directly.
+The Telegram layer never invokes a shell or Codex directly. The Desktop Runner never exposes an inbound listener; it creates the persistent outbound connection to the Controller.
+
+## Local vs remote execution
+
+`HybridAgentRunner` preserves one Controller-side `AgentRunner` abstraction.
+
+- assigned host == Controller local host -> `CodexRunner`
+- other connected host -> `RunnerGateway` -> WebSocket Runner
+
+## Runtime persistence
+
+SQLite contains jobs, events and hosts. Host heartbeat is runtime state and is not written into a project repository or Project OS state.
 
 ## Planned phases
 
-- R1: outbound WebSocket Desktop Runner, host registry and heartbeat
 - R2: Codex session registry, resume, steering and throttled progress
 - R3: Human Gate approvals
 - R4: scheduler, quota/host waits and restart reconciliation

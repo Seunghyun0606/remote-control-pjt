@@ -1,18 +1,18 @@
 # Runners
 
-`AgentRunner` is the boundary between the Controller and a coding agent.
+`AgentRunner` is the Controller-side boundary for coding-agent execution.
 
-R0 ships:
+R1 ships:
 
-- `CodexRunner`: launches local Codex CLI on the Controller/Lightsail host.
-- `FakeAgentRunner`: deterministic runner for automated tests.
+- `CodexRunner`: local Codex CLI.
+- `HybridAgentRunner`: selects local Codex or remote WebSocket execution.
+- `FakeAgentRunner`: deterministic test runner.
+- `remote-runner`: standalone Desktop/Linux host daemon.
 
-Codex input is sent through stdin, not shell interpolation.
+The remote Runner opens an outbound WebSocket, registers host metadata/capabilities, sends heartbeats, accepts validated jobs, starts local Codex CLI, and streams results back.
 
-The executable uses a command equivalent to:
+The Runner does not receive Codex authentication from the Controller. Codex authentication stays local to each Host.
 
-```text
-codex exec --json --sandbox workspace-write --cd <project-dir> --config approval_policy="never" -
-```
+Codex instructions are passed through stdin rather than shell interpolation.
 
-R1 will add the host daemon/WebSocket protocol while preserving this runner boundary.
+R2 will add session resume and steering while preserving this boundary.

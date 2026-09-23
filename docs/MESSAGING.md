@@ -1,20 +1,27 @@
 # Messaging
 
-R0 implements Telegram through the `MessagingProvider` boundary.
+Telegram is the first provider and is isolated behind the messaging boundary.
 
 Supported commands:
 
 ```text
 /projects
 /status
+/hosts
 /run <project> [--host <host-id>]
 /jobs
 /job <job-id>
 /stop
 ```
 
-A small deterministic natural-language parser recognizes a registered project plus run/continue intent. If text cannot be mapped safely, it is rejected and the user is asked to use a slash command.
+Examples:
 
-Completion/failure notifications are sent back to the user that requested the job.
+```text
+/run dailytown --host lightsail-main
+/run dailytown --host desktop-main
+DailyTown desktop에서 다음 작업 진행해
+```
+
+A small deterministic natural-language parser recognizes a registered project, run/continue intent and allowed host name. Unmapped text is rejected instead of being treated as shell input.
 
 R2 will add progress throttling and steering. R3 will add inline-button approvals.
