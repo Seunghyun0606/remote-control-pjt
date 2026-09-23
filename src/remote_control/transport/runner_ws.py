@@ -126,6 +126,24 @@ class RunnerGateway:
             session_id=session_id,
         )
 
+    async def steer_remote(
+        self,
+        *,
+        host_id: str,
+        session_id: str,
+        instruction: str,
+        working_directory: Path,
+        on_event: RunEventCallback | None = None,
+    ) -> RunHandle:
+        return await self._start_remote_operation(
+            message_type="JOB_STEER",
+            host_id=host_id,
+            instruction=instruction,
+            working_directory=working_directory,
+            on_event=on_event,
+            session_id=session_id,
+        )
+
     async def _start_remote_operation(
         self,
         *,
