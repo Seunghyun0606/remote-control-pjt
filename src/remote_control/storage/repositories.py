@@ -12,6 +12,7 @@ from remote_control.storage.models import (
     EventRecord,
     HostRecord,
     JobRecord,
+    ProjectWorkRecord,
     RecoveryRecord,
     SessionRecord,
 )
@@ -288,3 +289,39 @@ class RecoveryRepository:
                 return
             await session.delete(record)
             await session.commit()
+
+
+class ProjectWorkRepository:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def add(self, record: ProjectWorkRecord) -> ProjectWorkRecord:
+        async with self.db.sessions() as session:
+            session.add(record)
+            await session.commit()
+            await session.refresh(record)
+            return record
+
+    async def get(self, job_id: str) -> ProjectWorkRecord | None:
+        async with self.db.sessions() as session:
+            return await session.get(ProjectWorkRecord, job_id)
+
+    async def list(self, limit: int = 100) -> list[ProjectWorkRecord]:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(ProjectWorkRecord)
+                .order_by(ProjectWorkRecord.created_at.desc())
+                .limit(limit)
+            )
+            return list(result.scalars())
+
+    async def update(self, job_id: str, **changes: Any) -> ProjectWorkRecord:
+        async with self.db.sessions() as session:
+            record = await session.get(ProjectWorkRecord, job_id)
+            if record is None:
+                raise KeyError(f"unknown project work: {job_id}")
+            for key, value in changes.items():
+                setattr(record, key, value)
+            await session.commit()
+            await session.refresh(record)
+            return record

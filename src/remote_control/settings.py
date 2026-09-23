@@ -21,6 +21,15 @@ class _BaseSettings(BaseSettings):
         default="never",
         validation_alias="CODEX_APPROVAL_POLICY",
     )
+    projectctl_executable: str = Field(
+        default="projectctl",
+        validation_alias="PROJECTCTL_EXECUTABLE",
+    )
+    git_executable: str = Field(default="git", validation_alias="GIT_EXECUTABLE")
+    project_operation_timeout_seconds: int = Field(
+        default=30,
+        validation_alias="REMOTE_CONTROL_PROJECT_OPERATION_TIMEOUT_SECONDS",
+    )
 
 
 class Settings(_BaseSettings):
@@ -97,7 +106,7 @@ class RunnerSettings(_BaseSettings):
         validation_alias="REMOTE_RUNNER_OS",
     )
     capabilities_raw: str = Field(
-        default="codex,git",
+        default="codex,git,projectctl",
         validation_alias="REMOTE_RUNNER_CAPABILITIES",
     )
     heartbeat_seconds: int = Field(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -12,6 +14,7 @@ class ProjectDefinition(BaseModel):
     id: str
     name: str
     adapter: str = "generic_git"
+    adapter_config: dict[str, Any] = Field(default_factory=dict)
     repository: RepositoryConfig
     allowed_hosts: list[str]
     default_host: str | None = None
