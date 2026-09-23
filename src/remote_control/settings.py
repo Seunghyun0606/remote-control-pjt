@@ -43,6 +43,22 @@ class Settings(_BaseSettings):
         default=300,
         validation_alias="REMOTE_CONTROL_PROGRESS_INTERVAL_SECONDS",
     )
+    scheduler_interval_seconds: int = Field(
+        default=15,
+        validation_alias="REMOTE_CONTROL_SCHEDULER_INTERVAL_SECONDS",
+    )
+    quota_retry_initial_seconds: int = Field(
+        default=1800,
+        validation_alias="REMOTE_CONTROL_QUOTA_RETRY_INITIAL_SECONDS",
+    )
+    quota_retry_max_seconds: int = Field(
+        default=7200,
+        validation_alias="REMOTE_CONTROL_QUOTA_RETRY_MAX_SECONDS",
+    )
+    restart_grace_seconds: int = Field(
+        default=10,
+        validation_alias="REMOTE_CONTROL_RESTART_GRACE_SECONDS",
+    )
     runner_token: str = Field(default="", validation_alias="CONTROLLER_RUNNER_TOKEN")
 
     telegram_bot_token: str | None = Field(

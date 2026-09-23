@@ -103,6 +103,19 @@ class ApprovalRegistry:
     async def pending_for_job(self, job_id: str) -> ApprovalRecord | None:
         return await self.approvals.pending_for_job(job_id)
 
+    async def expired(self, now: datetime) -> list[ApprovalRecord]:
+        return await self.approvals.expired_pending(now)
+
+    async def expire(self, approval_id: str) -> ApprovalRecord:
+        record = await self.get(approval_id)
+        if record.status != ApprovalStatus.PENDING.value:
+            return record
+        return await self.approvals.update(
+            approval_id,
+            status=ApprovalStatus.EXPIRED.value,
+            resolved_at=datetime.now(timezone.utc),
+        )
+
     async def resolve(
         self,
         approval_id: str,

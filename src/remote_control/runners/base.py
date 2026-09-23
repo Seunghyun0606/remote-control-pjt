@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -13,11 +14,14 @@ class AgentRunResult:
     returncode: int
     session_id: str | None = None
     final_message: str | None = None
+    retry_kind: str | None = None
+    retry_at: datetime | None = None
 
 
 class RunHandle(ABC):
     pid: int | None = None
     session_id: str | None = None
+    execution_id: str | None = None
 
     @abstractmethod
     async def wait(self) -> AgentRunResult:

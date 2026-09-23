@@ -53,30 +53,57 @@ class HostRegistry:
             capabilities_json=json.dumps(sorted(capabilities)),
             last_heartbeat=now,
         )
+        existing = await self.hosts.get(host_id)
         stored = await self.hosts.upsert(record)
-        await self.events.append(
-            "HOST_ONLINE",
-            host_id=host_id,
-            payload={"os": os_name, "capabilities": sorted(capabilities)},
-        )
+        if existing is None or existing.status != HostStatus.ONLINE.value:
+            await self.events.append(
+                "HOST_ONLINE",
+                host_id=host_id,
+                payload={"os": os_name, "capabilities": sorted(capabilities)},
+            )
         return self._info(stored)
 
     async def heartbeat(self, host_id: str) -> HostInfo:
+        existing = await self.hosts.get(host_id)
         stored = await self.hosts.update(
             host_id,
             status=HostStatus.ONLINE.value,
             last_heartbeat=datetime.now(timezone.utc),
         )
+        if existing is not None and existing.status != HostStatus.ONLINE.value:
+            await self.events.append("HOST_ONLINE", host_id=host_id)
         return self._info(stored)
 
     async def disconnect(self, host_id: str) -> None:
         if host_id == self.local_host_id:
             return
         record = await self.hosts.get(host_id)
-        if record is None:
+        if record is None or record.status == HostStatus.OFFLINE.value:
             return
         await self.hosts.update(host_id, status=HostStatus.OFFLINE.value)
         await self.events.append("HOST_OFFLINE", host_id=host_id)
+
+    async def expire_stale(self, *, now: datetime | None = None) -> list[str]:
+        current = now or datetime.now(timezone.utc)
+        expired: list[str] = []
+        for record in await self.hosts.list():
+            if record.id == self.local_host_id or record.status != HostStatus.ONLINE.value:
+                continue
+            if record.last_heartbeat is None:
+                continue
+            heartbeat = record.last_heartbeat
+            if heartbeat.tzinfo is None:
+                heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+            if current - heartbeat <= self.heartbeat_timeout:
+                continue
+            await self.hosts.update(record.id, status=HostStatus.OFFLINE.value)
+            await self.events.append(
+                "HOST_OFFLINE",
+                host_id=record.id,
+                payload={"reason": "heartbeat_expired"},
+            )
+            expired.append(record.id)
+        return expired
 
     async def get(self, host_id: str) -> HostInfo | None:
         record = await self.hosts.get(host_id)
