@@ -694,6 +694,7 @@ class JobManager:
             await self._set_handle(job_id, handle)
             current = await self.require(job_id)
             if JobState(current.state) != JobState.STARTING:
+                await handle.cancel()
                 return
             await self._transition(job_id, JobState.RUNNING)
             result = await self._await_handle(job_id, handle)
@@ -863,6 +864,10 @@ class JobManager:
                     on_event=self._event_callback(job_id),
                 )
                 await self._set_handle(job_id, handle)
+                current = await self.require(job_id)
+                if JobState(current.state) != JobState.RUNNING:
+                    await handle.cancel()
+                    return None
                 result = await self._await_handle(job_id, handle)
                 if result is None:
                     return None
@@ -965,6 +970,10 @@ class JobManager:
             )
             return None
         await self._set_handle(job_id, handle)
+        current = await self.require(job_id)
+        if JobState(current.state) != JobState.RUNNING:
+            await handle.cancel()
+            return None
         return await self._await_handle(job_id, handle)
 
     async def _start_new_turn(self, job: JobRecord, instruction: str) -> RunHandle:
