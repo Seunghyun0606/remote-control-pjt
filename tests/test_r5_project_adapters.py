@@ -10,6 +10,7 @@ from remote_control.controller.job_manager import JobManager
 from remote_control.projects.adapters import NoProjectWork, ProjectAdapterRegistry
 from remote_control.projects.adapters.generic_git import GenericGitAdapter
 from remote_control.projects.adapters.project_os import ProjectOSAdapter
+from remote_control.projects.config import add_project
 from remote_control.projects.models import ProjectDefinition, RepositoryConfig
 from remote_control.projects.operations import LocalProjectOperationExecutor, ProjectOperationError
 from remote_control.projects.registry import ProjectRegistry
@@ -642,3 +643,45 @@ projects:
         "role": "architect",
         "actor": "remote-control-architect",
     }
+
+
+
+def test_add_project_writes_remote_control_registry_atomically(tmp_path):
+    config = tmp_path / "projects.yaml"
+    project = add_project(
+        config,
+        project_id="dailytown",
+        name="DailyTown",
+        adapter="project-os",
+        host_id="lightsail-main",
+        working_directory="/srv/dailytown",
+        role="developer",
+        actor="remote-control-codex",
+    )
+
+    assert project.adapter == "project_os"
+    loaded = ProjectRegistry.from_yaml(config).get("dailytown")
+    assert loaded.path_for("lightsail-main") == "/srv/dailytown"
+    assert loaded.adapter_config["role"] == "developer"
+
+    with pytest.raises(ValueError, match="already registered"):
+        add_project(
+            config,
+            project_id="dailytown",
+            name=None,
+            adapter="generic_git",
+            host_id="lightsail-main",
+            working_directory="/srv/duplicate",
+        )
+
+
+def test_add_project_rejects_unsafe_identifier(tmp_path):
+    with pytest.raises(ValueError, match="invalid project id"):
+        add_project(
+            tmp_path / "projects.yaml",
+            project_id="../escape",
+            name=None,
+            adapter="generic_git",
+            host_id="lightsail-main",
+            working_directory="/srv/demo",
+        )
