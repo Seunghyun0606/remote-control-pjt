@@ -690,9 +690,9 @@ class JobManager:
                 requested_by_user=job.requested_by_user,
                 request=request,
             )
-            await self._transition(job_id, JobState.WAITING_HUMAN)
             if self.sessions is not None:
                 await self.sessions.mark(job_id, SessionStatus.WAITING_HUMAN)
+            await self._transition(job_id, JobState.WAITING_HUMAN)
 
         await self._notify_approval(job_id, self.approvals.prompt(approval))
         asyncio.create_task(
