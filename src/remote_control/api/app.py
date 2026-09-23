@@ -21,13 +21,20 @@ class SteerRequest(BaseModel):
     instruction: str
 
 
+class ApprovalResponseRequest(BaseModel):
+    user_id: str
+    option: str | None = None
+    reject: bool = False
+    response_text: str | None = None
+
+
 def create_app(
     controller: ControllerService,
     *,
     runner_gateway: RunnerGateway | None = None,
     runner_token: str = "",
 ) -> FastAPI:
-    app = FastAPI(title="Remote Agent Control", version="0.3.0")
+    app = FastAPI(title="Remote Agent Control", version="0.4.0")
 
     @app.get("/health")
     async def health() -> dict:
@@ -71,6 +78,45 @@ def create_app(
             }
             for session in await controller.jobs.sessions.list()
         ]
+
+    @app.get("/approvals")
+    async def approvals() -> list[dict]:
+        if controller.jobs.approvals is None:
+            return []
+        return [
+            _approval_view(controller.jobs.approvals, record)
+            for record in await controller.jobs.approvals.list()
+        ]
+
+    @app.get("/approvals/{approval_id}")
+    async def approval(approval_id: str) -> dict:
+        if controller.jobs.approvals is None:
+            raise HTTPException(status_code=404, detail="approval registry is not enabled")
+        try:
+            record = await controller.jobs.approvals.get(approval_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return _approval_view(controller.jobs.approvals, record)
+
+    @app.post("/approvals/{approval_id}/respond", status_code=202)
+    async def respond_approval(
+        approval_id: str,
+        request: ApprovalResponseRequest,
+    ) -> dict:
+        try:
+            record = await controller.jobs.respond_approval(
+                approval_id,
+                user_id=request.user_id,
+                option_key=request.option,
+                rejected=request.reject,
+                response_text=request.response_text,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        assert controller.jobs.approvals is not None
+        return _approval_view(controller.jobs.approvals, record)
 
     @app.get("/jobs")
     async def jobs() -> list[dict]:
@@ -197,4 +243,30 @@ def _job_view(job) -> dict:
         "error": job.error,
         "created_at": job.created_at,
         "updated_at": job.updated_at,
+    }
+
+
+
+def _approval_view(registry, record) -> dict:
+    return {
+        "id": record.id,
+        "job_id": record.job_id,
+        "requested_by_user": record.requested_by_user,
+        "type": record.approval_type,
+        "question": record.question,
+        "details": record.details,
+        "options": [
+            {
+                "key": option.key,
+                "label": option.label,
+                "description": option.description,
+            }
+            for option in registry.options(record)
+        ],
+        "status": record.status,
+        "selected_option": record.selected_option,
+        "response_text": record.response_text,
+        "expires_at": record.expires_at,
+        "resolved_at": record.resolved_at,
+        "created_at": record.created_at,
     }
