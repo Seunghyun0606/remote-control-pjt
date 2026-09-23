@@ -4,6 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 
+from remote_control.recovery.quota import detect_quota_event, detect_quota_text
 from remote_control.runners.base import AgentRunResult, AgentRunner, RunEventCallback, RunHandle
 
 
@@ -62,6 +63,7 @@ class CodexRunHandle(RunHandle):
         self._reader_task = reader_task
         self.pid = process.pid
         self.session_id: str | None = None
+        self.execution_id: str | None = None
 
     async def wait(self) -> AgentRunResult:
         result = await self._reader_task
@@ -175,6 +177,7 @@ class CodexRunner(AgentRunner):
 
         session_id: str | None = None
         final_message: str | None = None
+        quota_signal = None
         stderr_task = asyncio.create_task(process.stderr.read())
 
         async for raw_line in process.stdout:
@@ -188,11 +191,14 @@ class CodexRunner(AgentRunner):
 
             session_id = session_id or extract_session_id(event)
             final_message = extract_final_message(event) or final_message
+            quota_signal = quota_signal or detect_quota_event(event)
             if on_event is not None:
                 await on_event(event)
 
         stderr = (await stderr_task).decode("utf-8", errors="replace").strip()
         returncode = await process.wait()
+        stderr_quota = detect_quota_text(stderr)
+        quota_signal = quota_signal or stderr_quota
         if returncode != 0 and stderr:
             final_message = stderr[-4000:]
 
@@ -200,6 +206,8 @@ class CodexRunner(AgentRunner):
             returncode=returncode,
             session_id=session_id,
             final_message=final_message,
+            retry_kind="quota" if quota_signal is not None else None,
+            retry_at=quota_signal.reset_at if quota_signal is not None else None,
         )
 
 
