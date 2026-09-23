@@ -34,4 +34,12 @@ async def test_controller_run_and_status(project_registry, database):
         user_id="100",
     )
     assert "demo" in status
-    await asyncio.sleep(0.1)
+
+    job = (await manager.list(limit=1))[0]
+    for _ in range(300):
+        current = await manager.require(job.id)
+        if current.state == "COMPLETED":
+            break
+        await asyncio.sleep(0.01)
+    assert (await manager.require(job.id)).state == "COMPLETED"
+    await manager.wait_until_idle(job.id)
