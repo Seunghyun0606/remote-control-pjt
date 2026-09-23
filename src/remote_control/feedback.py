@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 
+from remote_control.human_gate import extract_human_gate
+
 
 class FeedbackLevel(StrEnum):
     DEBUG = "DEBUG"
@@ -21,6 +23,10 @@ class Feedback:
 
 class FeedbackPolicy:
     def classify(self, event: dict) -> Feedback | None:
+        gate = extract_human_gate(event)
+        if gate is not None:
+            return Feedback(FeedbackLevel.HUMAN_REQUIRED, gate.question)
+
         event_type = str(event.get("type") or event.get("event_type") or "")
         lowered = event_type.casefold()
 

@@ -10,6 +10,7 @@ from remote_control.storage.repositories import EventRepository, SessionReposito
 
 class SessionStatus(StrEnum):
     ACTIVE = "ACTIVE"
+    WAITING_HUMAN = "WAITING_HUMAN"
     PAUSED = "PAUSED"
     IDLE = "IDLE"
     FAILED = "FAILED"
