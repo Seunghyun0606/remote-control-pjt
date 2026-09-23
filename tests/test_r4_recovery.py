@@ -14,7 +14,7 @@ from remote_control.human_gate import ApprovalOption, HumanGateRequest
 from remote_control.projects.models import ProjectDefinition, RepositoryConfig
 from remote_control.projects.registry import ProjectRegistry
 from remote_control.recovery.models import RecoveryKind, RecoveryMode
-from remote_control.recovery.quota import detect_quota_event, retry_at
+from remote_control.recovery.quota import detect_quota_event, detect_quota_text, retry_at
 from remote_control.recovery.scheduler import RecoveryScheduler
 from remote_control.runners.base import AgentRunResult, AgentRunner, RunEventCallback, RunHandle
 from remote_control.runners.fake import FakeAgentRunner, FakeRunHandle
@@ -225,6 +225,30 @@ def test_quota_retry_backoff_and_structured_reset():
     )
     assert signal is not None
     assert signal.reset_at == reset
+
+    text_signal = detect_quota_text(
+        "You've hit your usage limit. Add credits to continue, "
+        "or try again at Sep 25th, 2026 2:20 PM.",
+        now=now,
+    )
+    assert text_signal is not None
+    assert text_signal.reset_at == datetime(
+        2026,
+        9,
+        25,
+        14,
+        20,
+        tzinfo=timezone.utc,
+    )
+
+    coded_signal = detect_quota_event(
+        {
+            "type": "error",
+            "message": "request rejected",
+            "codex_error_info": "usage_limit_exceeded",
+        }
+    )
+    assert coded_signal is not None
 
     assert (
         detect_quota_event(

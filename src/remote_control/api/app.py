@@ -37,7 +37,7 @@ def create_app(
     runner_token: str = "",
     web_ui_enabled: bool = True,
 ) -> FastAPI:
-    app = FastAPI(title="Remote Agent Control", version="0.7.0")
+    app = FastAPI(title="Remote Agent Control", version="0.7.1")
     dashboard = DashboardService(controller)
 
     @app.get("/health")

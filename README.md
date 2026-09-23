@@ -1,19 +1,47 @@
 # Remote Agent Control
 
-Telegram/Slack에서 Lightsail 또는 Desktop의 Codex 작업을 시작하고, 진행 상태·추가 지시·Human Gate·장애 복구·Project OS 연동까지 원격으로 관리하는 Runtime Control Plane입니다.
+Telegram/Slack에서 **현재 머신의 Codex**를 실행하고, 진행 상태·추가 지시·Human Gate·사용량 제한 복구·Project OS 연동까지 관리하는 Runtime Control Plane입니다.
 
-현재 **R0 ~ R6**까지 구현되어 있으며 package version은 **0.7.0**입니다.
+현재 **R0 ~ R6 + production hardening**이 구현되어 있으며 package version은 **0.7.1**입니다.
 
 ## 전체 개요
 
-Remote Agent Control은 프로젝트 자체의 기획/Task 상태와 AI 실행 runtime을 분리합니다.
+기본 사용 방식은 **각 실행 머신이 독립적인 Controller 노드**가 되는 것입니다.
+
+```text
+Telegram Bot - Desktop
+        ↓
+Desktop Controller
+        ↓
+Desktop Codex CLI
+        ↓
+Desktop local projects
+
+
+Telegram Bot - Lightsail
+        ↓
+Lightsail Controller
+        ↓
+Lightsail Codex CLI
+        ↓
+Lightsail local projects
+```
+
+즉 기본 구성에서:
+
+- Lightsail이 Desktop을 제어하지 않습니다.
+- Desktop이 Lightsail을 제어하지 않습니다.
+- 각 노드는 자기 `.env`, `remote-control.db`, `config/projects.yaml`, Codex login을 가집니다.
+- 사용자는 실행하고 싶은 머신의 Messenger bot으로 명령을 보냅니다.
+
+Remote Agent Control과 Project OS의 역할도 분리됩니다.
 
 - **Project OS**: 무엇을 해야 하는지 관리
   - Task
   - Context
   - Decision
-  - 구현 handoff
-- **Remote Agent Control**: 어디서/어떻게 실행하는지 관리
+  - implementation handoff
+- **Remote Agent Control**: 현재 머신에서 어떻게 실행하는지 관리
   - Job
   - Host
   - Codex Session
@@ -22,170 +50,171 @@ Remote Agent Control은 프로젝트 자체의 기획/Task 상태와 AI 실행 r
   - ProjectWork binding
 - **Codex**: 실제 코드 수정과 구현 수행
 
-전체 구조:
+지원 기능:
 
-```text
-Telegram / Slack
-       ↓
-Controller
-   ├─ Job / Host / Session / Approval / Recovery / ProjectWork
-   ├─ Recovery Scheduler
-   ├─ ProjectAdapter
-   │    ├─ Generic Git
-   │    └─ Project OS → projectctl
-   ├─ Lightsail Local Runner → Codex CLI
-   └─ WebSocket Gateway
-            ↑ outbound only
-       Desktop Runner → Codex CLI / projectctl
-
-Browser → /ui read-only dashboard
-```
-
-지원 범위:
-
-- Telegram 명령/알림
-- Slack Socket Mode 명령/알림
-- Lightsail 로컬 Codex 실행
-- Windows/Desktop remote Runner
+- Telegram polling
+- Slack Socket Mode
+- Windows/Desktop local Codex
+- Lightsail/Linux local Codex
 - Codex session resume / steering
 - Human Gate
-- Host/Quota/Restart recovery
+- Codex usage/quota 자동 재시도
+- Controller restart recovery
 - Generic Git 프로젝트
 - Project OS 프로젝트
 - read-only Web Dashboard
 
+> Advanced: Controller와 다른 머신을 WebSocket Runner로 연결하는 remote-runner 기능도 유지됩니다. 하지만 **Desktop과 Lightsail을 각각 Messenger로 독립 제어**하려는 경우에는 필요하지 않습니다.
+
 ---
 
-## 5분 Quick Guide
+# Quick Guide
 
-가장 먼저 **Messenger 없이 Controller와 Dashboard만** 확인하는 것을 권장합니다.
+## 1. 공통 — Telegram Bot 준비
 
-### 1. 설치
+각 독립 Controller에는 **별도 Telegram Bot 사용을 권장**합니다.
 
-Python 3.11+가 필요합니다.
+예:
 
-```bash
+```text
+@my_desktop_codex_bot   → Desktop Controller
+@my_lightsail_codex_bot → Lightsail Controller
+```
+
+두 Controller가 같은 Bot token으로 동시에 long polling하면 같은 update stream을 경쟁해서 소비할 수 있으므로 독립 노드 구성에서는 Bot을 분리하는 편이 안전합니다.
+
+Telegram의 `@BotFather`에서:
+
+```text
+/newbot
+```
+
+으로 Bot을 만든 후 token을 보관합니다.
+
+본인의 numeric Telegram User ID도 확인합니다. Controller를 시작하기 전에 Bot에 메시지를 한 번 보낸 뒤:
+
+```text
+https://api.telegram.org/bot<BOT_TOKEN>/getUpdates
+```
+
+응답의 다음 값을 사용합니다.
+
+```json
+{
+  "message": {
+    "from": {
+      "id": 123456789
+    }
+  }
+}
+```
+
+이 값이:
+
+```dotenv
+TELEGRAM_ALLOWED_USER_IDS=123456789
+```
+
+에 들어갑니다.
+
+---
+
+## 2. Desktop 최초 설정 — Windows
+
+### 2-1. 설치
+
+PowerShell:
+
+```powershell
 git clone https://github.com/Seunghyun0606/remote-control-pjt.git
 cd remote-control-pjt
 
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env
-```
-
-Windows PowerShell:
-
-```powershell
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
+
 pip install -e ".[dev]"
 Copy-Item .env.example .env
 ```
 
-### 2. 자동 테스트
-
-```bash
-ruff check .
-pytest -q
-```
-
-현재 main 기준 CI에서는 Python 3.11 / 3.12 모두 검증합니다.
-
-### 3. Controller만 실행
-
-Telegram 설정 없이 Controller/API/Dashboard부터 확인합니다.
-
-```bash
-remote-control controller start --no-telegram
-```
-
-기본 주소:
-
-```text
-http://127.0.0.1:8787
-```
-
-다른 터미널에서:
-
-```bash
-curl http://127.0.0.1:8787/health
-curl http://127.0.0.1:8787/dashboard
-```
-
-브라우저:
-
-```text
-http://127.0.0.1:8787/ui
-```
-
-정상이라면:
-
-- `/health` → `{"status":"ok"}`
-- `/dashboard` → runtime JSON
-- `/ui` → read-only Dashboard
-
-여기까지 통과하면 Controller 기본 설치는 정상입니다.
-
----
-
-## 권장 테스트 순서
-
-전체 시스템은 아래 순서로 검증하면 문제 구간을 쉽게 분리할 수 있습니다.
-
-### 1단계 — Automated Test
-
-```bash
-ruff check .
-pytest -q
-```
-
-검증 범위:
-
-- Job/Host/Session state
-- Human Gate
-- Recovery
-- Project OS Adapter
-- Telegram/Slack notification routing
-- Web Dashboard
-- security boundary
-- Runner protocol
-
-### 2단계 — Controller / API / Web UI
-
-```bash
-remote-control controller start --no-telegram
-```
-
 확인:
 
-```text
-GET /health
-GET /dashboard
-GET /ui
-GET /projects
-GET /hosts
-GET /jobs
+```powershell
+python --version
+git --version
+codex --version
 ```
 
-이 단계에서는 Telegram/Slack/Codex 인증이 없어도 Controller runtime을 확인할 수 있습니다.
+Codex 로그인이 안 되어 있다면:
 
-### 3단계 — Telegram
+```powershell
+codex
+```
 
-`.env`:
+를 실행하고 Codex가 안내하는 ChatGPT 로그인 절차를 완료합니다.
+
+Remote Control은 Codex credential을 저장하지 않고 **현재 Windows 사용자에 로그인된 Codex CLI**를 사용합니다.
+
+### 2-2. Desktop `.env`
+
+먼저 secret 생성:
+
+```powershell
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+`.env`의 주요 값:
 
 ```dotenv
-TELEGRAM_BOT_TOKEN=<bot token>
-TELEGRAM_ALLOWED_USER_IDS=<numeric telegram user id>
+REMOTE_CONTROL_HOST_ID=desktop-main
+
+REMOTE_CONTROL_DB_URL=sqlite+aiosqlite:///./remote-control.db
+REMOTE_CONTROL_CONFIG=./config/projects.yaml
+REMOTE_CONTROL_API_HOST=127.0.0.1
+REMOTE_CONTROL_API_PORT=8787
+
+TELEGRAM_BOT_TOKEN=<DESKTOP_BOT_TOKEN>
+TELEGRAM_ALLOWED_USER_IDS=<YOUR_NUMERIC_TELEGRAM_USER_ID>
+
+CONTROLLER_RUNNER_TOKEN=<GENERATED_RANDOM_SECRET>
+
+CODEX_EXECUTABLE=codex
+GIT_EXECUTABLE=git
+
+REMOTE_CONTROL_SLACK_ENABLED=false
+REMOTE_CONTROL_WEB_UI_ENABLED=true
 ```
 
-실행:
+로컬 Desktop-only 사용에서는 `REMOTE_RUNNER_*` 설정을 하지 않아도 됩니다.
 
-```bash
+### 2-3. Desktop 프로젝트 등록
+
+일반 Git 프로젝트:
+
+```powershell
+remote-control project add --id my-project --name "My Project" --path "C:\dev\my-project" --host desktop-main --adapter generic_git
+```
+
+Project OS 프로젝트:
+
+```powershell
+remote-control project add --id my-project --name "My Project" --path "C:\dev\my-project" --host desktop-main --adapter project-os --role developer
+```
+
+등록 결과 확인:
+
+```powershell
+Get-Content .\config\projects.yaml
+```
+
+Controller는 시작할 때 Project Registry를 읽으므로 프로젝트를 추가했다면 Controller를 재시작합니다.
+
+### 2-4. Desktop Controller 시작
+
+```powershell
 remote-control controller start
 ```
 
-Telegram에서:
+Telegram의 Desktop Bot에서:
 
 ```text
 /projects
@@ -193,286 +222,347 @@ Telegram에서:
 /status
 ```
 
-그 다음 실제 등록 프로젝트에서:
+`/hosts`에서 다음과 비슷하게 보여야 합니다.
 
 ```text
-/run <project-id>
-/job JOB-...
-/pause
-/resume
-/steer backend만 수정해
-/stop
-```
-
-확인할 것:
-
-- 허용된 사용자만 명령 가능
-- Job id가 생성됨
-- 진행/완료 알림이 Telegram으로 옴
-- plain text가 shell command로 실행되지 않음
-- Human Gate 발생 시 버튼으로 승인/거절 가능
-
-### 4단계 — Slack
-
-Slack App 준비:
-
-- Socket Mode 활성화
-- App-Level Token: `connections:write`
-- Bot scopes:
-  - `chat:write`
-  - `im:history`
-  - `im:write`
-- Bot event:
-  - `message.im`
-
-`.env`:
-
-```dotenv
-REMOTE_CONTROL_SLACK_ENABLED=true
-SLACK_BOT_TOKEN=xoxb-...
-SLACK_APP_TOKEN=xapp-...
-SLACK_ALLOWED_USER_IDS=U12345678
-```
-
-Controller 재시작 후 Slack DM에서:
-
-```text
-/hosts
-/projects
-/run <project-id>
-```
-
-확인할 것:
-
-- Slack public webhook 포트 없이 연결됨
-- allowlist 외 사용자는 거절됨
-- Slack에서 시작한 Job의 후속 알림은 Slack으로만 감
-- Telegram Job의 알림은 Telegram으로만 감
-- Human Gate Option / Details / Reject 버튼이 동작함
-
-상세 절차:
-
-- [R6 Manual Smoke Test](docs/SMOKE_TEST_R6.md)
-- [Messaging](docs/MESSAGING.md)
-
-### 5단계 — Desktop Runner
-
-Controller Host에서 `.env`:
-
-```dotenv
-CONTROLLER_RUNNER_TOKEN=<long-random-secret>
-```
-
-Windows/Desktop Runner:
-
-```dotenv
-REMOTE_RUNNER_CONTROLLER_WS=wss://YOUR-CONTROLLER/ws/runner
-REMOTE_RUNNER_TOKEN=<controller와 동일한 secret>
-REMOTE_RUNNER_HOST_ID=desktop-main
-REMOTE_RUNNER_NAME=Main Desktop
-REMOTE_RUNNER_OS=windows
-REMOTE_RUNNER_CAPABILITIES=codex,git,projectctl,android,gui,browser
-
-CODEX_EXECUTABLE=codex
-PROJECTCTL_EXECUTABLE=projectctl
-GIT_EXECUTABLE=git
+desktop-main ONLINE
 ```
 
 실행:
 
-```powershell
-.\.venv\Scripts\remote-runner.exe start
+```text
+/run my-project
 ```
 
-Messenger에서:
+이 경로로 실행됩니다.
 
 ```text
-/hosts
+Desktop Telegram Bot
+        ↓
+Desktop Controller
+        ↓
+Desktop Codex
+        ↓
+C:\dev\my-project
 ```
 
-`desktop-main`이 ONLINE인지 확인합니다.
+---
 
-그 다음:
+## 3. Lightsail 최초 설정 — Linux
 
-```text
-/run <project-id> --host desktop-main
-```
+### 3-1. 설치
 
-확인할 것:
-
-- Desktop은 Controller로 outbound WebSocket만 연결
-- 지정한 Host에서 Codex가 실행
-- Controller에 Codex credential이 복사되지 않음
-- Job 결과가 원래 Messenger로 반환됨
-
-### 6단계 — Project OS E2E
-
-대상 프로젝트 자체에 Project OS scaffold가 있어야 합니다.
-
-실행 Host의 대상 repo에서 먼저:
+Lightsail SSH:
 
 ```bash
-projectctl status --json
-projectctl next --role developer --json
+git clone https://github.com/Seunghyun0606/remote-control-pjt.git
+cd remote-control-pjt
+
+python3.11 -m venv .venv
+source .venv/bin/activate
+
+pip install -e ".[dev]"
+cp .env.example .env
+```
+
+확인:
+
+```bash
+python --version
+git --version
 codex --version
 ```
 
-프로젝트 등록:
+Codex 로그인이 필요하면:
+
+```bash
+codex
+```
+
+를 실행하고 안내되는 로그인 절차를 완료합니다.
+
+### 3-2. Lightsail `.env`
+
+secret 생성:
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+설정:
+
+```dotenv
+REMOTE_CONTROL_HOST_ID=lightsail-main
+
+REMOTE_CONTROL_DB_URL=sqlite+aiosqlite:///./remote-control.db
+REMOTE_CONTROL_CONFIG=./config/projects.yaml
+REMOTE_CONTROL_API_HOST=127.0.0.1
+REMOTE_CONTROL_API_PORT=8787
+
+TELEGRAM_BOT_TOKEN=<LIGHTSAIL_BOT_TOKEN>
+TELEGRAM_ALLOWED_USER_IDS=<YOUR_NUMERIC_TELEGRAM_USER_ID>
+
+CONTROLLER_RUNNER_TOKEN=<GENERATED_RANDOM_SECRET>
+
+CODEX_EXECUTABLE=codex
+GIT_EXECUTABLE=git
+
+REMOTE_CONTROL_SLACK_ENABLED=false
+REMOTE_CONTROL_WEB_UI_ENABLED=true
+```
+
+Desktop Bot과는 다른 Bot token 사용을 권장합니다.
+
+### 3-3. Lightsail 프로젝트 등록
+
+예:
 
 ```bash
 remote-control project add \
-  --id dailytown \
-  --name DailyTown \
-  --path /absolute/path/to/dailytown \
+  --id my-project \
+  --name "My Project" \
+  --path /home/ubuntu/projects/my-project \
+  --host lightsail-main \
+  --adapter generic_git
+```
+
+Project OS:
+
+```bash
+remote-control project add \
+  --id my-project \
+  --name "My Project" \
+  --path /home/ubuntu/projects/my-project \
   --host lightsail-main \
   --adapter project-os \
   --role developer
 ```
 
-Messenger:
+### 3-4. Lightsail Controller 시작
 
-```text
-/run dailytown
+```bash
+remote-control controller start
 ```
 
-정상 흐름:
+Lightsail Bot에서:
 
 ```text
-projectctl status
-        ↓
-projectctl next
-        ↓
-Task / Host binding
-        ↓
-projectctl context
-        ↓
-projectctl claim
-        ↓
-Codex
-        ↓
-WAITING_AGENT
-        ↓
-projectctl submit
-        ↓
-Remote Job COMPLETED
+/projects
+/hosts
+/status
+/run my-project
 ```
 
-확인:
+이 경로로 실행됩니다.
 
 ```text
-/job JOB-...
-GET /jobs/{job_id}/project-work
+Lightsail Telegram Bot
+        ↓
+Lightsail Controller
+        ↓
+Lightsail Codex
+        ↓
+/home/ubuntu/projects/my-project
 ```
-
-ProjectWork는 다음 형태여야 합니다.
-
-```text
-adapter=project_os
-host_id=<execution-host>
-task_id=TASK-...
-status=SUBMITTED
-```
-
-중요:
-
-**Remote Job COMPLETED는 Project OS Task가 PASS/done 되었다는 의미가 아닙니다.**
-
-Remote Control은 구현 결과를 Project OS에 handoff하고, 최종 review/evaluation은 Project OS가 별도로 수행합니다.
-
-상세 절차:
-
-- [R5 Manual Smoke Test](docs/SMOKE_TEST_R5.md)
-- [Project Adapters](docs/PROJECT_ADAPTERS.md)
 
 ---
 
-## 세부 가이드
+## 4. 최초 동작 확인
 
-### 환경 설정
+각 노드에서 아래 순서만 확인하면 됩니다.
 
-주요 Controller 설정:
-
-```dotenv
-REMOTE_CONTROL_DB_URL=sqlite+aiosqlite:///./remote-control.db
-REMOTE_CONTROL_CONFIG=./config/projects.yaml
-REMOTE_CONTROL_HOST_ID=lightsail-main
-
-REMOTE_CONTROL_API_HOST=127.0.0.1
-REMOTE_CONTROL_API_PORT=8787
-
-CONTROLLER_RUNNER_TOKEN=<long-random-secret>
-
-CODEX_EXECUTABLE=codex
-CODEX_SANDBOX=workspace-write
-CODEX_APPROVAL_POLICY=never
-
-PROJECTCTL_EXECUTABLE=projectctl
-GIT_EXECUTABLE=git
+```text
+/projects
+/hosts
+/status
+/run <project-id>
+/jobs
+/job <job-id>
 ```
 
-전체 예시는 [`.env.example`](.env.example)을 참고합니다.
+추가 지시:
 
-### 프로젝트 등록
+```text
+/steer 현재 구현 상태부터 확인하고 기존 변경을 중복하지 마
+```
 
-#### 일반 Git 프로젝트
+일시정지/재개:
+
+```text
+/pause
+/resume
+```
+
+중지:
+
+```text
+/stop
+```
+
+---
+
+## 5. Codex 사용량 제한 자동 복구
+
+Codex usage/quota가 소진되면 Job을 즉시 `FAILED` 처리하지 않습니다.
+
+```text
+RUNNING
+   ↓ Codex usage limit
+WAITING_QUOTA
+   ↓ reset/retry time
+RUNNING
+   ↓
+existing Codex session resume
+   ↓
+COMPLETED
+```
+
+인식 대상에는 다음이 포함됩니다.
+
+- structured `rate_limit` / `usage_limit` event
+- `usage_limit_exceeded`
+- `rate_limit_exceeded`
+- `You've hit your usage limit`
+- `Usage limit reached`
+- `Too many requests`
+
+Codex가 structured reset timestamp를 주면 그 값을 우선 사용합니다.
+
+텍스트에 다음처럼 reset 시간이 포함된 경우도 인식합니다.
+
+```text
+You've hit your usage limit ... try again at Sep 25th, 2026 2:20 PM.
+```
+
+텍스트에 timezone이 없으면 **Controller가 실행되는 Host의 local timezone**으로 해석합니다.
+
+reset 시간을 알 수 없으면 기본 backoff:
+
+```text
+attempt 1: 30분
+attempt 2: 60분
+attempt 3+: 120분
+```
+
+설정:
+
+```dotenv
+REMOTE_CONTROL_SCHEDULER_INTERVAL_SECONDS=15
+REMOTE_CONTROL_QUOTA_RETRY_INITIAL_SECONDS=1800
+REMOTE_CONTROL_QUOTA_RETRY_MAX_SECONDS=7200
+```
+
+Telegram에서:
+
+```text
+/status
+```
+
+예:
+
+```text
+JOB-... my-project WAITING_QUOTA host=desktop-main recovery=QUOTA attempt=1 retry_at=...
+```
+
+상세:
+
+```text
+/job JOB-...
+```
+
+예:
+
+```text
+State: WAITING_QUOTA
+Recovery: QUOTA
+Recovery mode: RESUME
+Retry attempt: 1
+Next retry: ...
+```
+
+재시도 시간이 되면:
+
+```text
+↻ Codex quota 대기 시간이 끝나 자동 재시도합니다.
+```
+
+알림 후 기존 Codex session을 우선 resume합니다.
+
+Controller를 재시작하더라도 recovery metadata는 SQLite에 저장되므로 `WAITING_QUOTA` Job을 다시 복구합니다.
+
+---
+
+# 세부 가이드
+
+## 프로젝트 Registry
+
+### Generic Git
 
 ```bash
 remote-control project add \
   --id my-app \
-  --path /home/codex/projects/my-app \
-  --host lightsail-main \
+  --path /absolute/path/to/my-app \
+  --host <local-host-id> \
   --adapter generic_git
 ```
 
-Generic Git adapter는 실행 전에 다음 정보를 읽습니다.
+Generic Git adapter는 실행 전 다음을 수집합니다.
 
 - current branch
 - `git status --short --branch`
 - `git diff --stat`
 
-Project OS가 없어도 동작합니다.
+### Project OS
 
-#### Project OS 프로젝트
+대상 repo에서 먼저:
+
+```bash
+projectctl status --json
+projectctl next --role developer --json
+```
+
+등록:
 
 ```bash
 remote-control project add \
-  --id dailytown \
-  --name DailyTown \
-  --path /home/codex/projects/dailytown \
-  --host lightsail-main \
+  --id my-app \
+  --path /absolute/path/to/my-app \
+  --host <local-host-id> \
   --adapter project-os \
   --role developer
 ```
 
-Remote Control이 수정하는 것은 자신의 `config/projects.yaml` registry입니다.
+실행 흐름:
 
-Project OS canonical state는 직접 수정하지 않고 항상 `projectctl`을 통해 접근합니다.
-
-여러 Host를 사용할 경우:
-
-```yaml
-projects:
-  dailytown:
-    name: DailyTown
-    adapter: project_os
-    adapter_config:
-      role: developer
-      actor: remote-control-codex
-    repository:
-      path:
-        lightsail-main: /home/codex/projects/dailytown
-        desktop-main: C:/dev/dailytown
-    allowed_hosts:
-      - lightsail-main
-      - desktop-main
-    default_host: lightsail-main
+```text
+/run my-app
+   ↓
+projectctl status --json
+   ↓
+projectctl next --role developer --json
+   ↓
+ProjectWork Task/Host binding
+   ↓
+projectctl context
+   ↓
+projectctl claim
+   ↓
+Codex
+   ↓
+projectctl submit
+   ↓
+Remote Job COMPLETED
 ```
 
-Messenger에서 임의 filesystem path를 전달할 수 없습니다.
+**Remote Job `COMPLETED`는 Project OS Task가 PASS/done이라는 뜻이 아닙니다.**
 
-### Messenger 명령
+Remote Control은 implementation handoff까지 담당하고 Project OS review/evaluation은 별도입니다.
 
-Telegram과 Slack DM에서 동일한 Controller command를 사용합니다.
+---
+
+## Messenger 명령
+
+Telegram과 Slack DM에서 동일합니다.
 
 ```text
 /projects
@@ -493,96 +583,88 @@ Telegram과 Slack DM에서 동일한 Controller command를 사용합니다.
 /stop [job-id]
 ```
 
-Job이 하나뿐이고 Human Gate가 없다면 일반 text도 해당 Job의 steering으로 처리할 수 있습니다.
+---
 
-### Session / Steering
+## Session / Steering
 
-Codex session이 존재하면:
+기존 external Codex session이 있으면 우선:
 
 ```text
-codex exec resume
+codex exec resume <session-id>
 ```
 
-형태로 continuation을 시도합니다.
+을 사용합니다.
 
-Session resume이 불가능하면 repository/filesystem 상태를 다시 읽어 새 Codex session으로 fallback합니다.
+resume이 불가능하면 repository/filesystem 상태를 다시 확인한 뒤 새 session으로 fallback합니다.
 
-따라서 Codex session 자체는 durable source of truth가 아닙니다.
+Codex session은 continuation 최적화이고, durable implementation state는 repository입니다.
 
 상세:
 
 - [Sessions and Feedback](docs/SESSIONS_AND_FEEDBACK.md)
 
-### Human Gate
+---
 
-중요 결정이 필요한 경우 Job은:
+## Human Gate
+
+중요한 결정이 필요하면:
 
 ```text
 WAITING_HUMAN
 ```
 
-으로 전환됩니다.
+상태가 됩니다.
 
-Messenger에서는:
+Messenger에서:
 
-- option 선택
+- option
 - Details
 - Reject
 
-를 사용할 수 있습니다.
-
-Approval 결과는 shell command가 아니라 기존 Codex session continuation instruction으로 전달됩니다.
+를 선택할 수 있습니다.
 
 상세:
 
 - [Human Gate](docs/HUMAN_GATE.md)
 
-### Slack
+---
 
-Slack은 Socket Mode를 사용합니다.
+## Slack
+
+Slack은 Socket Mode입니다.
 
 ```dotenv
 REMOTE_CONTROL_SLACK_ENABLED=true
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_APP_TOKEN=xapp-...
-SLACK_ALLOWED_USER_IDS=U12345678,U87654321
+SLACK_ALLOWED_USER_IDS=U12345678
 ```
 
-Slack MVP는 DM-first입니다.
+필요 설정:
 
-Telegram과 Slack을 동시에 활성화해도 notification은 Job을 생성한 channel로 돌아갑니다.
+- App-Level Token: `connections:write`
+- Bot scopes:
+  - `chat:write`
+  - `im:history`
+  - `im:write`
+- Bot event:
+  - `message.im`
 
 상세:
 
 - [Messaging](docs/MESSAGING.md)
 - [R6 Manual Smoke Test](docs/SMOKE_TEST_R6.md)
 
-### Web Dashboard
+---
+
+## Web Dashboard
 
 ```text
 GET /dashboard
 GET /ui
 ```
 
-`/ui`는 5초마다 runtime snapshot을 갱신하는 read-only 화면입니다.
-
-표시 정보:
-
-- Project 수
-- Host 상태
-- active / queued / failed Job
-- Project OS Task binding
-- quota wait
-- Human Gate
-- recovery 상태
-
-의도적으로 다음 control은 제공하지 않습니다.
-
-- run
-- steer
-- stop
-- approval
-- shell execution
+`/ui`는 read-only이며 기본적으로 5초마다 runtime snapshot을 갱신합니다.
 
 설정:
 
@@ -590,37 +672,75 @@ GET /ui
 REMOTE_CONTROL_WEB_UI_ENABLED=true
 ```
 
+Controller는 기본적으로:
+
+```text
+127.0.0.1:8787
+```
+
+에 bind합니다.
+
+외부 공개가 필요하면 인증 reverse proxy/private network를 사용하세요.
+
 상세:
 
 - [Web Dashboard](docs/WEB_UI.md)
 
-### 장애 복구
+---
 
-지원하는 주요 recovery:
+## Advanced — Remote Runner
 
-- Host offline → `WAITING_HOST`
-- heartbeat expiry → OFFLINE
-- Codex quota → `WAITING_QUOTA`
-- quota backoff
-  - 30분
-  - 1시간
-  - 2시간 cap
-- Controller restart reconciliation
-- Desktop execution adoption
-- Human Gate expiry fail-closed
-- Project OS finalization retry
+다음 구성도 지원합니다.
 
-Project OS Task를 claim한 뒤에는 ProjectWork가 원래 Host에 pin됩니다.
+```text
+Messenger
+   ↓
+Controller Host
+   ↓ WebSocket
+Remote Desktop Runner
+   ↓
+Codex
+```
 
-Recovery 중 다른 checkout으로 자동 이동하지 않습니다.
+하지만 **Desktop과 Lightsail 각각에서 Messenger를 통해 그 머신의 Codex를 실행**하는 것이 목적이라면 사용하지 않아도 됩니다.
+
+Remote Runner가 필요한 경우에만:
+
+```dotenv
+REMOTE_RUNNER_CONTROLLER_WS=wss://YOUR-CONTROLLER/ws/runner
+REMOTE_RUNNER_TOKEN=<controller token>
+REMOTE_RUNNER_HOST_ID=desktop-main
+```
+
+을 설정하고:
+
+```powershell
+.\.venv\Scripts\remote-runner.exe start
+```
+
+합니다.
 
 상세:
 
-- [Recovery & Scheduler](docs/RECOVERY.md)
+- [Runners](docs/RUNNERS.md)
+- [Protocol](docs/PROTOCOL.md)
 
-### Runtime API
+---
 
-주요 조회 API:
+## Security 핵심
+
+- Telegram / Slack 사용자 allowlist
+- Messenger text → arbitrary shell 변환 금지
+- process 실행은 direct argv
+- project path는 server-side registry에서만 결정
+- Project Operation whitelist
+- Codex auth는 실행 Host 로컬에만 존재
+- Project OS canonical YAML은 `projectctl`만 변경
+- Web UI는 read-only
+
+---
+
+## Runtime API
 
 ```text
 GET /health
@@ -635,30 +755,6 @@ GET /recovery
 GET /project-work
 GET /jobs/{job_id}/project-work
 ```
-
-Controller HTTP server는 기본적으로:
-
-```text
-127.0.0.1:8787
-```
-
-에 bind합니다.
-
-외부에서 Dashboard/API를 접근해야 한다면 public exposure보다 private network 또는 인증된 reverse proxy를 권장합니다.
-
-### Security 핵심
-
-- Telegram / Slack 사용자 allowlist
-- Messenger text → shell 변환 금지
-- direct subprocess argv 사용
-- project path는 server-side registry에서만 결정
-- Project Operation whitelist
-- task / role / actor validation
-- Codex auth는 실행 Host 로컬에만 존재
-- Desktop Runner outbound-only
-- Slack Socket Mode outbound connection
-- Project OS canonical YAML은 `projectctl`만 변경
-- Web UI는 read-only
 
 ---
 
@@ -692,5 +788,6 @@ Manual smoke test:
 - [x] R4 — retry / quota / restart recovery
 - [x] R5 — Project OS adapter
 - [x] R6 — Slack / Web UI
+- [x] Production hardening — quota signal/retry visibility + independent local-node guide
 
-Package version: **0.7.0**
+Package version: **0.7.1**

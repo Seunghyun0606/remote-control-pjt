@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -14,20 +15,46 @@ class QuotaSignal:
 _QUOTA_PHRASES = (
     "you've hit your usage limit",
     "you’ve hit your usage limit",
+    "you have hit your usage limit",
     "usage limit reached",
+    "usage limit exceeded",
     "rate limit reached",
     "rate limit exceeded",
     "too many requests",
 )
+_QUOTA_CODES = (
+    "usage_limit_exceeded",
+    "rate_limit_exceeded",
+)
+_TRY_AGAIN_AT = re.compile(r"\btry again at\s+([^\n.]+)", re.IGNORECASE)
+_ORDINAL_DAY = re.compile(r"(?<=\d)(?:st|nd|rd|th)\b", re.IGNORECASE)
+_FULL_RESET_FORMATS = (
+    "%b %d, %Y, %I:%M %p",
+    "%b %d, %Y %I:%M %p",
+    "%b %d %Y %I:%M %p",
+    "%B %d, %Y, %I:%M %p",
+    "%B %d, %Y %I:%M %p",
+    "%B %d %Y %I:%M %p",
+)
 
 
-def detect_quota_text(text: str | None) -> QuotaSignal | None:
+def detect_quota_text(
+    text: str | None,
+    *,
+    now: datetime | None = None,
+) -> QuotaSignal | None:
     if not text:
         return None
     lowered = text.casefold()
-    if not any(phrase in lowered for phrase in _QUOTA_PHRASES):
+    is_quota = any(phrase in lowered for phrase in _QUOTA_PHRASES) or any(
+        code in lowered for code in _QUOTA_CODES
+    )
+    if not is_quota:
         return None
-    return QuotaSignal(message=text.strip()[:4000])
+    return QuotaSignal(
+        message=text.strip()[:4000],
+        reset_at=_extract_text_reset(text, now=now),
+    )
 
 
 def detect_quota_event(event: dict[str, Any]) -> QuotaSignal | None:
@@ -47,7 +74,10 @@ def detect_quota_event(event: dict[str, Any]) -> QuotaSignal | None:
     for text in _text_values(event):
         signal = detect_quota_text(text)
         if signal is not None:
-            return QuotaSignal(message=signal.message, reset_at=reset_at)
+            return QuotaSignal(
+                message=signal.message,
+                reset_at=reset_at or signal.reset_at,
+            )
 
     if typed_limit:
         return QuotaSignal(
@@ -76,6 +106,46 @@ def retry_at(
     exponent = max(attempt_count - 1, 0)
     delay = min(initial * (2**exponent), maximum)
     return current + timedelta(seconds=delay)
+
+
+def _extract_text_reset(
+    text: str,
+    *,
+    now: datetime | None = None,
+) -> datetime | None:
+    match = _TRY_AGAIN_AT.search(text)
+    if match is None:
+        return None
+
+    current = now or datetime.now().astimezone()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    candidate = _ORDINAL_DAY.sub("", match.group(1)).strip(" ,")
+    candidate = re.sub(r"\s+", " ", candidate)
+
+    for fmt in _FULL_RESET_FORMATS:
+        try:
+            parsed = datetime.strptime(candidate, fmt)
+        except ValueError:
+            continue
+        localized = parsed.replace(tzinfo=current.tzinfo)
+        if localized <= current:
+            return None
+        return localized.astimezone(timezone.utc)
+
+    try:
+        parsed_time = datetime.strptime(candidate, "%I:%M %p").time()
+    except ValueError:
+        return None
+    localized = current.replace(
+        hour=parsed_time.hour,
+        minute=parsed_time.minute,
+        second=0,
+        microsecond=0,
+    )
+    if localized <= current:
+        localized += timedelta(days=1)
+    return localized.astimezone(timezone.utc)
 
 
 def _extract_reset(value: Any) -> datetime | None:
@@ -129,7 +199,16 @@ def _parse_reset_value(key: str, value: Any) -> datetime | None:
 def _text_values(value: Any):
     if isinstance(value, dict):
         for key, nested in value.items():
-            if key in {"message", "text", "error", "detail", "reason"} and isinstance(nested, str):
+            if key in {
+                "message",
+                "text",
+                "error",
+                "detail",
+                "reason",
+                "code",
+                "error_code",
+                "codex_error_info",
+            } and isinstance(nested, str):
                 yield nested
             elif isinstance(nested, (dict, list)):
                 yield from _text_values(nested)

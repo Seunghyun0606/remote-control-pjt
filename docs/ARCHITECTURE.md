@@ -15,7 +15,20 @@ Remote Agent Control stores runtime state:
 
 Project/product state remains outside this control plane. When Project OS is used, its canonical state stays under `.project-os` and is accessed through `projectctl`.
 
-## R0 ~ R6
+## Primary deployment model
+
+The normal deployment is one independent Controller per execution machine.
+
+```text
+Telegram/Slack A -> Desktop Controller -> Desktop Codex -> Desktop projects
+Telegram/Slack B -> Lightsail Controller -> Lightsail Codex -> Lightsail projects
+```
+
+Desktop and Lightsail do not need to control each other. Each node owns its local runtime DB, project registry and Codex authentication.
+
+The remote Runner path remains available as an advanced topology when one Controller intentionally needs to dispatch to another machine.
+
+## R0 ~ R6 runtime internals
 
 ```text
 Telegram / Slack
