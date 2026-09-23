@@ -111,13 +111,19 @@ class ProjectOSAdapter(ProjectAdapter):
         )
 
         if current.status == "SELECTED":
-            await self.operations.execute(
-                host_id=host_id,
-                project_id=project.id,
-                working_directory=working_directory,
-                operation="project_os_claim",
-                payload={"task_id": task_id, "role": role},
+            current_tasks = status.get("current_tasks")
+            already_claimed = (
+                isinstance(current_tasks, list)
+                and task_id in current_tasks
             )
+            if not already_claimed:
+                await self.operations.execute(
+                    host_id=host_id,
+                    project_id=project.id,
+                    working_directory=working_directory,
+                    operation="project_os_claim",
+                    payload={"task_id": task_id, "role": role},
+                )
             current = await self.work.update(
                 job_id,
                 status="CLAIMED",
@@ -125,7 +131,11 @@ class ProjectOSAdapter(ProjectAdapter):
                 error=None,
             )
             await self.events.append(
-                "PROJECT_OS_TASK_CLAIMED",
+                (
+                    "PROJECT_OS_CLAIM_RECONCILED"
+                    if already_claimed
+                    else "PROJECT_OS_TASK_CLAIMED"
+                ),
                 job_id=job_id,
                 project_id=project.id,
                 host_id=host_id,
