@@ -84,7 +84,10 @@ class ControllerService:
             projects = self.projects.list()
             if not projects:
                 return "등록된 프로젝트가 없습니다."
-            return "\n".join(f"{project.id} — {project.name}" for project in projects)
+            return "\n".join(
+                f"{project.id} — {project.name} [{project.adapter}]"
+                for project in projects
+            )
         if command.intent == Intent.HOSTS:
             if self.hosts is None:
                 return "Host Registry가 활성화되지 않았습니다."
@@ -130,9 +133,13 @@ class ControllerService:
         if command.intent == Intent.JOB:
             assert command.job_id is not None
             job = await self.jobs.require(command.job_id)
+            work = await self.jobs.project_work_for(job.id)
+            task_line = f"\nTask: {work.task_id}" if work and work.task_id else ""
+            adapter_line = f"\nAdapter: {work.adapter}" if work else ""
             return (
                 f"{job.id}\nProject: {job.project_id}\nState: {job.state}\n"
                 f"Host: {job.assigned_host or '-'}\nSession: {job.external_session_id or '-'}"
+                f"{adapter_line}{task_line}"
             )
         if command.intent == Intent.PAUSE:
             job = await self.jobs.select_for_user(
