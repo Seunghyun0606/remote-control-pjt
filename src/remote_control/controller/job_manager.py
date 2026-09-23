@@ -57,6 +57,7 @@ class JobManager:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._handles: dict[str, RunHandle] = {}
         self._steering: dict[str, list[str]] = defaultdict(list)
+        self._job_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._notifier: Notifier | None = None
 
     def set_notifier(self, notifier: Notifier | None) -> None:
@@ -134,20 +135,23 @@ class JobManager:
         instruction = instruction.strip()
         if not instruction:
             raise ValueError("steering instruction must not be empty")
-        job = await self.require(job_id)
-        state = JobState(job.state)
-        steerable = {JobState.ASSIGNED, JobState.STARTING, JobState.RUNNING}
-        if state not in steerable:
-            raise ValueError(f"job {job_id} cannot accept steering in state {state.value}")
-        self._steering[job_id].append(instruction)
-        await self.events.append(
-            "STEERING_QUEUED",
-            job_id=job.id,
-            project_id=job.project_id,
-            host_id=job.assigned_host,
-            payload={"instruction": instruction},
-        )
-        return job
+        async with self._job_locks[job_id]:
+            job = await self.require(job_id)
+            state = JobState(job.state)
+            steerable = {JobState.ASSIGNED, JobState.STARTING, JobState.RUNNING}
+            if state not in steerable:
+                raise ValueError(
+                    f"job {job_id} cannot accept steering in state {state.value}"
+                )
+            self._steering[job_id].append(instruction)
+            await self.events.append(
+                "STEERING_QUEUED",
+                job_id=job.id,
+                project_id=job.project_id,
+                host_id=job.assigned_host,
+                payload={"instruction": instruction},
+            )
+            return job
 
     async def cancel(self, job_id: str) -> JobRecord:
         job = await self.require(job_id)
@@ -283,16 +287,30 @@ class JobManager:
                 )
                 return
 
-            steering = self._drain_steering(job_id)
-            if steering is None:
-                await self.jobs.update(
-                    job_id,
-                    result=current_result.final_message,
-                    error=None,
-                )
-                if self.sessions is not None:
-                    await self.sessions.mark(job_id, SessionStatus.IDLE)
-                await self._transition(job_id, JobState.COMPLETED)
+            completed = False
+            async with self._job_locks[job_id]:
+                steering = self._drain_steering(job_id)
+                if steering is None:
+                    await self.jobs.update(
+                        job_id,
+                        result=current_result.final_message,
+                        error=None,
+                    )
+                    if self.sessions is not None:
+                        await self.sessions.mark(job_id, SessionStatus.IDLE)
+                    await self._transition(job_id, JobState.COMPLETED)
+                    completed = True
+                else:
+                    job = await self.require(job_id)
+                    await self.events.append(
+                        "STEERING_APPLIED",
+                        job_id=job_id,
+                        project_id=job.project_id,
+                        host_id=job.assigned_host,
+                        payload={"instruction": steering},
+                    )
+
+            if completed:
                 await self._notify(
                     job_id,
                     "✅ 작업이 완료되었습니다."
@@ -300,14 +318,7 @@ class JobManager:
                 )
                 return
 
-            job = await self.require(job_id)
-            await self.events.append(
-                "STEERING_APPLIED",
-                job_id=job_id,
-                project_id=job.project_id,
-                host_id=job.assigned_host,
-                payload={"instruction": steering},
-            )
+            assert steering is not None
             await self._notify(job_id, "↪ 추가 지시를 기존 Codex session에 전달합니다.")
             next_result = await self._resume_or_fallback(
                 job_id,
