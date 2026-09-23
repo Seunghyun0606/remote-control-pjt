@@ -9,8 +9,10 @@ from remote_control.controller.service import ControllerService
 from remote_control.messaging.telegram import (
     BOT_COMMANDS,
     TelegramProvider,
+    build_job_action_markup,
     extract_job_id,
     extract_project_id,
+    parse_job_action_callback,
 )
 from remote_control.runners.fake import FakeAgentRunner
 from remote_control.storage.models import JobRecord
@@ -366,3 +368,26 @@ async def test_multiple_jobs_in_topic_offer_job_selection(
     assert len(selection_calls) == 1
     assert selection_calls[0]["message_thread_id"] == 42
     assert provider._pending_steers
+
+
+def test_job_action_markup_for_failed_and_paused_jobs():
+    failed = build_job_action_markup(
+        "JOB-20260924-ABC123\nProject: demo\nState: FAILED\nError: boom"
+    )
+    assert failed is not None
+    assert failed.inline_keyboard[0][0].callback_data == (
+        "jobaction:retry:JOB-20260924-ABC123"
+    )
+
+    paused = build_job_action_markup(
+        "SESSION-1\nProject: demo\nJob: JOB-20260924-DEF456\n"
+        "Job state: PAUSED\nCodex session: thread-1"
+    )
+    assert paused is not None
+    assert paused.inline_keyboard[0][0].callback_data == (
+        "jobaction:resume:JOB-20260924-DEF456"
+    )
+
+    assert parse_job_action_callback(
+        "jobaction:retry:JOB-20260924-ABC123"
+    ) == ("retry", "JOB-20260924-ABC123")
