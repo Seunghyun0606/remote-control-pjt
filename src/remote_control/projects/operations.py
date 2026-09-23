@@ -9,6 +9,7 @@ from typing import Any, Protocol
 
 import yaml
 
+from remote_control.executables import ExecutableResolutionError, resolve_executable
 from remote_control.transport.runner_ws import RunnerGateway
 
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
@@ -180,15 +181,19 @@ class LocalProjectOperationExecutor:
     ) -> dict[str, Any]:
         allowed = allowed_returncodes or {0}
         try:
+            resolution = resolve_executable(command[0])
+            process_command = resolution.build_command(command[1:])
             process = await asyncio.create_subprocess_exec(
-                *command,
+                *process_command,
                 cwd=str(root),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-        except FileNotFoundError as exc:
+        except ExecutableResolutionError as exc:
+            raise ProjectOperationError(str(exc)) from exc
+        except OSError as exc:
             raise ProjectOperationError(
-                f"required executable not found: {command[0]}"
+                f"failed to launch {command[0]!r}: {exc}"
             ) from exc
 
         try:
