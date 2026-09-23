@@ -20,3 +20,8 @@ def test_runtime_home_stabilizes_relative_paths(tmp_path):
         "sqlite+aiosqlite:///"
         + (tmp_path / "state" / "remote-control.db").resolve().as_posix()
     )
+
+
+def test_codex_home_is_loaded_for_child_runtime():
+    settings = Settings(_env_file=None, CODEX_HOME="C:/Users/test/.codex")
+    assert settings.codex_home == "C:/Users/test/.codex"
