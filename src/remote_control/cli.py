@@ -35,6 +35,8 @@ from remote_control.storage.repositories import (
     ProjectWorkRepository,
     RecoveryRepository,
     SessionRepository,
+    TelegramMessageBindingRepository,
+    TelegramProjectTopicRepository,
 )
 from remote_control.transport.runner_ws import RunnerGateway
 
@@ -122,6 +124,8 @@ async def _run_controller(*, no_telegram: bool) -> None:
     )
     recovery = RecoveryRepository(db)
     project_work = ProjectWorkRepository(db)
+    telegram_topics = TelegramProjectTopicRepository(db)
+    telegram_bindings = TelegramMessageBindingRepository(db)
 
     local_runner = CodexRunner(
         executable=settings.codex_executable,
@@ -194,6 +198,8 @@ async def _run_controller(*, no_telegram: bool) -> None:
             token=settings.telegram_bot_token,
             allowed_user_ids=settings.telegram_allowed_user_ids,
             controller=controller,
+            topics=telegram_topics,
+            bindings=telegram_bindings,
         )
 
     slack: SlackProvider | None = None
