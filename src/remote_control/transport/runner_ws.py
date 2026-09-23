@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -70,7 +71,12 @@ class RunnerGateway:
         for execution_id, pending in list(self._pending.items()):
             if pending.host_id == host_id and not pending.future.done():
                 pending.future.set_result(
-                    AgentRunResult(returncode=1, final_message="runner disconnected")
+                    AgentRunResult(
+                        returncode=75,
+                        session_id=pending.handle.session_id,
+                        final_message="runner disconnected",
+                        retry_kind="host",
+                    )
                 )
                 self._pending.pop(execution_id, None)
 
@@ -160,6 +166,33 @@ class RunnerGateway:
             session_id=session_id,
         )
 
+    def adopt_remote(
+        self,
+        *,
+        host_id: str,
+        execution_id: str,
+        session_id: str | None,
+        on_event: RunEventCallback | None = None,
+    ) -> RunHandle:
+        existing = self._pending.get(execution_id)
+        if existing is not None:
+            return existing.handle
+        future: asyncio.Future[AgentRunResult] = asyncio.get_running_loop().create_future()
+        handle = RemoteRunHandle(
+            execution_id=execution_id,
+            host_id=host_id,
+            gateway=self,
+            result_future=future,
+        )
+        handle.session_id = session_id
+        self._pending[execution_id] = _PendingRun(
+            host_id=host_id,
+            future=future,
+            handle=handle,
+            on_event=on_event,
+        )
+        return handle
+
     async def _start_remote_operation(
         self,
         *,
@@ -238,6 +271,8 @@ class RunnerGateway:
                         returncode=int(payload.get("returncode", 0)),
                         session_id=_string_or_none(payload.get("session_id")),
                         final_message=_string_or_none(payload.get("final_message")),
+                        retry_kind=_string_or_none(payload.get("retry_kind")),
+                        retry_at=_datetime_or_none(payload.get("retry_at")),
                     )
                 )
             self._pending.pop(execution_id, None)
@@ -250,6 +285,8 @@ class RunnerGateway:
                         returncode=int(payload.get("returncode", 1)),
                         session_id=_string_or_none(payload.get("session_id")),
                         final_message=_string_or_none(payload.get("error")) or "remote runner error",
+                        retry_kind=_string_or_none(payload.get("retry_kind")),
+                        retry_at=_datetime_or_none(payload.get("retry_at")),
                     )
                 )
             self._pending.pop(execution_id, None)
@@ -257,3 +294,14 @@ class RunnerGateway:
 
 def _string_or_none(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _datetime_or_none(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
