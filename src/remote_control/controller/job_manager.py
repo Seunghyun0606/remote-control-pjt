@@ -155,10 +155,18 @@ class JobManager:
         project_session = None
         external_session_id = None
         if self.project_sessions is not None:
+            legacy = await self.jobs.latest_for_user_project(
+                requested_by_user,
+                project.id,
+            )
             project_session = await self.project_sessions.acquire(
                 project_id=project.id,
                 owner_user_id=requested_by_user,
                 job_id=job_id,
+                seed_external_session_id=(
+                    legacy.external_session_id if legacy is not None else None
+                ),
+                seed_host_id=legacy.assigned_host if legacy is not None else None,
             )
             external_session_id = project_session.external_session_id
 
@@ -229,6 +237,8 @@ class JobManager:
                 project_id=original.project_id,
                 owner_user_id=original.requested_by_user,
                 job_id=retry_id,
+                seed_external_session_id=original.external_session_id,
+                seed_host_id=original.assigned_host,
             )
             external_session_id = (
                 project_session.external_session_id or original.external_session_id
