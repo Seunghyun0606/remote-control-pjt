@@ -73,6 +73,8 @@ class ProjectSessionRegistry:
         project_id: str,
         owner_user_id: str,
         job_id: str,
+        seed_external_session_id: str | None = None,
+        seed_host_id: str | None = None,
     ) -> ProjectSessionRecord:
         key = (project_id, owner_user_id)
         async with self._locks[key]:
@@ -84,8 +86,8 @@ class ProjectSessionRegistry:
                         id=_project_session_id(),
                         project_id=project_id,
                         owner_user_id=owner_user_id,
-                        external_session_id=None,
-                        host_id=None,
+                        external_session_id=seed_external_session_id,
+                        host_id=seed_host_id,
                         status=ProjectSessionStatus.IDLE.value,
                         last_job_id=None,
                         locked_by_job_id=None,
@@ -98,6 +100,8 @@ class ProjectSessionRegistry:
                     payload={
                         "project_session_id": current.id,
                         "owner_user_id": owner_user_id,
+                        "seeded_external_session_id": seed_external_session_id,
+                        "seed_host_id": seed_host_id,
                     },
                 )
 
