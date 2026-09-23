@@ -53,15 +53,22 @@ class JobRepository:
             )
             return list(result.scalars())
 
-    async def list_active_for_user(self, user_id: str) -> list[JobRecord]:
+    async def list_active_for_user(
+        self,
+        user_id: str,
+        *,
+        project_id: str | None = None,
+    ) -> list[JobRecord]:
         terminal = ("FAILED", "CANCELLED", "COMPLETED")
         async with self.db.sessions() as session:
-            result = await session.execute(
+            query = (
                 select(JobRecord)
                 .where(JobRecord.requested_by_user == user_id)
                 .where(JobRecord.state.not_in(terminal))
-                .order_by(JobRecord.created_at.desc())
             )
+            if project_id is not None:
+                query = query.where(JobRecord.project_id == project_id)
+            result = await session.execute(query.order_by(JobRecord.created_at.desc()))
             return list(result.scalars())
 
     async def update(self, job_id: str, **changes: Any) -> JobRecord:
