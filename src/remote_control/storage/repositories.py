@@ -72,6 +72,21 @@ class JobRepository:
             result = await session.execute(query.order_by(JobRecord.created_at.desc()))
             return list(result.scalars())
 
+    async def latest_for_user_project(
+        self,
+        user_id: str,
+        project_id: str,
+    ) -> JobRecord | None:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(JobRecord)
+                .where(JobRecord.requested_by_user == user_id)
+                .where(JobRecord.project_id == project_id)
+                .order_by(JobRecord.created_at.desc())
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
+
     async def update(self, job_id: str, **changes: Any) -> JobRecord:
         async with self.db.sessions() as session:
             job = await session.get(JobRecord, job_id)
