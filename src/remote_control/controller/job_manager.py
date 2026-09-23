@@ -29,6 +29,7 @@ from remote_control.recovery.quota import (
 )
 from remote_control.runners.base import AgentRunResult, AgentRunner, RunHandle
 from remote_control.runners.codex import extract_session_id
+from remote_control.sessions.project_sessions import ProjectSessionRegistry
 from remote_control.sessions.registry import SessionRegistry, SessionStatus
 from remote_control.storage.models import ApprovalRecord, JobRecord, ProjectWorkRecord, RecoveryRecord
 from remote_control.storage.repositories import (
@@ -79,6 +80,7 @@ class JobManager:
         local_host_id: str,
         hosts: HostRegistry | None = None,
         sessions: SessionRegistry | None = None,
+        project_sessions: ProjectSessionRegistry | None = None,
         approvals: ApprovalRegistry | None = None,
         recovery: RecoveryRepository | None = None,
         project_adapters: ProjectAdapterRegistry | None = None,
@@ -95,6 +97,7 @@ class JobManager:
         self.local_host_id = local_host_id
         self.hosts = hosts
         self.sessions = sessions
+        self.project_sessions = project_sessions
         self.approvals = approvals
         self.recovery = recovery
         self.project_adapters = project_adapters
@@ -148,8 +151,19 @@ class JobManager:
     ) -> JobRecord:
         project = self.projects.get(project_id)
         self._validate_requested_host(project_id, requested_host)
+        job_id = _job_id()
+        project_session = None
+        external_session_id = None
+        if self.project_sessions is not None:
+            project_session = await self.project_sessions.acquire(
+                project_id=project.id,
+                owner_user_id=requested_by_user,
+                job_id=job_id,
+            )
+            external_session_id = project_session.external_session_id
+
         job = JobRecord(
-            id=_job_id(),
+            id=job_id,
             project_id=project.id,
             requested_by_channel=requested_by_channel,
             requested_by_user=requested_by_user,
@@ -157,13 +171,27 @@ class JobManager:
             assigned_host=None,
             instruction=instruction,
             state=JobState.QUEUED.value,
+            external_session_id=external_session_id,
         )
-        await self.jobs.add(job)
+        try:
+            await self.jobs.add(job)
+        except Exception:
+            if self.project_sessions is not None and project_session is not None:
+                await self.project_sessions.release_for_job(
+                    project_id=project.id,
+                    owner_user_id=requested_by_user,
+                    job_id=job_id,
+                )
+            raise
         await self.events.append(
             "JOB_CREATED",
             job_id=job.id,
             project_id=project.id,
-            payload={"requested_host": requested_host},
+            payload={
+                "requested_host": requested_host,
+                "project_session_id": project_session.id if project_session else None,
+                "external_session_id": external_session_id,
+            },
         )
 
         try:
@@ -193,8 +221,21 @@ class JobManager:
                 "/run으로 현재 canonical task state를 다시 평가하세요."
             )
 
+        retry_id = _job_id()
+        project_session = None
+        external_session_id = original.external_session_id
+        if self.project_sessions is not None:
+            project_session = await self.project_sessions.acquire(
+                project_id=original.project_id,
+                owner_user_id=original.requested_by_user,
+                job_id=retry_id,
+            )
+            external_session_id = (
+                project_session.external_session_id or original.external_session_id
+            )
+
         retry = JobRecord(
-            id=_job_id(),
+            id=retry_id,
             project_id=original.project_id,
             requested_by_channel=original.requested_by_channel,
             requested_by_user=original.requested_by_user,
@@ -202,9 +243,18 @@ class JobManager:
             assigned_host=None,
             instruction=original.instruction,
             state=JobState.QUEUED.value,
-            external_session_id=original.external_session_id,
+            external_session_id=external_session_id,
         )
-        await self.jobs.add(retry)
+        try:
+            await self.jobs.add(retry)
+        except Exception:
+            if self.project_sessions is not None and project_session is not None:
+                await self.project_sessions.release_for_job(
+                    project_id=original.project_id,
+                    owner_user_id=original.requested_by_user,
+                    job_id=retry_id,
+                )
+            raise
         await self.events.append(
             "JOB_RETRY_CREATED",
             job_id=retry.id,
@@ -923,6 +973,15 @@ class JobManager:
                         job_id,
                         f"📌 Project OS Task: {prepared.task_id}\nRole: {prepared.role or '-'}",
                     )
+
+            current = await self.require(job_id)
+            if current.external_session_id:
+                await self._transition(job_id, JobState.RUNNING)
+                result = await self._resume_or_fallback(job_id, instruction)
+                if result is None:
+                    return
+                await self._finish_or_continue(job_id, result)
+                return
 
             handle = await self._start_new_turn(job, instruction)
             await self._set_handle(job_id, handle)
@@ -1661,6 +1720,14 @@ class JobManager:
                 external_session_id=external_session_id,
                 status=statuses.get(state, SessionStatus.ACTIVE),
             )
+        if self.project_sessions is not None:
+            await self.project_sessions.bind_for_job(
+                project_id=job.project_id,
+                owner_user_id=job.requested_by_user,
+                job_id=job.id,
+                external_session_id=external_session_id,
+                host_id=job.assigned_host,
+            )
 
     async def _external_session_id(self, job: JobRecord) -> str | None:
         if self.sessions is not None:
@@ -1744,6 +1811,12 @@ class JobManager:
             host_id=updated.assigned_host,
             payload={"from": current.value, "to": target.value},
         )
+        if target in TERMINAL_STATES and self.project_sessions is not None:
+            await self.project_sessions.release_for_job(
+                project_id=job.project_id,
+                owner_user_id=job.requested_by_user,
+                job_id=job.id,
+            )
         return updated
 
     async def _notify(self, job_id: str, message: str) -> None:
