@@ -2,7 +2,7 @@
 
 ## Control boundaries
 
-1. Telegram authorization uses numeric user IDs from an allowlist.
+1. Telegram and Slack authorization use provider-specific user-ID allowlists.
 2. Approval responses are restricted to the original Job user.
 3. Messenger text never becomes a shell command.
 4. Plain text steering is accepted only for a validated active Job.
@@ -62,6 +62,19 @@ A claimed Project OS work item is pinned to its original Host during recovery to
 
 ## Secrets
 
-`.env` may contain Telegram and Controller/Runner transport secrets.
+`.env` may contain Telegram, Slack and Controller/Runner transport secrets. Slack bot/app tokens must never be committed or sent to execution Hosts.
 
 Codex authentication and any Project OS environment-specific credentials remain local to each execution Host.
+
+
+## Web dashboard boundary
+
+The R6 `/ui` surface renders runtime state only. It does not expose run, steer, stop, approval or shell controls.
+
+`/dashboard` and the existing HTTP API still contain operational information. The Controller remains loopback-bound by default. If browser access is exposed beyond the trusted host, put it behind an authenticated reverse proxy or private network.
+
+## Slack boundary
+
+Slack commands pass through the same ControllerService validation as Telegram. Slack text is never treated as a shell command.
+
+Socket Mode authenticates the Slack app connection with the app-level token. User authorization is separate and uses `SLACK_ALLOWED_USER_IDS`. Human Gate responses still require Approval ownership.
