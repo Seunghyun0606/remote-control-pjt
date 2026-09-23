@@ -11,8 +11,8 @@ Messenger에서 Lightsail/Desktop의 AI coding agent를 안전하게 실행하�
 현재 **R0 ~ R6**까지 구현되어 있습니다.
 
 ```text
-Telegram
-   ↓
+Telegram / Slack
+       ↓
 Controller
    ├─ Job / Host / Session / Approval / Recovery / ProjectWork
    ├─ Recovery Scheduler
@@ -23,6 +23,8 @@ Controller
    └─ WebSocket Gateway
             ↑ outbound only
        Desktop Runner → Codex CLI / projectctl
+
+Browser → /ui read-only dashboard
 ```
 
 ## Quick Start
@@ -71,7 +73,7 @@ Controller:
 remote-control controller start
 ```
 
-Telegram 없이 API만:
+Telegram 없이 API/Slack만 사용하려면:
 
 ```bash
 remote-control controller start --no-telegram
@@ -128,6 +130,8 @@ projects:
 Messenger에서 임의 filesystem path를 전달할 수 없습니다.
 
 ## Messenger 사용
+
+Telegram과 Slack DM에서 같은 명령을 사용합니다.
 
 ```text
 /projects
@@ -271,6 +275,8 @@ Desktop Runner는 Controller로 outbound WebSocket만 연결합니다. Project O
 
 ```text
 GET /health
+GET /dashboard
+GET /ui  # REMOTE_CONTROL_WEB_UI_ENABLED=true
 GET /projects
 GET /hosts
 GET /jobs
@@ -302,12 +308,14 @@ HTTP API는 기본적으로 `127.0.0.1`에 bind합니다.
 - [Recovery & Scheduler](docs/RECOVERY.md)
 - [Sessions and Feedback](docs/SESSIONS_AND_FEEDBACK.md)
 - [Human Gate](docs/HUMAN_GATE.md)
-- [Messaging](docs/MESSAGING.md)\n- [Web Dashboard](docs/WEB_UI.md)
+- [Messaging](docs/MESSAGING.md)
+- [Web Dashboard](docs/WEB_UI.md)
 - [Runners](docs/RUNNERS.md)
 - [Protocol](docs/PROTOCOL.md)
 - [Security](docs/SECURITY.md)
 - [R4 Manual Smoke Test](docs/SMOKE_TEST_R4.md)
-- [R5 Manual Smoke Test](docs/SMOKE_TEST_R5.md)\n- [R6 Manual Smoke Test](docs/SMOKE_TEST_R6.md)
+- [R5 Manual Smoke Test](docs/SMOKE_TEST_R5.md)
+- [R6 Manual Smoke Test](docs/SMOKE_TEST_R6.md)
 
 ## Roadmap
 
