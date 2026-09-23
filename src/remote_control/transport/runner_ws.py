@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from fastapi import WebSocket
@@ -51,10 +52,17 @@ class _PendingRun:
     on_event: RunEventCallback | None
 
 
+@dataclass(slots=True)
+class _PendingProjectOperation:
+    host_id: str
+    future: asyncio.Future[dict[str, Any]]
+
+
 class RunnerGateway:
     def __init__(self) -> None:
         self._connections: dict[str, WebSocket] = {}
         self._pending: dict[str, _PendingRun] = {}
+        self._project_pending: dict[str, _PendingProjectOperation] = {}
         self._lock = asyncio.Lock()
 
     async def attach(self, host_id: str, websocket: WebSocket) -> None:
@@ -79,6 +87,12 @@ class RunnerGateway:
                     )
                 )
                 self._pending.pop(execution_id, None)
+        for request_id, pending in list(self._project_pending.items()):
+            if pending.host_id == host_id and not pending.future.done():
+                pending.future.set_exception(
+                    ConnectionError(f"runner {host_id!r} disconnected")
+                )
+                self._project_pending.pop(request_id, None)
 
     def is_connected(self, host_id: str) -> bool:
         return host_id in self._connections
@@ -88,6 +102,44 @@ class RunnerGateway:
         if websocket is None:
             raise ConnectionError(f"runner {host_id!r} is not connected")
         await websocket.send_text(envelope.model_dump_json())
+
+    async def project_operation(
+        self,
+        *,
+        host_id: str,
+        project_id: str,
+        working_directory: Path,
+        operation: str,
+        payload: dict[str, Any],
+        timeout_seconds: int = 30,
+    ) -> dict[str, Any]:
+        if not self.is_connected(host_id):
+            raise ConnectionError(f"runner {host_id!r} is not connected")
+        request_id = uuid4().hex
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._project_pending[request_id] = _PendingProjectOperation(
+            host_id=host_id,
+            future=future,
+        )
+        try:
+            await self.send(
+                host_id,
+                message(
+                    "PROJECT_OPERATION_REQUEST",
+                    request_id=request_id,
+                    project_id=project_id,
+                    working_directory=str(working_directory),
+                    operation=operation,
+                    payload=payload,
+                ),
+            )
+            return await asyncio.wait_for(future, timeout=max(timeout_seconds, 1))
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"remote project operation {operation!r} timed out"
+            ) from exc
+        finally:
+            self._project_pending.pop(request_id, None)
 
     async def cancel_remote(
         self,
@@ -239,6 +291,27 @@ class RunnerGateway:
 
     async def handle(self, host_id: str, envelope: Envelope) -> None:
         payload = envelope.payload
+
+        if envelope.type in {"PROJECT_OPERATION_RESULT", "PROJECT_OPERATION_ERROR"}:
+            request_id = str(payload.get("request_id") or "")
+            pending_operation = self._project_pending.get(request_id)
+            if pending_operation is None or pending_operation.host_id != host_id:
+                return
+            if envelope.type == "PROJECT_OPERATION_ERROR":
+                if not pending_operation.future.done():
+                    pending_operation.future.set_exception(
+                        RuntimeError(
+                            str(payload.get("error") or "remote project operation failed")
+                        )
+                    )
+            else:
+                result = payload.get("result")
+                if not isinstance(result, dict):
+                    result = {}
+                if not pending_operation.future.done():
+                    pending_operation.future.set_result(result)
+            return
+
         execution_id = str(payload.get("execution_id") or "")
         pending = self._pending.get(execution_id)
         if pending is None or pending.host_id != host_id:
