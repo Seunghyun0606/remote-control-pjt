@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import platform
+from pathlib import Path
 
 import typer
 import uvicorn
@@ -49,9 +50,15 @@ app.add_typer(project_app, name="project")
 
 
 @app.command("doctor")
-def doctor() -> None:
+def doctor(
+    env_file: Path | None = typer.Option(
+        None,
+        "--env-file",
+        help="Explicit .env file path",
+    ),
+) -> None:
     """Check local runtime configuration, executables and project paths."""
-    settings = Settings()
+    settings = Settings(_env_file=env_file or ".env")
     projects = (
         ProjectRegistry.from_yaml(settings.resolved_config_path)
         if settings.resolved_config_path.exists()
@@ -73,9 +80,14 @@ def project_add(
         "--actor",
         help="Project OS handoff actor",
     ),
+    env_file: Path | None = typer.Option(
+        None,
+        "--env-file",
+        help="Explicit .env file path",
+    ),
 ) -> None:
     """Register a project in the Remote Control registry."""
-    settings = Settings()
+    settings = Settings(_env_file=env_file or ".env")
     project = add_project(
         settings.resolved_config_path,
         project_id=project_id,
@@ -95,17 +107,22 @@ def project_add(
 @controller_app.command("start")
 def controller_start(
     no_telegram: bool = typer.Option(False, "--no-telegram", help="Do not start Telegram polling"),
+    env_file: Path | None = typer.Option(
+        None,
+        "--env-file",
+        help="Explicit .env file path",
+    ),
 ) -> None:
-    """Start the R6 controller."""
-    asyncio.run(_run_controller(no_telegram=no_telegram))
+    """Start the controller."""
+    asyncio.run(_run_controller(no_telegram=no_telegram, env_file=env_file))
 
 
-async def _run_controller(*, no_telegram: bool) -> None:
+async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    settings = Settings()
+    settings = Settings(_env_file=env_file or ".env")
     if not settings.runner_token:
         raise RuntimeError("CONTROLLER_RUNNER_TOKEN is required")
 
