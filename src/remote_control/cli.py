@@ -186,7 +186,18 @@ async def _run_controller(*, no_telegram: bool) -> None:
         quota_retry_max_seconds=settings.quota_retry_max_seconds,
         restart_grace_seconds=settings.restart_grace_seconds,
     )
-    controller = ControllerService(projects=projects, jobs=manager, hosts=hosts)
+    controller = ControllerService(
+        projects=projects,
+        jobs=manager,
+        hosts=hosts,
+        diagnostics=lambda: format_diagnostics(
+            collect_diagnostics(
+                settings,
+                projects=projects,
+                run_versions=False,
+            )
+        ),
+    )
     scheduler = RecoveryScheduler(
         jobs=manager,
         hosts=hosts,
