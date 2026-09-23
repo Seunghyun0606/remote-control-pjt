@@ -11,6 +11,8 @@ from remote_control.storage.repositories import EventRepository, SessionReposito
 class SessionStatus(StrEnum):
     ACTIVE = "ACTIVE"
     WAITING_HUMAN = "WAITING_HUMAN"
+    WAITING_HOST = "WAITING_HOST"
+    WAITING_QUOTA = "WAITING_QUOTA"
     PAUSED = "PAUSED"
     IDLE = "IDLE"
     FAILED = "FAILED"

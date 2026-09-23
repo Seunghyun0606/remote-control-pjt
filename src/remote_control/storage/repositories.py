@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -11,6 +12,7 @@ from remote_control.storage.models import (
     EventRecord,
     HostRecord,
     JobRecord,
+    RecoveryRecord,
     SessionRecord,
 )
 
@@ -34,6 +36,17 @@ class JobRepository:
         async with self.db.sessions() as session:
             result = await session.execute(
                 select(JobRecord).order_by(JobRecord.created_at.desc()).limit(limit)
+            )
+            return list(result.scalars())
+
+    async def list_states(self, states: set[str]) -> list[JobRecord]:
+        if not states:
+            return []
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(JobRecord)
+                .where(JobRecord.state.in_(states))
+                .order_by(JobRecord.created_at)
             )
             return list(result.scalars())
 
@@ -217,6 +230,17 @@ class ApprovalRepository:
             )
             return list(result.scalars())
 
+    async def expired_pending(self, now: datetime) -> list[ApprovalRecord]:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(ApprovalRecord)
+                .where(ApprovalRecord.status == "PENDING")
+                .where(ApprovalRecord.expires_at.is_not(None))
+                .where(ApprovalRecord.expires_at <= now)
+                .order_by(ApprovalRecord.expires_at)
+            )
+            return list(result.scalars())
+
     async def update(self, approval_id: str, **changes: Any) -> ApprovalRecord:
         async with self.db.sessions() as session:
             record = await session.get(ApprovalRecord, approval_id)
@@ -227,3 +251,40 @@ class ApprovalRepository:
             await session.commit()
             await session.refresh(record)
             return record
+
+
+class RecoveryRepository:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def get(self, job_id: str) -> RecoveryRecord | None:
+        async with self.db.sessions() as session:
+            return await session.get(RecoveryRecord, job_id)
+
+    async def list(self) -> list[RecoveryRecord]:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(RecoveryRecord).order_by(RecoveryRecord.updated_at)
+            )
+            return list(result.scalars())
+
+    async def upsert(self, job_id: str, **changes: Any) -> RecoveryRecord:
+        async with self.db.sessions() as session:
+            record = await session.get(RecoveryRecord, job_id)
+            if record is None:
+                record = RecoveryRecord(job_id=job_id, **changes)
+                session.add(record)
+            else:
+                for key, value in changes.items():
+                    setattr(record, key, value)
+            await session.commit()
+            await session.refresh(record)
+            return record
+
+    async def delete(self, job_id: str) -> None:
+        async with self.db.sessions() as session:
+            record = await session.get(RecoveryRecord, job_id)
+            if record is None:
+                return
+            await session.delete(record)
+            await session.commit()

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Awaitable, Callable
 from uuid import uuid4
@@ -11,7 +11,7 @@ from remote_control.approvals.registry import ApprovalPrompt, ApprovalRegistry
 from remote_control.controller.states import JobState, TERMINAL_STATES, validate_transition
 from remote_control.feedback import FeedbackPolicy, FeedbackThrottler
 from remote_control.hosts.registry import HostRegistry
-from remote_control.hosts.router import HostRouter
+from remote_control.hosts.router import HostRouter, HostUnavailable
 from remote_control.human_gate import (
     HumanGateRequest,
     extract_human_gate,
@@ -19,11 +19,23 @@ from remote_control.human_gate import (
     human_gate_protocol_instruction,
 )
 from remote_control.projects.registry import ProjectRegistry
+from remote_control.recovery.models import RecoveryKind, RecoveryMode
+from remote_control.recovery.quota import (
+    QuotaSignal,
+    detect_quota_event,
+    detect_quota_text,
+    retry_at,
+)
 from remote_control.runners.base import AgentRunResult, AgentRunner, RunHandle
 from remote_control.runners.codex import extract_session_id
 from remote_control.sessions.registry import SessionRegistry, SessionStatus
-from remote_control.storage.models import ApprovalRecord, JobRecord
-from remote_control.storage.repositories import EventRepository, JobRepository
+from remote_control.storage.models import ApprovalRecord, JobRecord, RecoveryRecord
+from remote_control.storage.repositories import (
+    EventRepository,
+    JobRepository,
+    RecoveryRepository,
+)
+from remote_control.transport.runner_ws import RunnerGateway
 
 Notifier = Callable[[str, str], Awaitable[None]]
 ApprovalNotifier = Callable[[str, ApprovalPrompt], Awaitable[None]]
@@ -31,6 +43,16 @@ ApprovalNotifier = Callable[[str, ApprovalPrompt], Awaitable[None]]
 RESUME_INSTRUCTION = (
     "Resume this job from the existing repository and Codex session state. "
     "Inspect current changes before continuing, then finish the next appropriate step."
+)
+QUOTA_RESUME_INSTRUCTION = (
+    "The previous turn stopped because the Codex usage quota was unavailable. "
+    "Re-inspect the repository state, resume the unfinished work safely, and do not "
+    "repeat changes that are already present."
+)
+RESTART_RESUME_INSTRUCTION = (
+    "The Controller restarted while this job was active. Re-inspect the repository "
+    "and session state, then continue the unfinished work safely without duplicating "
+    "already-completed changes."
 )
 
 
@@ -51,7 +73,11 @@ class JobManager:
         hosts: HostRegistry | None = None,
         sessions: SessionRegistry | None = None,
         approvals: ApprovalRegistry | None = None,
+        recovery: RecoveryRepository | None = None,
         progress_interval_seconds: int = 300,
+        quota_retry_initial_seconds: int = 1800,
+        quota_retry_max_seconds: int = 7200,
+        restart_grace_seconds: int = 10,
     ) -> None:
         self.projects = projects
         self.jobs = jobs
@@ -61,9 +87,16 @@ class JobManager:
         self.hosts = hosts
         self.sessions = sessions
         self.approvals = approvals
+        self.recovery = recovery
         self.host_router = HostRouter(hosts) if hosts is not None else None
         self.feedback_policy = FeedbackPolicy()
         self.feedback_throttler = FeedbackThrottler(progress_interval_seconds)
+        self.quota_retry_initial_seconds = max(quota_retry_initial_seconds, 1)
+        self.quota_retry_max_seconds = max(
+            quota_retry_max_seconds,
+            self.quota_retry_initial_seconds,
+        )
+        self.restart_grace_seconds = max(restart_grace_seconds, 0)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._handles: dict[str, RunHandle] = {}
         self._steering: dict[str, list[str]] = defaultdict(list)
@@ -87,7 +120,7 @@ class JobManager:
         requested_host: str = "auto",
     ) -> JobRecord:
         project = self.projects.get(project_id)
-        assigned_host = await self._resolve_host(project_id, requested_host)
+        self._validate_requested_host(project_id, requested_host)
         job = JobRecord(
             id=_job_id(),
             project_id=project.id,
@@ -105,6 +138,18 @@ class JobManager:
             project_id=project.id,
             payload={"requested_host": requested_host},
         )
+
+        try:
+            assigned_host = await self._resolve_host(project_id, requested_host)
+        except HostUnavailable as exc:
+            await self._enter_host_wait(
+                job.id,
+                mode=RecoveryMode.START,
+                error=str(exc),
+                assigned_host=requested_host if requested_host != "auto" else None,
+            )
+            return await self.require(job.id)
+
         await self._transition(job.id, JobState.ASSIGNED, assigned_host=assigned_host)
         self._start_task(job.id, self._execute_new(job.id))
         return await self.require(job.id)
@@ -130,14 +175,21 @@ class JobManager:
         job = await self.require(job_id)
         if JobState(job.state) != JobState.PAUSED:
             raise ValueError(f"job {job_id} is not PAUSED")
-        if job.assigned_host and self.hosts is not None:
-            if not await self.hosts.is_online(job.assigned_host):
-                raise ValueError(
-                    f"host {job.assigned_host!r} is offline; WAITING_HOST recovery is Phase R4"
-                )
+
         previous_task = self._tasks.get(job_id)
         if previous_task is not None and not previous_task.done():
             await asyncio.shield(previous_task)
+
+        if job.assigned_host and self.hosts is not None:
+            if not await self.hosts.is_online(job.assigned_host):
+                await self._enter_host_wait(
+                    job_id,
+                    mode=RecoveryMode.RESUME,
+                    error=f"host {job.assigned_host!r} is offline",
+                    assigned_host=job.assigned_host,
+                    resume_instruction=instruction,
+                )
+                return await self.require(job_id)
 
         await self._transition(job_id, JobState.RUNNING)
         if self.sessions is not None:
@@ -178,6 +230,8 @@ class JobManager:
             await self.sessions.mark(job_id, SessionStatus.CANCELLED)
         if self.approvals is not None:
             await self.approvals.cancel_for_job(job_id)
+        if self.recovery is not None:
+            await self.recovery.delete(job_id)
 
         handle = self._handles.get(job_id)
         if handle is not None:
@@ -284,22 +338,27 @@ class JobManager:
         if previous_task is not None and not previous_task.done():
             await asyncio.shield(previous_task)
 
-        if job.assigned_host and self.hosts is not None:
-            if not await self.hosts.is_online(job.assigned_host):
-                raise ValueError(
-                    f"host {job.assigned_host!r} is offline; WAITING_HOST recovery is Phase R4"
-                )
-
-        await self._transition(job.id, JobState.RUNNING)
-        if self.sessions is not None:
-            await self.sessions.mark(job.id, SessionStatus.ACTIVE)
-
         instruction = _approval_instruction(
             prompt,
             option_key=resolved.selected_option,
             rejected=rejected,
             response_text=response_text,
         )
+
+        if job.assigned_host and self.hosts is not None:
+            if not await self.hosts.is_online(job.assigned_host):
+                await self._enter_host_wait(
+                    job.id,
+                    mode=RecoveryMode.RESUME,
+                    error=f"host {job.assigned_host!r} is offline",
+                    assigned_host=job.assigned_host,
+                    resume_instruction=instruction,
+                )
+                return resolved
+
+        await self._transition(job.id, JobState.RUNNING)
+        if self.sessions is not None:
+            await self.sessions.mark(job.id, SessionStatus.ACTIVE)
         self._start_task(job.id, self._execute_resume(job.id, instruction))
         return resolved
 
@@ -328,6 +387,267 @@ class JobManager:
             raise ValueError("multiple jobs match; specify a job id")
         return candidates[0]
 
+    async def reconcile_startup(self, *, now: datetime | None = None) -> int:
+        if self.recovery is None:
+            return 0
+        current = now or datetime.now(timezone.utc)
+        recoverable = await self.jobs.list_states(
+            {
+                JobState.ASSIGNED.value,
+                JobState.STARTING.value,
+                JobState.RUNNING.value,
+                JobState.WAITING_AGENT.value,
+            }
+        )
+        count = 0
+        for job in recoverable:
+            existing = await self.recovery.get(job.id)
+            session_id = await self._external_session_id(job)
+            mode = RecoveryMode.RESUME if session_id else RecoveryMode.START
+            execution_id = existing.execution_id if existing is not None else None
+            delay = (
+                self.restart_grace_seconds
+                if job.assigned_host and job.assigned_host != self.local_host_id
+                else 0
+            )
+            if self.sessions is not None:
+                await self.sessions.mark(job.id, SessionStatus.WAITING_HOST)
+            await self._transition(job.id, JobState.WAITING_HOST)
+            await self.recovery.upsert(
+                job.id,
+                kind=RecoveryKind.RESTART.value,
+                mode=mode.value,
+                attempt_count=existing.attempt_count if existing else 0,
+                next_retry_at=current + timedelta(seconds=delay),
+                execution_id=execution_id,
+                resume_instruction=RESTART_RESUME_INSTRUCTION if mode == RecoveryMode.RESUME else None,
+                last_error="controller restarted while job was active",
+            )
+            await self.events.append(
+                "CONTROLLER_RECONCILE_WAIT",
+                job_id=job.id,
+                project_id=job.project_id,
+                host_id=job.assigned_host,
+                payload={"execution_id": execution_id, "mode": mode.value},
+            )
+            count += 1
+
+        waiting_quota = await self.jobs.list_states({JobState.WAITING_QUOTA.value})
+        for job in waiting_quota:
+            if await self.recovery.get(job.id) is None:
+                await self.recovery.upsert(
+                    job.id,
+                    kind=RecoveryKind.QUOTA.value,
+                    mode=RecoveryMode.RESUME.value,
+                    attempt_count=1,
+                    next_retry_at=current + timedelta(seconds=self.quota_retry_initial_seconds),
+                    execution_id=None,
+                    resume_instruction=QUOTA_RESUME_INSTRUCTION,
+                    last_error="recovered WAITING_QUOTA without retry metadata",
+                )
+
+        waiting_host = await self.jobs.list_states({JobState.WAITING_HOST.value})
+        for job in waiting_host:
+            if await self.recovery.get(job.id) is None:
+                await self.recovery.upsert(
+                    job.id,
+                    kind=RecoveryKind.HOST.value,
+                    mode=(
+                        RecoveryMode.RESUME.value
+                        if await self._external_session_id(job)
+                        else RecoveryMode.START.value
+                    ),
+                    attempt_count=0,
+                    next_retry_at=current,
+                    execution_id=None,
+                    resume_instruction=RESTART_RESUME_INSTRUCTION,
+                    last_error="recovered WAITING_HOST without recovery metadata",
+                )
+        return count
+
+    async def reconcile_runner(
+        self,
+        *,
+        host_id: str,
+        running_jobs: list[dict],
+        completed_jobs: list[dict],
+        gateway: RunnerGateway,
+    ) -> int:
+        if self.recovery is None:
+            return 0
+        reported = {
+            str(item.get("execution_id")): item
+            for item in [*running_jobs, *completed_jobs]
+            if isinstance(item, dict) and item.get("execution_id")
+        }
+        if not reported:
+            return 0
+
+        waiting = await self.jobs.list_states({JobState.WAITING_HOST.value})
+        adopted = 0
+        for job in waiting:
+            if job.assigned_host != host_id:
+                continue
+            record = await self.recovery.get(job.id)
+            if record is None or not record.execution_id:
+                continue
+            report = reported.get(record.execution_id)
+            if report is None:
+                continue
+            session_id = (
+                str(report.get("session_id"))
+                if report.get("session_id")
+                else job.external_session_id
+            )
+            handle = gateway.adopt_remote(
+                host_id=host_id,
+                execution_id=record.execution_id,
+                session_id=session_id,
+                on_event=self._event_callback(job.id),
+            )
+            await self._transition(job.id, JobState.ASSIGNED, assigned_host=host_id)
+            await self._transition(job.id, JobState.STARTING)
+            await self._set_handle(job.id, handle)
+            await self._transition(job.id, JobState.RUNNING)
+            if self.sessions is not None:
+                await self.sessions.mark(job.id, SessionStatus.ACTIVE)
+            self._start_task(job.id, self._execute_adopted(job.id, handle))
+            await self.events.append(
+                "RUNNER_JOB_ADOPTED",
+                job_id=job.id,
+                project_id=job.project_id,
+                host_id=host_id,
+                payload={
+                    "execution_id": record.execution_id,
+                    "session_id": session_id,
+                },
+            )
+            adopted += 1
+        return adopted
+
+    async def expire_approvals(self, *, now: datetime | None = None) -> int:
+        if self.approvals is None:
+            return 0
+        current = now or datetime.now(timezone.utc)
+        count = 0
+        for approval in await self.approvals.expired(current):
+            await self.approvals.expire(approval.id)
+            job = await self.require(approval.job_id)
+            if JobState(job.state) != JobState.WAITING_HUMAN:
+                continue
+            await self.jobs.update(job.id, error="human approval expired")
+            if self.sessions is not None:
+                await self.sessions.mark(job.id, SessionStatus.FAILED)
+            await self._transition(job.id, JobState.FAILED)
+            await self.events.append(
+                "HUMAN_GATE_EXPIRED",
+                job_id=job.id,
+                project_id=job.project_id,
+                host_id=job.assigned_host,
+                payload={"approval_id": approval.id},
+            )
+            await self._notify(job.id, "⌛ Human Gate 승인 시간이 만료되어 작업을 종료했습니다.")
+            count += 1
+        return count
+
+    async def recover_due(self, *, now: datetime | None = None) -> int:
+        if self.recovery is None:
+            return 0
+        current = now or datetime.now(timezone.utc)
+        recovered = 0
+        for record in await self.recovery.list():
+            job = await self.jobs.get(record.job_id)
+            if job is None or JobState(job.state) in TERMINAL_STATES:
+                await self.recovery.delete(record.job_id)
+                continue
+            if not _is_due(record.next_retry_at, current):
+                continue
+            state = JobState(job.state)
+            if state == JobState.WAITING_QUOTA:
+                if await self._retry_quota(job, record):
+                    recovered += 1
+            elif state == JobState.WAITING_HOST:
+                if await self._retry_host(job, record):
+                    recovered += 1
+        return recovered
+
+    async def _retry_quota(self, job: JobRecord, record: RecoveryRecord) -> bool:
+        if job.assigned_host and self.hosts is not None:
+            if not await self.hosts.is_online(job.assigned_host):
+                return False
+        await self._transition(job.id, JobState.RUNNING)
+        if self.sessions is not None:
+            await self.sessions.mark(job.id, SessionStatus.ACTIVE)
+        await self.events.append(
+            "QUOTA_RESUMED",
+            job_id=job.id,
+            project_id=job.project_id,
+            host_id=job.assigned_host,
+            payload={"attempt": record.attempt_count},
+        )
+        instruction = record.resume_instruction or QUOTA_RESUME_INSTRUCTION
+        await self.recovery.upsert(
+            job.id,
+            kind=RecoveryKind.QUOTA.value,
+            mode=RecoveryMode.RESUME.value,
+            attempt_count=record.attempt_count,
+            next_retry_at=None,
+            execution_id=record.execution_id,
+            resume_instruction=instruction,
+            last_error=record.last_error,
+        )
+        self._start_task(job.id, self._execute_resume(job.id, instruction))
+        await self._notify(job.id, "↻ Codex quota 대기 시간이 끝나 자동 재시도합니다.")
+        return True
+
+    async def _retry_host(self, job: JobRecord, record: RecoveryRecord) -> bool:
+        try:
+            host_id = await self._resolve_host(job.project_id, job.requested_host)
+        except HostUnavailable:
+            return False
+
+        await self._transition(job.id, JobState.ASSIGNED, assigned_host=host_id)
+        mode = RecoveryMode(record.mode)
+        if mode == RecoveryMode.START:
+            await self.recovery.upsert(
+                job.id,
+                kind=RecoveryKind.HOST.value,
+                mode=RecoveryMode.START.value,
+                attempt_count=record.attempt_count,
+                next_retry_at=None,
+                execution_id=record.execution_id,
+                resume_instruction=record.resume_instruction,
+                last_error=record.last_error,
+            )
+            self._start_task(job.id, self._execute_new(job.id))
+        else:
+            await self._transition(job.id, JobState.STARTING)
+            await self._transition(job.id, JobState.RUNNING)
+            if self.sessions is not None:
+                await self.sessions.mark(job.id, SessionStatus.ACTIVE)
+            instruction = record.resume_instruction or RESTART_RESUME_INSTRUCTION
+            await self.recovery.upsert(
+                job.id,
+                kind=record.kind,
+                mode=RecoveryMode.RESUME.value,
+                attempt_count=record.attempt_count,
+                next_retry_at=None,
+                execution_id=record.execution_id,
+                resume_instruction=instruction,
+                last_error=record.last_error,
+            )
+            self._start_task(job.id, self._execute_resume(job.id, instruction))
+
+        await self.events.append(
+            "HOST_WAIT_RESUMED",
+            job_id=job.id,
+            project_id=job.project_id,
+            host_id=host_id,
+            payload={"mode": mode.value},
+        )
+        await self._notify(job.id, f"↻ Host {host_id}가 사용 가능해져 작업을 재개합니다.")
+        return True
+
     async def _resolve_host(self, project_id: str, requested_host: str) -> str:
         project = self.projects.get(project_id)
         if self.host_router is not None:
@@ -347,6 +667,16 @@ class JobManager:
         project.path_for(host)
         return host
 
+    def _validate_requested_host(self, project_id: str, requested_host: str) -> None:
+        if requested_host == "auto":
+            return
+        project = self.projects.get(project_id)
+        if requested_host not in project.allowed_hosts:
+            raise ValueError(
+                f"host {requested_host!r} is not allowed for project {project_id!r}"
+            )
+        project.path_for(requested_host)
+
     def _start_task(self, job_id: str, coroutine) -> None:
         task = asyncio.create_task(coroutine, name=f"job:{job_id}")
         self._tasks[job_id] = task
@@ -362,6 +692,10 @@ class JobManager:
             job = await self._transition(job_id, JobState.STARTING)
             handle = await self._start_new_turn(job, job.instruction)
             await self._set_handle(job_id, handle)
+            current = await self.require(job_id)
+            if JobState(current.state) != JobState.STARTING:
+                await handle.cancel()
+                return
             await self._transition(job_id, JobState.RUNNING)
             result = await self._await_handle(job_id, handle)
             if result is None:
@@ -387,6 +721,18 @@ class JobManager:
         finally:
             self._handles.pop(job_id, None)
 
+    async def _execute_adopted(self, job_id: str, handle: RunHandle) -> None:
+        try:
+            result = await self._await_handle(job_id, handle)
+            if result is not None:
+                await self._finish_or_continue(job_id, result)
+        except asyncio.CancelledError:
+            await self._handle_cancelled_task(job_id)
+        except Exception as exc:
+            await self._fail(job_id, exc)
+        finally:
+            self._handles.pop(job_id, None)
+
     async def _finish_or_continue(
         self,
         job_id: str,
@@ -395,14 +741,38 @@ class JobManager:
         current_result = result
         while True:
             current = await self.require(job_id)
-            if JobState(current.state) == JobState.WAITING_HUMAN:
+            if JobState(current.state) in {
+                JobState.WAITING_HUMAN,
+                JobState.WAITING_HOST,
+                JobState.WAITING_QUOTA,
+            }:
                 return
 
             if current_result.returncode != 0:
+                quota = (
+                    QuotaSignal(current_result.final_message or "quota unavailable", current_result.retry_at)
+                    if current_result.retry_kind == "quota"
+                    else detect_quota_text(current_result.final_message)
+                )
+                if quota is not None:
+                    await self._enter_quota_wait(job_id, quota)
+                    return
+                if current_result.retry_kind == "host":
+                    await self._enter_host_wait(
+                        job_id,
+                        mode=RecoveryMode.RESUME,
+                        error=current_result.final_message or "runner unavailable",
+                        assigned_host=current.assigned_host,
+                        resume_instruction=RESTART_RESUME_INSTRUCTION,
+                    )
+                    return
+
                 await self.jobs.update(job_id, error=current_result.final_message)
                 if self.sessions is not None:
                     await self.sessions.mark(job_id, SessionStatus.FAILED)
                 await self._transition(job_id, JobState.FAILED)
+                if self.recovery is not None:
+                    await self.recovery.delete(job_id)
                 await self._notify(
                     job_id,
                     "❌ Agent 실행이 실패했습니다."
@@ -413,7 +783,11 @@ class JobManager:
             completed = False
             async with self._job_locks[job_id]:
                 current = await self.require(job_id)
-                if JobState(current.state) == JobState.WAITING_HUMAN:
+                if JobState(current.state) in {
+                    JobState.WAITING_HUMAN,
+                    JobState.WAITING_HOST,
+                    JobState.WAITING_QUOTA,
+                }:
                     return
                 steering = self._drain_steering(job_id)
                 if steering is None:
@@ -425,6 +799,8 @@ class JobManager:
                     if self.sessions is not None:
                         await self.sessions.mark(job_id, SessionStatus.IDLE)
                     await self._transition(job_id, JobState.COMPLETED)
+                    if self.recovery is not None:
+                        await self.recovery.delete(job_id)
                     completed = True
                 else:
                     job = await self.require(job_id)
@@ -468,12 +844,7 @@ class JobManager:
         project = self.projects.get(job.project_id)
         assert job.assigned_host is not None
         working_directory = Path(project.path_for(job.assigned_host)).expanduser()
-        session = await self.sessions.get_for_job(job_id) if self.sessions is not None else None
-        requested_session_id = (
-            session.external_session_id
-            if session is not None
-            else job.external_session_id
-        )
+        requested_session_id = await self._external_session_id(job)
 
         if requested_session_id:
             await self.events.append(
@@ -493,6 +864,10 @@ class JobManager:
                     on_event=self._event_callback(job_id),
                 )
                 await self._set_handle(job_id, handle)
+                current = await self.require(job_id)
+                if JobState(current.state) != JobState.RUNNING:
+                    await handle.cancel()
+                    return None
                 result = await self._await_handle(job_id, handle)
                 if result is None:
                     return None
@@ -517,8 +892,12 @@ class JobManager:
                     return result
 
                 current = await self.require(job_id)
-                if JobState(current.state) == JobState.WAITING_HUMAN:
-                    return result
+                if JobState(current.state) in {
+                    JobState.WAITING_HUMAN,
+                    JobState.WAITING_HOST,
+                    JobState.WAITING_QUOTA,
+                }:
+                    return None
 
                 await self.events.append(
                     "SESSION_RESUME_FAILED",
@@ -531,9 +910,26 @@ class JobManager:
                         "error": result.final_message,
                     },
                 )
+            except ConnectionError as exc:
+                await self._enter_host_wait(
+                    job_id,
+                    mode=RecoveryMode.RESUME,
+                    error=str(exc),
+                    assigned_host=job.assigned_host,
+                    resume_instruction=instruction,
+                )
+                return None
             except Exception as exc:
                 current = await self.require(job_id)
-                if JobState(current.state) == JobState.WAITING_HUMAN:
+                if JobState(current.state) in {
+                    JobState.WAITING_HUMAN,
+                    JobState.WAITING_HOST,
+                    JobState.WAITING_QUOTA,
+                }:
+                    return None
+                quota = detect_quota_text(str(exc))
+                if quota is not None:
+                    await self._enter_quota_wait(job_id, quota, resume_instruction=instruction)
                     return None
                 await self.events.append(
                     "SESSION_RESUME_FAILED",
@@ -562,8 +958,22 @@ class JobManager:
             host_id=job.assigned_host,
             payload={"had_session": bool(requested_session_id)},
         )
-        handle = await self._start_new_turn(job, fallback_instruction)
+        try:
+            handle = await self._start_new_turn(job, fallback_instruction)
+        except ConnectionError as exc:
+            await self._enter_host_wait(
+                job_id,
+                mode=RecoveryMode.RESUME,
+                error=str(exc),
+                assigned_host=job.assigned_host,
+                resume_instruction=instruction,
+            )
+            return None
         await self._set_handle(job_id, handle)
+        current = await self.require(job_id)
+        if JobState(current.state) != JobState.RUNNING:
+            await handle.cancel()
+            return None
         return await self._await_handle(job_id, handle)
 
     async def _start_new_turn(self, job: JobRecord, instruction: str) -> RunHandle:
@@ -585,6 +995,19 @@ class JobManager:
             changes["external_session_id"] = handle.session_id
         await self.jobs.update(job_id, **changes)
 
+        if self.recovery is not None and handle.execution_id:
+            existing = await self.recovery.get(job_id)
+            await self.recovery.upsert(
+                job_id,
+                kind=existing.kind if existing else RecoveryKind.RESTART.value,
+                mode=existing.mode if existing else RecoveryMode.ADOPT.value,
+                attempt_count=existing.attempt_count if existing else 0,
+                next_retry_at=None,
+                execution_id=handle.execution_id,
+                resume_instruction=existing.resume_instruction if existing else RESTART_RESUME_INSTRUCTION,
+                last_error=existing.last_error if existing else None,
+            )
+
     async def _await_handle(
         self,
         job_id: str,
@@ -598,12 +1021,30 @@ class JobManager:
                 JobState.PAUSED,
                 JobState.CANCELLED,
                 JobState.WAITING_HUMAN,
+                JobState.WAITING_HOST,
+                JobState.WAITING_QUOTA,
             }:
                 return None
             raise
+        except ConnectionError as exc:
+            current = await self.require(job_id)
+            await self._enter_host_wait(
+                job_id,
+                mode=RecoveryMode.RESUME,
+                error=str(exc),
+                assigned_host=current.assigned_host,
+                resume_instruction=RESTART_RESUME_INSTRUCTION,
+            )
+            return None
 
         current = await self.require(job_id)
-        if JobState(current.state) in {JobState.PAUSED, JobState.CANCELLED}:
+        if JobState(current.state) in {
+            JobState.PAUSED,
+            JobState.CANCELLED,
+            JobState.WAITING_HUMAN,
+            JobState.WAITING_HOST,
+            JobState.WAITING_QUOTA,
+        }:
             return None
 
         if result.session_id:
@@ -614,6 +1055,28 @@ class JobManager:
             result=result.final_message,
         )
 
+        quota = (
+            QuotaSignal(result.final_message or "quota unavailable", result.retry_at)
+            if result.retry_kind == "quota"
+            else (
+                detect_quota_text(result.final_message)
+                if result.returncode != 0
+                else None
+            )
+        )
+        if quota is not None:
+            await self._enter_quota_wait(job_id, quota)
+            return None
+        if result.retry_kind == "host":
+            await self._enter_host_wait(
+                job_id,
+                mode=RecoveryMode.RESUME,
+                error=result.final_message or "runner unavailable",
+                assigned_host=current.assigned_host,
+                resume_instruction=RESTART_RESUME_INSTRUCTION,
+            )
+            return None
+
         current = await self.require(job_id)
         if (
             JobState(current.state) == JobState.RUNNING
@@ -621,6 +1084,7 @@ class JobManager:
             and (gate := extract_human_gate_from_text(result.final_message)) is not None
         ):
             await self._enter_human_gate(job_id, gate)
+            return None
 
         return result
 
@@ -638,6 +1102,11 @@ class JobManager:
             session_id = extract_session_id(event)
             if session_id:
                 await self._record_session(job_id, session_id)
+
+            quota = detect_quota_event(event)
+            if quota is not None:
+                await self._enter_quota_wait(job_id, quota)
+                return
 
             gate = extract_human_gate(event)
             if gate is not None:
@@ -696,12 +1165,120 @@ class JobManager:
 
         await self._notify_approval(job_id, self.approvals.prompt(approval))
         asyncio.create_task(
-            self._stop_active_turn_for_human_gate(job_id),
+            self._stop_active_turn(job_id),
             name=f"human-gate-stop:{job_id}",
         )
         return approval
 
-    async def _stop_active_turn_for_human_gate(self, job_id: str) -> None:
+    async def _enter_quota_wait(
+        self,
+        job_id: str,
+        signal: QuotaSignal,
+        *,
+        resume_instruction: str | None = None,
+    ) -> RecoveryRecord | None:
+        if self.recovery is None:
+            return None
+        async with self._job_locks[f"quota:{job_id}"]:
+            job = await self.require(job_id)
+            state = JobState(job.state)
+            if state == JobState.WAITING_QUOTA:
+                return await self.recovery.get(job_id)
+            if state not in {JobState.STARTING, JobState.RUNNING}:
+                return None
+
+            existing = await self.recovery.get(job_id)
+            attempt = (existing.attempt_count if existing else 0) + 1
+            next_retry = retry_at(
+                attempt_count=attempt,
+                initial_seconds=self.quota_retry_initial_seconds,
+                max_seconds=self.quota_retry_max_seconds,
+                reset_at=signal.reset_at,
+            )
+            execution_id = getattr(self._handles.get(job_id), "execution_id", None)
+            record = await self.recovery.upsert(
+                job_id,
+                kind=RecoveryKind.QUOTA.value,
+                mode=RecoveryMode.RESUME.value,
+                attempt_count=attempt,
+                next_retry_at=next_retry,
+                execution_id=execution_id,
+                resume_instruction=resume_instruction or QUOTA_RESUME_INSTRUCTION,
+                last_error=signal.message,
+            )
+            if self.sessions is not None:
+                await self.sessions.mark(job_id, SessionStatus.WAITING_QUOTA)
+            await self._transition(job_id, JobState.WAITING_QUOTA)
+            await self.events.append(
+                "QUOTA_WAIT",
+                job_id=job.id,
+                project_id=job.project_id,
+                host_id=job.assigned_host,
+                payload={
+                    "attempt": attempt,
+                    "next_retry_at": next_retry.isoformat(),
+                    "reset_at": signal.reset_at.isoformat() if signal.reset_at else None,
+                },
+            )
+
+        await self._notify(
+            job_id,
+            f"⏸ Codex 사용량 제한으로 대기합니다. 자동 재시도: {next_retry.isoformat()}",
+        )
+        asyncio.create_task(self._stop_active_turn(job_id), name=f"quota-stop:{job_id}")
+        return record
+
+    async def _enter_host_wait(
+        self,
+        job_id: str,
+        *,
+        mode: RecoveryMode,
+        error: str,
+        assigned_host: str | None,
+        resume_instruction: str | None = None,
+    ) -> RecoveryRecord | None:
+        if self.recovery is None:
+            raise ConnectionError(error)
+        async with self._job_locks[f"host:{job_id}"]:
+            job = await self.require(job_id)
+            state = JobState(job.state)
+            if state in TERMINAL_STATES:
+                return None
+            existing = await self.recovery.get(job_id)
+            execution_id = (
+                existing.execution_id
+                if existing is not None
+                else getattr(self._handles.get(job_id), "execution_id", None)
+            )
+            if self.sessions is not None:
+                await self.sessions.mark(job_id, SessionStatus.WAITING_HOST)
+            if state != JobState.WAITING_HOST:
+                await self._transition(
+                    job_id,
+                    JobState.WAITING_HOST,
+                    assigned_host=assigned_host or job.assigned_host,
+                )
+            record = await self.recovery.upsert(
+                job_id,
+                kind=RecoveryKind.HOST.value,
+                mode=mode.value,
+                attempt_count=existing.attempt_count if existing else 0,
+                next_retry_at=datetime.now(timezone.utc),
+                execution_id=execution_id,
+                resume_instruction=resume_instruction,
+                last_error=error,
+            )
+            await self.events.append(
+                "HOST_WAIT",
+                job_id=job.id,
+                project_id=job.project_id,
+                host_id=assigned_host or job.assigned_host,
+                payload={"mode": mode.value, "error": error},
+            )
+        await self._notify(job_id, "⏸ 실행 Host가 오프라인이라 자동 재연결을 기다립니다.")
+        return record
+
+    async def _stop_active_turn(self, job_id: str) -> None:
         for _ in range(10):
             handle = self._handles.get(job_id)
             if handle is not None:
@@ -716,18 +1293,27 @@ class JobManager:
         if job.external_session_id != external_session_id:
             await self.jobs.update(job_id, external_session_id=external_session_id)
         if self.sessions is not None:
-            status = (
-                SessionStatus.WAITING_HUMAN
-                if JobState(job.state) == JobState.WAITING_HUMAN
-                else SessionStatus.ACTIVE
-            )
+            state = JobState(job.state)
+            statuses = {
+                JobState.WAITING_HUMAN: SessionStatus.WAITING_HUMAN,
+                JobState.WAITING_HOST: SessionStatus.WAITING_HOST,
+                JobState.WAITING_QUOTA: SessionStatus.WAITING_QUOTA,
+                JobState.PAUSED: SessionStatus.PAUSED,
+            }
             await self.sessions.record(
                 job_id=job_id,
                 project_id=job.project_id,
                 host_id=job.assigned_host,
                 external_session_id=external_session_id,
-                status=status,
+                status=statuses.get(state, SessionStatus.ACTIVE),
             )
+
+    async def _external_session_id(self, job: JobRecord) -> str | None:
+        if self.sessions is not None:
+            session = await self.sessions.get_for_job(job.id)
+            if session is not None:
+                return session.external_session_id
+        return job.external_session_id
 
     def _drain_steering(self, job_id: str) -> str | None:
         messages = self._steering.pop(job_id, [])
@@ -747,10 +1333,14 @@ class JobManager:
             JobState.PAUSED,
             JobState.CANCELLED,
             JobState.WAITING_HUMAN,
+            JobState.WAITING_HOST,
+            JobState.WAITING_QUOTA,
         }:
             return
         if state not in TERMINAL_STATES:
             await self._transition(job_id, JobState.CANCELLED)
+            if self.recovery is not None:
+                await self.recovery.delete(job_id)
 
     async def _fail(self, job_id: str, exc: Exception) -> None:
         current = await self.require(job_id)
@@ -758,12 +1348,29 @@ class JobManager:
         if state in TERMINAL_STATES or state in {
             JobState.PAUSED,
             JobState.WAITING_HUMAN,
+            JobState.WAITING_HOST,
+            JobState.WAITING_QUOTA,
         }:
+            return
+        if isinstance(exc, ConnectionError):
+            await self._enter_host_wait(
+                job_id,
+                mode=RecoveryMode.RESUME if current.external_session_id else RecoveryMode.START,
+                error=str(exc),
+                assigned_host=current.assigned_host,
+                resume_instruction=RESTART_RESUME_INSTRUCTION,
+            )
+            return
+        quota = detect_quota_text(str(exc))
+        if quota is not None:
+            await self._enter_quota_wait(job_id, quota)
             return
         await self.jobs.update(job_id, error=str(exc))
         if self.sessions is not None:
             await self.sessions.mark(job_id, SessionStatus.FAILED)
         await self._transition(job_id, JobState.FAILED)
+        if self.recovery is not None:
+            await self.recovery.delete(job_id)
         await self._notify(job_id, f"❌ 작업 실패: {exc}")
 
     async def _transition(
@@ -862,6 +1469,11 @@ def _small_event(event: dict) -> dict:
         "description",
         "header",
         "approval_type",
+        "resets_at",
+        "reset_at",
+        "retry_at",
+        "retry_after",
+        "retry_after_seconds",
     ):
         value = event.get(key)
         if isinstance(value, (str, int, float, bool)) or value is None:
@@ -907,3 +1519,11 @@ def _optional_detail(message: str | None) -> str:
     if len(text) > 1500:
         text = text[:1499] + "…"
     return f"\n\n{text}"
+
+
+def _is_due(value: datetime | None, now: datetime) -> bool:
+    if value is None:
+        return True
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value <= now

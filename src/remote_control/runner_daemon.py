@@ -8,7 +8,7 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
 from remote_control.human_gate import extract_human_gate
-from remote_control.runners.base import RunHandle
+from remote_control.runners.base import AgentRunResult, RunHandle
 from remote_control.runners.codex import CodexRunner, extract_session_id
 from remote_control.settings import RunnerSettings
 from remote_control.transport.protocol import Envelope, message
@@ -25,7 +25,10 @@ class RunnerDaemon:
             approval_policy=settings.codex_approval_policy,
         )
         self.running: dict[str, RunHandle] = {}
+        self.running_sessions: dict[str, str | None] = {}
+        self.completed: dict[str, AgentRunResult] = {}
         self._send_lock = asyncio.Lock()
+        self._websocket: ClientConnection | None = None
 
     async def run_forever(self) -> None:
         while True:
@@ -42,6 +45,7 @@ class RunnerDaemon:
             ping_interval=20,
             ping_timeout=20,
         ) as websocket:
+            self._websocket = websocket
             await self._send(
                 websocket,
                 message(
@@ -52,6 +56,16 @@ class RunnerDaemon:
                     capabilities=sorted(self.settings.capabilities),
                 ),
             )
+            await self._send(
+                websocket,
+                message(
+                    "RUNNING_JOBS",
+                    host_id=self.settings.host_id,
+                    running_jobs=self._running_snapshot(),
+                    completed_jobs=self._completed_snapshot(),
+                ),
+            )
+            await self._flush_completed()
             heartbeat = asyncio.create_task(self._heartbeat(websocket))
             try:
                 async for raw in websocket:
@@ -59,6 +73,8 @@ class RunnerDaemon:
                     await self._handle(websocket, envelope)
             finally:
                 heartbeat.cancel()
+                if self._websocket is websocket:
+                    self._websocket = None
 
     async def _heartbeat(self, websocket: ClientConnection) -> None:
         while True:
@@ -68,9 +84,27 @@ class RunnerDaemon:
                 message(
                     "HEARTBEAT",
                     host_id=self.settings.host_id,
-                    running_jobs=sorted(self.running),
+                    running_jobs=self._running_snapshot(),
                 ),
             )
+
+    def _running_snapshot(self) -> list[dict]:
+        return [
+            {
+                "execution_id": execution_id,
+                "session_id": self.running_sessions.get(execution_id),
+            }
+            for execution_id in sorted(self.running)
+        ]
+
+    def _completed_snapshot(self) -> list[dict]:
+        return [
+            {
+                "execution_id": execution_id,
+                "session_id": result.session_id,
+            }
+            for execution_id, result in sorted(self.completed.items())
+        ]
 
     async def _handle(self, websocket: ClientConnection, envelope: Envelope) -> None:
         if envelope.type == "JOB_START":
@@ -114,31 +148,31 @@ class RunnerDaemon:
             )
             return
 
-        seen_session: str | None = None
+        seen_session: str | None = session_id or None
+        self.running_sessions[execution_id] = seen_session
 
         async def on_event(event: dict) -> None:
             nonlocal seen_session
             current_session = extract_session_id(event)
             if current_session and current_session != seen_session:
                 seen_session = current_session
-                await self._send(
-                    websocket,
+                self.running_sessions[execution_id] = current_session
+                await self._send_current(
                     message(
                         "SESSION_STARTED",
                         execution_id=execution_id,
                         session_id=current_session,
                         event={"type": "thread.started", "thread_id": current_session},
-                    ),
+                    )
                 )
             gate = extract_human_gate(event)
-            await self._send(
-                websocket,
+            await self._send_current(
                 message(
                     "HUMAN_GATE" if gate is not None else "JOB_PROGRESS",
                     execution_id=execution_id,
                     session_id=current_session or seen_session,
                     event=_sanitize_event(event),
-                ),
+                )
             )
 
         try:
@@ -159,6 +193,7 @@ class RunnerDaemon:
                     on_event=on_event,
                 )
         except Exception as exc:
+            self.running_sessions.pop(execution_id, None)
             await self._send(
                 websocket,
                 message("JOB_ERROR", execution_id=execution_id, error=str(exc)),
@@ -172,51 +207,75 @@ class RunnerDaemon:
                 "JOB_ACCEPTED",
                 execution_id=execution_id,
                 pid=handle.pid,
-                session_id=handle.session_id or (session_id if resume else None),
+                session_id=seen_session or handle.session_id,
             ),
         )
-        asyncio.create_task(self._finish_job(websocket, execution_id, handle))
+        asyncio.create_task(self._finish_job(execution_id, handle))
 
     async def _finish_job(
         self,
-        websocket: ClientConnection,
         execution_id: str,
         handle: RunHandle,
     ) -> None:
         try:
             result = await handle.wait()
-            await self._send(
-                websocket,
-                message(
-                    "JOB_RESULT",
-                    execution_id=execution_id,
-                    returncode=result.returncode,
-                    session_id=result.session_id,
-                    final_message=result.final_message,
-                ),
-            )
         except asyncio.CancelledError:
-            await self._send(
-                websocket,
-                message(
-                    "JOB_RESULT",
-                    execution_id=execution_id,
-                    returncode=130,
-                    session_id=handle.session_id,
-                    final_message="cancelled",
-                ),
+            result = AgentRunResult(
+                returncode=130,
+                session_id=self.running_sessions.get(execution_id) or handle.session_id,
+                final_message="cancelled",
             )
         except Exception as exc:
-            await self._send(
-                websocket,
-                message("JOB_ERROR", execution_id=execution_id, error=str(exc)),
+            result = AgentRunResult(
+                returncode=1,
+                session_id=self.running_sessions.get(execution_id) or handle.session_id,
+                final_message=str(exc),
             )
-        finally:
-            self.running.pop(execution_id, None)
+
+        if result.session_id is None:
+            result.session_id = self.running_sessions.get(execution_id)
+        self.running.pop(execution_id, None)
+        self.running_sessions.pop(execution_id, None)
+        self.completed[execution_id] = result
+        await self._flush_completed()
+
+    async def _flush_completed(self) -> None:
+        websocket = self._websocket
+        if websocket is None:
+            return
+        for execution_id, result in list(self.completed.items()):
+            try:
+                await self._send(websocket, _result_message(execution_id, result))
+            except (OSError, ConnectionClosed):
+                return
+            else:
+                self.completed.pop(execution_id, None)
+
+    async def _send_current(self, envelope: Envelope) -> bool:
+        websocket = self._websocket
+        if websocket is None:
+            return False
+        try:
+            await self._send(websocket, envelope)
+        except (OSError, ConnectionClosed):
+            return False
+        return True
 
     async def _send(self, websocket: ClientConnection, envelope: Envelope) -> None:
         async with self._send_lock:
             await websocket.send(envelope.model_dump_json())
+
+
+def _result_message(execution_id: str, result: AgentRunResult) -> Envelope:
+    return message(
+        "JOB_RESULT",
+        execution_id=execution_id,
+        returncode=result.returncode,
+        session_id=result.session_id,
+        final_message=result.final_message,
+        retry_kind=result.retry_kind,
+        retry_at=result.retry_at.isoformat() if result.retry_at else None,
+    )
 
 
 def _sanitize_event(event: dict) -> dict:
@@ -241,6 +300,17 @@ def _sanitize_event(event: dict) -> dict:
         value = event.get(key)
         if isinstance(value, str):
             result[key] = _truncate(value, 2000)
+
+    for key in (
+        "resets_at",
+        "reset_at",
+        "retry_at",
+        "retry_after",
+        "retry_after_seconds",
+    ):
+        value = event.get(key)
+        if isinstance(value, (str, int, float)):
+            result[key] = value
 
     options = event.get("options")
     if isinstance(options, list):

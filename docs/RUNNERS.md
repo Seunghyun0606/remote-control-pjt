@@ -2,7 +2,7 @@
 
 `AgentRunner` is the Controller-side boundary for coding-agent execution.
 
-Runner operations:
+Operations:
 
 - `start`
 - `resume`
@@ -25,32 +25,37 @@ codex exec resume <SESSION_ID> --json ...
 
 Instructions are passed through stdin rather than shell interpolation.
 
-R3 appends a Remote Control Human Gate protocol to the agent instruction. If a human decision is required, the agent is asked to finish a safe step, emit the marker/JSON request, and stop the turn.
+CodexRunner classifies quota signals into typed `AgentRunResult` recovery hints. A structured reset timestamp is retained when available.
 
 ## HybridAgentRunner
 
 - Controller local Host → local `CodexRunner`
 - remote Host → `RunnerGateway`
 
-Resume, steering and Human Gate continuation keep the same Host because Codex session files/authentication live on that execution Host.
+Session resume stays on the same assigned Host unless HostRouter is performing an `auto` recovery decision.
 
-## Remote Runner
+## Desktop Runner reconnect behavior
 
-The standalone `remote-runner` accepts:
+The standalone Runner keeps its Codex executions independent from the Controller WebSocket.
 
-- `JOB_START`
-- `JOB_RESUME`
-- `JOB_STEER`
-- `JOB_CANCEL`
+When the WebSocket is lost:
 
-It can emit:
+- the Runner process stays alive
+- active Codex handles stay in the Runner
+- progress delivery is temporarily skipped
+- completed results are buffered in memory
 
-- `JOB_PROGRESS`
-- `SESSION_STARTED`
-- `HUMAN_GATE`
-- `JOB_RESULT`
-- `JOB_ERROR`
+When it reconnects:
 
-The Runner sanitizes the event before transport. Human Gate question/details/options are retained; broad raw agent output is not forwarded wholesale.
+1. `HOST_REGISTER`
+2. `RUNNING_JOBS`
+3. buffered `JOB_RESULT` delivery
+4. normal heartbeat/event flow
 
-Codex credentials are never transported through the WebSocket protocol.
+This permits a restarted Controller to adopt an existing remote execution instead of starting a duplicate task.
+
+If the Runner process itself is restarted, in-memory execution tracking is lost. Recovery then uses the persisted Codex session/repository strategy.
+
+## Credentials
+
+Codex credentials stay local to each execution Host and are never transported in Runner protocol payloads.

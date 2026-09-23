@@ -34,7 +34,7 @@ def create_app(
     runner_gateway: RunnerGateway | None = None,
     runner_token: str = "",
 ) -> FastAPI:
-    app = FastAPI(title="Remote Agent Control", version="0.4.0")
+    app = FastAPI(title="Remote Agent Control", version="0.5.0")
 
     @app.get("/health")
     async def health() -> dict:
@@ -77,6 +77,25 @@ def create_app(
                 "last_active_at": session.last_active_at,
             }
             for session in await controller.jobs.sessions.list()
+        ]
+
+    @app.get("/recovery")
+    async def recovery() -> list[dict]:
+        if controller.jobs.recovery is None:
+            return []
+        return [
+            {
+                "job_id": record.job_id,
+                "kind": record.kind,
+                "mode": record.mode,
+                "attempt_count": record.attempt_count,
+                "next_retry_at": record.next_retry_at,
+                "execution_id": record.execution_id,
+                "last_error": record.last_error,
+                "created_at": record.created_at,
+                "updated_at": record.updated_at,
+            }
+            for record in await controller.jobs.recovery.list()
         ]
 
     @app.get("/approvals")
@@ -218,6 +237,20 @@ def create_app(
                     envelope = Envelope.model_validate_json(await websocket.receive_text())
                     if envelope.type == "HEARTBEAT":
                         await controller.hosts.heartbeat(host_id)
+                        await controller.jobs.reconcile_runner(
+                            host_id=host_id,
+                            running_jobs=_dict_list(envelope.payload.get("running_jobs")),
+                            completed_jobs=[],
+                            gateway=runner_gateway,
+                        )
+                    elif envelope.type == "RUNNING_JOBS":
+                        await controller.hosts.heartbeat(host_id)
+                        await controller.jobs.reconcile_runner(
+                            host_id=host_id,
+                            running_jobs=_dict_list(envelope.payload.get("running_jobs")),
+                            completed_jobs=_dict_list(envelope.payload.get("completed_jobs")),
+                            gateway=runner_gateway,
+                        )
                     else:
                         await runner_gateway.handle(host_id, envelope)
             except WebSocketDisconnect:
@@ -246,7 +279,6 @@ def _job_view(job) -> dict:
     }
 
 
-
 def _approval_view(registry, record) -> dict:
     return {
         "id": record.id,
@@ -270,3 +302,9 @@ def _approval_view(registry, record) -> dict:
         "resolved_at": record.resolved_at,
         "created_at": record.created_at,
     }
+
+
+def _dict_list(value: object) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
