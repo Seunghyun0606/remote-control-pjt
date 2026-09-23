@@ -279,7 +279,17 @@ Remote Control Doctor
 ✅ Runtime Home: C:\...\remote-control-pjt
 ```
 
-`REMOTE_CONTROL_HOME`을 절대경로로 지정하면 다른 PowerShell 작업 디렉터리에서 실행해도 같은 `remote-control.db`와 `config/projects.yaml`을 사용합니다.
+`REMOTE_CONTROL_HOME`을 절대경로로 지정하면 DB/config 경로를 고정할 수 있습니다.
+
+Controller를 repo 밖이나 Windows Task Scheduler/서비스에서 시작할 때는 `.env` 자체도 절대경로로 지정하세요.
+
+```powershell
+remote-control doctor --env-file "C:\\path\\to\\remote-control-pjt\\.env"
+
+remote-control controller start --env-file "C:\\path\\to\\remote-control-pjt\\.env"
+```
+
+이렇게 하면 **현재 PowerShell 작업 디렉터리와 무관하게 동일한 `.env` + `REMOTE_CONTROL_HOME` + DB/config**를 사용합니다.
 
 ### 2-5. Desktop Controller 시작
 
@@ -759,6 +769,8 @@ JOB-B RUNNING
 ```
 
 기존 Codex session ID가 있으면 새 Job은 해당 session resume을 우선 시도합니다. session이 없으면 원래 instruction으로 새 Codex 실행을 시작합니다.
+
+Telegram에서 `/job <job-id>` 또는 `/session <session-id>` 상세를 열었을 때 상태가 `FAILED`면 **Retry** 버튼, `PAUSED`면 **Resume** 버튼도 표시됩니다.
 
 Project OS Job은 canonical task state 중복을 피하기 위해 `/retry`로 복제하지 않습니다. 이 경우 `/run`으로 현재 Project OS state를 다시 평가합니다.
 
