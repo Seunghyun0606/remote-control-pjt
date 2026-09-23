@@ -123,7 +123,7 @@ class ControllerService:
             job = await self.jobs.select_for_user(
                 user_id,
                 job_id=command.job_id,
-                states={JobState.RUNNING},
+                states={JobState.ASSIGNED, JobState.STARTING, JobState.RUNNING},
             )
             await self.jobs.steer(job.id, command.instruction)
             return (
