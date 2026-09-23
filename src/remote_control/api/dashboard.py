@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
-from html import escape
 
 from remote_control.controller.service import ControllerService
 from remote_control.controller.states import TERMINAL_STATES
