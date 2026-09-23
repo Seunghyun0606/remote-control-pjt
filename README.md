@@ -2,7 +2,7 @@
 
 Telegram/Slack에서 **현재 머신의 Codex**를 실행하고, 진행 상태·추가 지시·Human Gate·사용량 제한 복구·Project OS 연동까지 관리하는 Runtime Control Plane입니다.
 
-현재 **R0 ~ R6 + production hardening**이 구현되어 있으며 package version은 **0.7.1**입니다.
+현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.8.0**입니다.
 
 ## 전체 개요
 
@@ -117,6 +117,54 @@ TELEGRAM_ALLOWED_USER_IDS=123456789
 
 에 들어갑니다.
 
+### Telegram Project Topics 활성화
+
+프로젝트별 대화창을 사용하려면 BotFather에서 해당 Bot의 **private chat Topics** 기능을 활성화합니다.
+
+Remote Control은 Controller 시작 시 Telegram command menu를 자동 등록합니다.
+
+```text
+/start
+/help
+/projects
+/sync
+/run
+/status
+/jobs
+/job
+/pause
+/resume
+/steer
+/stop
+```
+
+Bot과 대화를 시작한 뒤:
+
+```text
+/start
+```
+
+또는:
+
+```text
+/sync
+```
+
+를 보내면 `config/projects.yaml`의 프로젝트별 Topic을 생성하거나 이름을 동기화합니다.
+
+예:
+
+```text
+Desktop Codex Bot
+├─ Nothing Wrong
+├─ The Orpheus Project
+└─ Tab Pets
+```
+
+Topic mapping과 Job message binding은 `remote-control.db`에 저장되므로 Controller 재시작 후에도 유지됩니다.
+
+> Private Topic을 사용하려면 `python-telegram-bot>=22.6`이 필요합니다. `pip install -e ".[dev]"`로 최신 dependency를 반영하세요.
+
 ---
 
 ## 2. Desktop 최초 설정 — Windows
@@ -214,13 +262,17 @@ Controller는 시작할 때 Project Registry를 읽으므로 프로젝트를 추
 remote-control controller start
 ```
 
-Telegram의 Desktop Bot에서:
+Telegram의 Desktop Bot에서 먼저:
 
 ```text
+/start
+/sync
 /projects
 /hosts
 /status
 ```
+
+`/sync` 후 생성된 각 Project Topic에서 명령과 일반 대화를 사용할 수 있습니다.
 
 `/hosts`에서 다음과 비슷하게 보여야 합니다.
 
@@ -228,11 +280,21 @@ Telegram의 Desktop Bot에서:
 desktop-main ONLINE
 ```
 
-실행:
+실행은 두 방식 모두 가능합니다.
+
+Bot 기본 대화:
 
 ```text
 /run my-project
 ```
+
+해당 Project Topic:
+
+```text
+/run
+```
+
+Project Topic에서 일반 문장을 보내면 active Job이 없을 때는 그 문장으로 새 Codex Job을 시작하고, active Job이 하나면 같은 Job의 추가 지시로 처리합니다.
 
 이 경로로 실행됩니다.
 
@@ -347,11 +409,26 @@ remote-control controller start
 Lightsail Bot에서:
 
 ```text
+/start
+/sync
 /projects
 /hosts
 /status
+```
+
+Bot 기본 대화에서는:
+
+```text
 /run my-project
 ```
+
+Project Topic에서는:
+
+```text
+/run
+```
+
+만으로 해당 프로젝트의 Codex를 시작할 수 있습니다.
 
 이 경로로 실행됩니다.
 
@@ -562,7 +639,7 @@ Remote Control은 implementation handoff까지 담당하고 Project OS review/ev
 
 ## Messenger 명령
 
-Telegram과 Slack DM에서 동일합니다.
+공통 Controller command:
 
 ```text
 /projects
@@ -582,6 +659,51 @@ Telegram과 Slack DM에서 동일합니다.
 
 /stop [job-id]
 ```
+
+Telegram 전용:
+
+```text
+/sync
+```
+
+Telegram Project Topic 안에서는 project id가 자동으로 scope됩니다.
+
+```text
+/run
+/status
+/jobs
+/pause
+/resume
+/stop
+```
+
+예를 들어 `Nothing Wrong` Topic의 `/status`는 `nothing-wrong` Job만 표시합니다.
+
+일반 메시지 처리:
+
+```text
+Project Topic + active Job 0개
+→ 메시지 내용으로 새 Codex Job 시작
+
+Project Topic + steer 가능한 Job 1개
+→ 해당 Job에 추가 지시
+
+Project Topic + steer 가능한 Job 2개 이상
+→ Telegram Inline Button으로 Job 선택
+```
+
+Bot이 보낸 Job progress/result 메시지에 Telegram **Reply**로 답하면 그 메시지와 연결된 정확한 Job으로 지시가 전달됩니다.
+
+```text
+[Nothing Wrong / JOB-A]
+⏳ UI 구현 중...
+
+↳ Reply: UI는 유지하고 backend만 수정해
+          ↓
+        JOB-A steer
+```
+
+따라서 여러 프로젝트와 여러 Codex Job을 동시에 실행해도 Topic + Reply를 기준으로 대화를 분리할 수 있습니다.
 
 ---
 
@@ -789,5 +911,6 @@ Manual smoke test:
 - [x] R5 — Project OS adapter
 - [x] R6 — Slack / Web UI
 - [x] Production hardening — quota signal/retry visibility + independent local-node guide
+- [x] Telegram Project Topics — command menu / topic scope / reply-to-job / multi-job selection
 
-Package version: **0.7.1**
+Package version: **0.8.0**
