@@ -57,3 +57,17 @@ Feedback vocabulary remains:
 - `FINAL`
 
 Progress is throttled. Human Gate, quota wait/resume, Host wait/resume and final state changes are explicit runtime events and may generate direct user notifications.
+
+
+## Session history commands
+
+Messenger session metadata can be queried with:
+
+```text
+/sessions
+/session SESSION-...
+```
+
+Project Topics scope `/sessions` to the current project, and ownership checks ensure users only see Sessions attached to their own Jobs.
+
+The Session record stores metadata and the Codex external session ID, not a duplicate full transcript. Codex remains the source of truth for the actual conversation history.
