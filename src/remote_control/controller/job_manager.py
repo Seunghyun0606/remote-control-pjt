@@ -407,7 +407,6 @@ class JobManager:
                 JobState.ASSIGNED.value,
                 JobState.STARTING.value,
                 JobState.RUNNING.value,
-                JobState.WAITING_AGENT.value,
             }
         )
         count = 0
@@ -440,6 +439,61 @@ class JobManager:
                 project_id=job.project_id,
                 host_id=job.assigned_host,
                 payload={"execution_id": execution_id, "mode": mode.value},
+            )
+            count += 1
+
+        waiting_agent = await self.jobs.list_states({JobState.WAITING_AGENT.value})
+        for job in waiting_agent:
+            work = await self.project_work_for(job.id)
+            project = self.projects.get(job.project_id)
+            adapter = (
+                self.project_adapters.get(project)
+                if self.project_adapters is not None
+                else None
+            )
+            if (
+                work is not None
+                and adapter is not None
+                and adapter.requires_submission
+            ):
+                if self.sessions is not None:
+                    await self.sessions.mark(job.id, SessionStatus.WAITING_HOST)
+                await self._transition(job.id, JobState.WAITING_HOST)
+                await self.recovery.upsert(
+                    job.id,
+                    kind=RecoveryKind.RESTART.value,
+                    mode=RecoveryMode.FINALIZE.value,
+                    attempt_count=0,
+                    next_retry_at=current,
+                    execution_id=None,
+                    resume_instruction=None,
+                    last_error="controller restarted during project result finalization",
+                )
+                await self.events.append(
+                    "PROJECT_FINALIZE_RECONCILE_WAIT",
+                    job_id=job.id,
+                    project_id=job.project_id,
+                    host_id=job.assigned_host,
+                    payload={"task_id": work.task_id},
+                )
+                count += 1
+                continue
+
+            existing = await self.recovery.get(job.id)
+            session_id = await self._external_session_id(job)
+            mode = RecoveryMode.RESUME if session_id else RecoveryMode.START
+            if self.sessions is not None:
+                await self.sessions.mark(job.id, SessionStatus.WAITING_HOST)
+            await self._transition(job.id, JobState.WAITING_HOST)
+            await self.recovery.upsert(
+                job.id,
+                kind=RecoveryKind.RESTART.value,
+                mode=mode.value,
+                attempt_count=existing.attempt_count if existing else 0,
+                next_retry_at=current,
+                execution_id=None,
+                resume_instruction=RESTART_RESUME_INSTRUCTION if mode == RecoveryMode.RESUME else None,
+                last_error="controller restarted in WAITING_AGENT without adapter finalization",
             )
             count += 1
 
@@ -637,6 +691,19 @@ class JobManager:
                 last_error=record.last_error,
             )
             self._start_task(job.id, self._execute_new(job.id))
+        elif mode == RecoveryMode.FINALIZE:
+            await self._transition(job.id, JobState.STARTING)
+            await self.recovery.upsert(
+                job.id,
+                kind=record.kind,
+                mode=RecoveryMode.FINALIZE.value,
+                attempt_count=record.attempt_count,
+                next_retry_at=None,
+                execution_id=None,
+                resume_instruction=None,
+                last_error=record.last_error,
+            )
+            self._start_task(job.id, self._execute_project_finalize(job.id))
         else:
             await self._transition(job.id, JobState.STARTING)
             await self._transition(job.id, JobState.RUNNING)
@@ -775,6 +842,82 @@ class JobManager:
         finally:
             self._handles.pop(job_id, None)
 
+    async def _execute_project_finalize(self, job_id: str) -> None:
+        try:
+            job = await self.require(job_id)
+            await self._finalize_project_adapter(job_id, job.result)
+        except asyncio.CancelledError:
+            await self._handle_cancelled_task(job_id)
+        except Exception as exc:
+            await self._fail(job_id, exc)
+
+    async def _finalize_project_adapter(
+        self,
+        job_id: str,
+        final_message: str | None,
+    ) -> None:
+        current = await self.require(job_id)
+        project = self.projects.get(current.project_id)
+        if self.project_adapters is None:
+            raise RuntimeError("project adapter registry is not enabled")
+        if current.assigned_host is None:
+            raise RuntimeError("project finalization requires an assigned host")
+        adapter = self.project_adapters.get(project)
+        if not adapter.requires_submission:
+            raise RuntimeError(
+                f"adapter {project.adapter!r} does not require result finalization"
+            )
+
+        try:
+            outcome = await adapter.submit_result(
+                job_id=job_id,
+                project=project,
+                host_id=current.assigned_host,
+                final_message=final_message,
+            )
+        except ConnectionError as exc:
+            if self.recovery is None:
+                raise
+            await self._enter_host_wait(
+                job_id,
+                mode=RecoveryMode.FINALIZE,
+                error=str(exc),
+                assigned_host=current.assigned_host,
+            )
+            return
+        except Exception as exc:
+            await self.jobs.update(job_id, error=f"Project OS submit failed: {exc}")
+            if self.sessions is not None:
+                await self.sessions.mark(job_id, SessionStatus.FAILED)
+            await self._transition(job_id, JobState.FAILED)
+            if self.recovery is not None:
+                await self.recovery.delete(job_id)
+            await self._notify(
+                job_id,
+                f"❌ 구현은 끝났지만 Project OS 결과 제출에 실패했습니다: {exc}",
+            )
+            return
+
+        if self.sessions is not None:
+            await self.sessions.mark(job_id, SessionStatus.IDLE)
+        await self._transition(job_id, JobState.COMPLETED)
+        if self.recovery is not None:
+            await self.recovery.delete(job_id)
+        work = await self.project_work_for(job_id)
+        task_text = f"\nTask: {work.task_id}" if work and work.task_id else ""
+        next_text = (
+            f"\nNext Task: {outcome.next_task_id}"
+            if outcome.next_task_id
+            else "\nNext Task: -"
+        )
+        await self._notify(
+            job_id,
+            "✅ Project OS 구현 handoff를 제출했습니다."
+            + task_text
+            + next_text
+            + _optional_detail(final_message),
+        )
+
     async def _finish_or_continue(
         self,
         job_id: str,
@@ -871,48 +1014,9 @@ class JobManager:
                     )
 
             if finalize_project_os:
-                current = await self.require(job_id)
-                project = self.projects.get(current.project_id)
-                assert current.assigned_host is not None
-                adapter = self.project_adapters.get(project)
-                try:
-                    outcome = await adapter.submit_result(
-                        job_id=job_id,
-                        project=project,
-                        host_id=current.assigned_host,
-                        final_message=current_result.final_message,
-                    )
-                except Exception as exc:
-                    await self.jobs.update(job_id, error=f"Project OS submit failed: {exc}")
-                    if self.sessions is not None:
-                        await self.sessions.mark(job_id, SessionStatus.FAILED)
-                    await self._transition(job_id, JobState.FAILED)
-                    if self.recovery is not None:
-                        await self.recovery.delete(job_id)
-                    await self._notify(
-                        job_id,
-                        f"❌ 구현은 끝났지만 Project OS 결과 제출에 실패했습니다: {exc}",
-                    )
-                    return
-
-                if self.sessions is not None:
-                    await self.sessions.mark(job_id, SessionStatus.IDLE)
-                await self._transition(job_id, JobState.COMPLETED)
-                if self.recovery is not None:
-                    await self.recovery.delete(job_id)
-                work = await self.project_work_for(job_id)
-                task_text = f"\nTask: {work.task_id}" if work and work.task_id else ""
-                next_text = (
-                    f"\nNext Task: {outcome.next_task_id}"
-                    if outcome.next_task_id
-                    else "\nNext Task: -"
-                )
-                await self._notify(
+                await self._finalize_project_adapter(
                     job_id,
-                    "✅ Project OS 구현 handoff를 제출했습니다."
-                    + task_text
-                    + next_text
-                    + _optional_detail(current_result.final_message),
+                    current_result.final_message,
                 )
                 return
 
