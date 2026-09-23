@@ -301,6 +301,7 @@ def _project_work_view(record) -> dict:
     return {
         "job_id": record.job_id,
         "adapter": record.adapter,
+        "host_id": record.host_id,
         "task_id": record.task_id,
         "role": record.role,
         "status": record.status,
