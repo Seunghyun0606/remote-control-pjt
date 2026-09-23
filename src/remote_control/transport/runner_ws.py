@@ -35,18 +35,11 @@ class RemoteRunHandle(RunHandle):
     async def cancel(self) -> None:
         if self._result_future.done():
             return
-        await self.gateway.send(
-            self.host_id,
-            message("JOB_CANCEL", execution_id=self.execution_id),
+        await self.gateway.cancel_remote(
+            host_id=self.host_id,
+            execution_id=self.execution_id,
+            session_id=self.session_id,
         )
-        if not self._result_future.done():
-            self._result_future.set_result(
-                AgentRunResult(
-                    returncode=130,
-                    session_id=self.session_id,
-                    final_message="cancelled by controller",
-                )
-            )
 
 
 @dataclass(slots=True)
@@ -89,6 +82,29 @@ class RunnerGateway:
         if websocket is None:
             raise ConnectionError(f"runner {host_id!r} is not connected")
         await websocket.send_text(envelope.model_dump_json())
+
+    async def cancel_remote(
+        self,
+        *,
+        host_id: str,
+        execution_id: str,
+        session_id: str | None,
+    ) -> None:
+        pending = self._pending.pop(execution_id, None)
+        try:
+            await self.send(
+                host_id,
+                message("JOB_CANCEL", execution_id=execution_id),
+            )
+        finally:
+            if pending is not None and not pending.future.done():
+                pending.future.set_result(
+                    AgentRunResult(
+                        returncode=130,
+                        session_id=session_id,
+                        final_message="cancelled by controller",
+                    )
+                )
 
     async def start_remote(
         self,
