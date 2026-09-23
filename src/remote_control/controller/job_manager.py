@@ -307,7 +307,11 @@ class JobManager:
                 payload={"instruction": steering},
             )
             await self._notify(job_id, "↪ 추가 지시를 기존 Codex session에 전달합니다.")
-            next_result = await self._resume_or_fallback(job_id, steering)
+            next_result = await self._resume_or_fallback(
+                job_id,
+                steering,
+                steering=True,
+            )
             if next_result is None:
                 return
             current_result = next_result
@@ -316,6 +320,8 @@ class JobManager:
         self,
         job_id: str,
         instruction: str,
+        *,
+        steering: bool = False,
     ) -> AgentRunResult | None:
         job = await self.require(job_id)
         if JobState(job.state) != JobState.RUNNING:
@@ -332,14 +338,15 @@ class JobManager:
 
         if requested_session_id:
             await self.events.append(
-                "SESSION_RESUME_REQUESTED",
+                "SESSION_STEER_REQUESTED" if steering else "SESSION_RESUME_REQUESTED",
                 job_id=job_id,
                 project_id=job.project_id,
                 host_id=job.assigned_host,
                 payload={"external_session_id": requested_session_id},
             )
             try:
-                handle = await self.runner.resume(
+                operation = self.runner.steer if steering else self.runner.resume
+                handle = await operation(
                     session_id=requested_session_id,
                     instruction=instruction,
                     working_directory=working_directory,
