@@ -36,6 +36,7 @@ class AgentRunner(ABC):
         project_id: str,
         instruction: str,
         working_directory: Path,
+        host_id: str | None = None,
         on_event: RunEventCallback | None = None,
     ) -> RunHandle:
         raise NotImplementedError
@@ -46,6 +47,7 @@ class AgentRunner(ABC):
         session_id: str,
         instruction: str,
         working_directory: Path,
+        host_id: str | None = None,
         on_event: RunEventCallback | None = None,
     ) -> RunHandle:
         raise NotImplementedError("session resume is implemented in Phase R2")

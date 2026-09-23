@@ -37,6 +37,7 @@ class FakeAgentRunner(AgentRunner):
         project_id: str,
         instruction: str,
         working_directory: Path,
+        host_id: str | None = None,
         on_event: RunEventCallback | None = None,
     ) -> RunHandle:
         self.started.append(
@@ -44,6 +45,7 @@ class FakeAgentRunner(AgentRunner):
                 "project_id": project_id,
                 "instruction": instruction,
                 "working_directory": working_directory,
+                "host_id": host_id,
             }
         )
         if on_event is not None:

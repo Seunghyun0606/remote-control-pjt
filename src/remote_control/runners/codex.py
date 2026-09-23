@@ -75,8 +75,10 @@ class CodexRunner(AgentRunner):
         project_id: str,
         instruction: str,
         working_directory: Path,
+        host_id: str | None = None,
         on_event: RunEventCallback | None = None,
     ) -> RunHandle:
+        del project_id, host_id
         if not working_directory.exists() or not working_directory.is_dir():
             raise FileNotFoundError(f"working directory not found: {working_directory}")
 

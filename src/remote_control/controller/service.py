@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from remote_control.controller.command_router import Command, CommandRouter, Intent
 from remote_control.controller.job_manager import JobManager
+from remote_control.hosts.registry import HostRegistry
 from remote_control.projects.registry import ProjectRegistry
 
 
@@ -14,9 +15,16 @@ DEFAULT_INSTRUCTION = (
 
 
 class ControllerService:
-    def __init__(self, *, projects: ProjectRegistry, jobs: JobManager) -> None:
+    def __init__(
+        self,
+        *,
+        projects: ProjectRegistry,
+        jobs: JobManager,
+        hosts: HostRegistry | None = None,
+    ) -> None:
         self.projects = projects
         self.jobs = jobs
+        self.hosts = hosts
         self.router = CommandRouter(projects)
 
     async def handle_text(self, text: str, *, channel: str, user_id: str) -> str:
@@ -27,7 +35,7 @@ class ControllerService:
         if command.intent == Intent.HELP:
             return (
                 "Remote Agent Control\n"
-                "/projects\n/status\n/run <project> [--host <host-id>]\n"
+                "/projects\n/status\n/hosts\n/run <project> [--host <host-id>]\n"
                 "/jobs\n/job <job-id>\n/stop"
             )
         if command.intent == Intent.PROJECTS:
@@ -35,6 +43,17 @@ class ControllerService:
             if not projects:
                 return "등록된 프로젝트가 없습니다."
             return "\n".join(f"{project.id} — {project.name}" for project in projects)
+        if command.intent == Intent.HOSTS:
+            if self.hosts is None:
+                return "Host Registry가 활성화되지 않았습니다."
+            hosts = await self.hosts.list()
+            if not hosts:
+                return "등록된 Host가 없습니다."
+            return "\n".join(
+                f"{host.id} {host.status.value} os={host.os} "
+                f"capabilities={','.join(sorted(host.capabilities)) or '-'}"
+                for host in hosts
+            )
         if command.intent == Intent.STATUS:
             active = await self.jobs.active_for_user(user_id)
             if not active:

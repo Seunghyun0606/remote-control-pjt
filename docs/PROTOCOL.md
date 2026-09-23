@@ -1,33 +1,30 @@
 # Runner Protocol
 
-Remote transport starts in Phase R1. The protocol is documented now so R0 does not couple the core to a local process.
+R1 uses an outbound WebSocket connection from each remote Runner to the Controller.
 
-Envelope:
+Endpoint: `/ws/runner`
 
-```json
-{
-  "protocol_version": 1,
-  "type": "JOB_START",
-  "id": "message-id",
-  "timestamp": "2026-09-23T00:00:00Z",
-  "payload": {}
-}
-```
+Protocol messages use an envelope containing `protocol_version`, `type`, `id`, `timestamp`, and `payload`. R1 supports protocol version 1 and rejects unknown versions.
 
-Reserved message types:
+The first Runner message is `HOST_REGISTER` with host id, name, OS and capabilities. The Runner then sends `HEARTBEAT` periodically with its running execution ids.
 
-- `HOST_REGISTER`
-- `HEARTBEAT`
+Controller to Runner:
+
 - `JOB_START`
 - `JOB_CANCEL`
+
+Reserved for later:
+
 - `JOB_PAUSE`
 - `JOB_RESUME`
 - `JOB_STEER`
+
+Runner to Controller:
+
 - `JOB_ACCEPTED`
 - `JOB_PROGRESS`
 - `JOB_RESULT`
 - `JOB_ERROR`
 - `SESSION_STARTED`
-- `HUMAN_GATE`
 
-R0 does not expose `/ws/runner`; the local runner is invoked through the same conceptual boundary.
+`JOB_START` carries a generated execution id, project id, instruction and a working directory selected from the Controller-side project registry.

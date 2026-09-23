@@ -7,6 +7,8 @@ from typing import Awaitable, Callable
 from uuid import uuid4
 
 from remote_control.controller.states import JobState, TERMINAL_STATES, validate_transition
+from remote_control.hosts.registry import HostRegistry
+from remote_control.hosts.router import HostRouter
 from remote_control.projects.registry import ProjectRegistry
 from remote_control.runners.base import AgentRunner, RunHandle
 from remote_control.storage.models import JobRecord
@@ -29,12 +31,15 @@ class JobManager:
         events: EventRepository,
         runner: AgentRunner,
         local_host_id: str,
+        hosts: HostRegistry | None = None,
     ) -> None:
         self.projects = projects
         self.jobs = jobs
         self.events = events
         self.runner = runner
         self.local_host_id = local_host_id
+        self.hosts = hosts
+        self.host_router = HostRouter(hosts) if hosts is not None else None
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._handles: dict[str, RunHandle] = {}
         self._notifier: Notifier | None = None
@@ -52,7 +57,7 @@ class JobManager:
         requested_host: str = "auto",
     ) -> JobRecord:
         project = self.projects.get(project_id)
-        assigned_host = self._resolve_host(project_id, requested_host)
+        assigned_host = await self._resolve_host(project_id, requested_host)
         job = JobRecord(
             id=_job_id(),
             project_id=project.id,
@@ -108,8 +113,11 @@ class JobManager:
     async def active_for_user(self, user_id: str) -> list[JobRecord]:
         return await self.jobs.list_active_for_user(user_id)
 
-    def _resolve_host(self, project_id: str, requested_host: str) -> str:
+    async def _resolve_host(self, project_id: str, requested_host: str) -> str:
         project = self.projects.get(project_id)
+        if self.host_router is not None:
+            return await self.host_router.choose(project, requested_host)
+
         if requested_host == "auto":
             host = project.default_host or self.local_host_id
         else:
@@ -119,7 +127,7 @@ class JobManager:
         if host != self.local_host_id:
             raise ValueError(
                 f"R0 supports only local host {self.local_host_id!r}; "
-                "remote/Desktop routing is Phase R1"
+                f"remote host {host!r} requires the R1 host registry"
             )
         project.path_for(host)
         return host
@@ -129,7 +137,7 @@ class JobManager:
             job = await self._transition(job_id, JobState.STARTING)
             project = self.projects.get(job.project_id)
             assert job.assigned_host is not None
-            working_directory = Path(project.path_for(job.assigned_host)).expanduser().resolve()
+            working_directory = Path(project.path_for(job.assigned_host)).expanduser()
 
             async def on_event(event: dict) -> None:
                 await self.events.append(
@@ -144,6 +152,7 @@ class JobManager:
                 project_id=job.project_id,
                 instruction=job.instruction,
                 working_directory=working_directory,
+                host_id=job.assigned_host,
                 on_event=on_event,
             )
             self._handles[job_id] = handle
@@ -210,7 +219,7 @@ class JobManager:
 
 def _small_event(event: dict) -> dict:
     allowed = {}
-    for key in ("type", "message", "text", "thread_id", "session_id"):
+    for key in ("type", "event_type", "message", "text", "thread_id", "session_id"):
         value = event.get(key)
         if isinstance(value, (str, int, float, bool)) or value is None:
             allowed[key] = value

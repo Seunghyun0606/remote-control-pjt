@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "remote-agent-control"
-version = "0.1.0"
+version = "0.2.0"
 description = "Messenger-driven remote control plane for AI coding agents"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,6 +19,7 @@ dependencies = [
   "SQLAlchemy>=2.0,<3",
   "typer>=0.12,<1",
   "uvicorn>=0.30,<1",
+  "websockets>=14,<17",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +32,7 @@ dev = [
 
 [project.scripts]
 remote-control = "remote_control.cli:app"
+remote-runner = "remote_control.runner_cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/remote_control"]

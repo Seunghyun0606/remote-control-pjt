@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import select
 
 from remote_control.storage.db import Database
-from remote_control.storage.models import EventRecord, JobRecord
+from remote_control.storage.models import EventRecord, HostRecord, JobRecord
 
 
 class JobRepository:
@@ -76,6 +76,48 @@ class EventRepository:
         )
         async with self.db.sessions() as session:
             session.add(record)
+            await session.commit()
+            await session.refresh(record)
+            return record
+
+
+class HostRepository:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def get(self, host_id: str) -> HostRecord | None:
+        async with self.db.sessions() as session:
+            return await session.get(HostRecord, host_id)
+
+    async def list(self) -> list[HostRecord]:
+        async with self.db.sessions() as session:
+            result = await session.execute(select(HostRecord).order_by(HostRecord.id))
+            return list(result.scalars())
+
+    async def upsert(self, record: HostRecord) -> HostRecord:
+        async with self.db.sessions() as session:
+            current = await session.get(HostRecord, record.id)
+            if current is None:
+                session.add(record)
+                target = record
+            else:
+                current.name = record.name
+                current.os = record.os
+                current.status = record.status
+                current.capabilities_json = record.capabilities_json
+                current.last_heartbeat = record.last_heartbeat
+                target = current
+            await session.commit()
+            await session.refresh(target)
+            return target
+
+    async def update(self, host_id: str, **changes: Any) -> HostRecord:
+        async with self.db.sessions() as session:
+            record = await session.get(HostRecord, host_id)
+            if record is None:
+                raise KeyError(f"unknown host: {host_id}")
+            for key, value in changes.items():
+                setattr(record, key, value)
             await session.commit()
             await session.refresh(record)
             return record

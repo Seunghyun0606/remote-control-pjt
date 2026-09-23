@@ -14,6 +14,7 @@ class Intent(StrEnum):
     JOBS = "JOBS"
     JOB = "JOB"
     STOP = "STOP"
+    HOSTS = "HOSTS"
     HELP = "HELP"
 
 
@@ -58,6 +59,8 @@ class CommandRouter:
             return Command(Intent.STATUS)
         if command == "/jobs":
             return Command(Intent.JOBS)
+        if command == "/hosts":
+            return Command(Intent.HOSTS)
         if command == "/stop":
             return Command(Intent.STOP)
         if command == "/job":
@@ -88,7 +91,8 @@ class CommandRouter:
         if project is not None and any(word in normalized for word in run_words):
             host = "auto"
             for candidate in project.allowed_hosts:
-                if candidate.casefold() in normalized:
+                short_name = candidate.split("-", 1)[0]
+                if candidate.casefold() in normalized or short_name.casefold() in normalized:
                     host = candidate
                     break
             return Command(Intent.RUN_PROJECT, project_id=project.id, host=host)
