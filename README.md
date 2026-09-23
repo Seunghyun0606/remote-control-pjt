@@ -132,6 +132,10 @@ Remote Control은 Controller 시작 시 Telegram command menu를 자동 등록�
 /status
 /jobs
 /job
+/retry
+/sessions
+/session
+/doctor
 /pause
 /resume
 /steer
@@ -284,9 +288,9 @@ Remote Control Doctor
 Controller를 repo 밖이나 Windows Task Scheduler/서비스에서 시작할 때는 `.env` 자체도 절대경로로 지정하세요.
 
 ```powershell
-remote-control doctor --env-file "C:\\path\\to\\remote-control-pjt\\.env"
+remote-control doctor --env-file "C:\path\to\remote-control-pjt\.env"
 
-remote-control controller start --env-file "C:\\path\\to\\remote-control-pjt\\.env"
+remote-control controller start --env-file "C:\path\to\remote-control-pjt\.env"
 ```
 
 이렇게 하면 **현재 PowerShell 작업 디렉터리와 무관하게 동일한 `.env` + `REMOTE_CONTROL_HOME` + DB/config**를 사용합니다.
@@ -436,7 +440,25 @@ remote-control project add \
   --role developer
 ```
 
-### 3-4. Lightsail Controller 시작
+### 3-4. Lightsail 실행환경 진단
+
+Controller를 시작하기 전에:
+
+```bash
+remote-control doctor
+```
+
+를 실행해 Codex/Git, 프로젝트 경로, 실제 DB/config 경로를 확인합니다.
+
+systemd 등에서 repo 밖의 작업 디렉터리로 시작할 예정이라면:
+
+```bash
+remote-control doctor --env-file /home/ubuntu/remote-control-pjt/.env
+```
+
+처럼 `.env`도 절대경로로 확인하는 편이 안전합니다.
+
+### 3-5. Lightsail Controller 시작
 
 ```bash
 remote-control controller start
@@ -482,16 +504,30 @@ Lightsail Codex
 
 ## 4. 최초 동작 확인
 
-각 노드에서 아래 순서만 확인하면 됩니다.
+각 노드에서 아래 순서로 확인하면 됩니다.
+
+CLI에서 먼저:
 
 ```text
+remote-control doctor
+```
+
+Telegram에서:
+
+```text
+/start
+/sync
 /projects
 /hosts
 /status
 /run <project-id>
 /jobs
 /job <job-id>
+/sessions
+/doctor
 ```
+
+Project Topic 안에서는 `/run <project-id>` 대신 `/run`만 사용할 수 있습니다.
 
 추가 지시:
 
@@ -514,7 +550,33 @@ Lightsail Codex
 
 ---
 
-## 5. Codex 사용량 제한 자동 복구
+## 5. Job 상태와 복구 방식
+
+상태에 따라 사용자가 해야 할 동작이 다릅니다.
+
+| State | 의미 | 자동 복구 | 사용자가 할 일 |
+|---|---|---|---|
+| `WAITING_HOST` | 실행 가능한 Host를 기다리는 중 | O | Host/Controller 설정을 정상화하고 대기 |
+| `WAITING_QUOTA` | Codex usage/quota reset 대기 | O | 보통 대기만 하면 됨 |
+| `WAITING_HUMAN` | Human Gate 응답 대기 | X | Telegram 버튼/선택지로 결정 |
+| `PAUSED` | 사용자가 일시정지 | X | `/resume` |
+| `FAILED` | 복구 불가 오류로 종료 | X | 원인 수정 후 `/retry <job-id>` 또는 새 `/run` |
+| `COMPLETED` | 정상 종료 | X | 필요하면 새 Job 시작 |
+| `CANCELLED` | 중지됨 | X | 필요하면 새 Job 시작 |
+
+특히:
+
+```text
+/resume
+```
+
+은 `PAUSED` Job 전용입니다. `FAILED` Job은 자동으로 재실행되지 않으며 `/retry`를 사용해야 합니다.
+
+`WAITING_HOST`와 `WAITING_QUOTA`는 recovery scheduler가 자동으로 다시 확인합니다.
+
+---
+
+## 6. Codex 사용량 제한 자동 복구
 
 Codex usage/quota가 소진되면 Job을 즉시 `FAILED` 처리하지 않습니다.
 
@@ -605,6 +667,108 @@ Controller를 재시작하더라도 recovery metadata는 SQLite에 저장되므�
 
 ---
 
+# Troubleshooting
+
+## `WAITING_HOST host=-`
+
+예:
+
+```text
+JOB-... tab-pets WAITING_HOST host=- recovery=HOST ...
+```
+
+Codex가 멈춘 것이 아니라 **실행 가능한 Host를 아직 선택하지 못한 상태**입니다.
+
+확인:
+
+```text
+/hosts
+/status
+```
+
+Desktop이면 일반적으로 다음 세 값이 일치해야 합니다.
+
+```text
+.env
+REMOTE_CONTROL_HOST_ID=desktop-main
+
+projects.yaml
+allowed_hosts:
+  - desktop-main
+
+projects.yaml
+repository.path:
+  desktop-main: C:\...\project
+```
+
+`/status`에는 v0.9부터 recovery reason도 표시됩니다. Host가 ONLINE이 되면 `WAITING_HOST` Job은 자동 재개됩니다.
+
+## Windows에서 `[WinError 2]`
+
+먼저:
+
+```powershell
+remote-control doctor
+```
+
+를 실행합니다.
+
+v0.9부터 npm 설치의 `codex.cmd` / `codex.ps1` wrapper를 지원하므로 일반적인 Windows 설치에서는:
+
+```dotenv
+CODEX_EXECUTABLE=codex
+```
+
+를 그대로 사용할 수 있습니다.
+
+`doctor`가 Codex/Git resolve 또는 version check에 실패하면 Controller 시작 전 해당 문제를 수정하세요.
+
+## 재시작 후 기존 Job이 안 보임
+
+기본 SQLite URL은 상대경로입니다.
+
+```dotenv
+REMOTE_CONTROL_DB_URL=sqlite+aiosqlite:///./remote-control.db
+```
+
+실행 디렉터리가 달라지면 다른 DB를 연 것처럼 보일 수 있으므로 `REMOTE_CONTROL_HOME`을 **절대경로**로 지정하는 것을 권장합니다.
+
+```dotenv
+REMOTE_CONTROL_HOME=C:/absolute/path/to/remote-control-pjt
+```
+
+repo 밖, Task Scheduler, systemd 등에서 실행한다면 `.env`도 명시합니다.
+
+```powershell
+remote-control controller start --env-file "C:\absolute\path\to\remote-control-pjt\.env"
+```
+
+```bash
+remote-control controller start --env-file /home/ubuntu/remote-control-pjt/.env
+```
+
+현재 실제 경로는:
+
+```text
+remote-control doctor
+```
+
+에서 확인할 수 있습니다.
+
+## 프로젝트를 추가했는데 Telegram Topic이 없음
+
+프로젝트를 `remote-control project add`로 추가한 뒤 Controller를 재시작하고 Telegram에서:
+
+```text
+/sync
+```
+
+를 실행합니다.
+
+Controller는 시작 시 `config/projects.yaml`을 읽기 때문에 실행 중 registry가 자동 hot-reload되지는 않습니다.
+
+---
+
 # 세부 가이드
 
 ## 프로젝트 Registry
@@ -624,6 +788,21 @@ Generic Git adapter는 실행 전 다음을 수집합니다.
 - current branch
 - `git status --short --branch`
 - `git diff --stat`
+
+Project OS를 사용하지 않는 프로젝트는 `generic_git`만으로 운영할 수 있습니다. Remote Control은 Job/Session/Recovery를 관리하지만 별도의 canonical Task queue는 만들지 않습니다.
+
+장기 작업이라면 repo 안에 최소한 다음 정도의 문서를 두는 것을 권장합니다.
+
+```text
+README.md
+AGENTS.md
+docs/
+  PLAN.md
+  TODO.md
+  DECISIONS.md
+```
+
+그러면 Project Topic에서 "다음 작업 진행해줘" 같은 일반 지시를 보낼 때 Codex가 repository 상태와 프로젝트 문서를 기준으로 다음 작업을 판단할 수 있습니다.
 
 ### Project OS
 
