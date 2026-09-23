@@ -18,6 +18,10 @@ class Intent(StrEnum):
     RESUME = "RESUME"
     STEER = "STEER"
     HOSTS = "HOSTS"
+    RETRY = "RETRY"
+    SESSIONS = "SESSIONS"
+    SESSION = "SESSION"
+    DOCTOR = "DOCTOR"
     HELP = "HELP"
 
 
@@ -65,6 +69,20 @@ class CommandRouter:
             return Command(Intent.JOBS)
         if command == "/hosts":
             return Command(Intent.HOSTS)
+        if command == "/doctor":
+            return Command(Intent.DOCTOR)
+        if command == "/sessions":
+            if args:
+                raise CommandParseError("usage: /sessions")
+            return Command(Intent.SESSIONS)
+        if command == "/session":
+            if len(args) != 1:
+                raise CommandParseError("usage: /session <session-id>")
+            return Command(Intent.SESSION, job_id=args[0])
+        if command == "/retry":
+            if len(args) != 1:
+                raise CommandParseError("usage: /retry <job-id>")
+            return Command(Intent.RETRY, job_id=args[0])
         if command == "/stop":
             return Command(Intent.STOP, job_id=_optional_job(args, "/stop"))
         if command == "/pause":
