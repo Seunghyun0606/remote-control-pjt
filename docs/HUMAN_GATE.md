@@ -1,28 +1,10 @@
 # Human Gate
 
-R3 adds explicit human decision points without moving project/product state into Remote Control.
+R3 introduced explicit human decision points. R4 adds automatic expiry handling.
 
 ## Runtime model
 
-An Approval record contains:
-
-```text
-id
-job_id
-requested_by_user
-approval_type
-question
-details
-options
-status
-selected_option
-response_text
-expires_at
-resolved_at
-created_at
-```
-
-Status values:
+Approval status values:
 
 - `PENDING`
 - `RESOLVED`
@@ -30,24 +12,9 @@ Status values:
 - `CANCELLED`
 - `EXPIRED`
 
-R3 persists `expires_at`, but automatic expiry requires the R4 Scheduler.
-
-## Gate detection
-
-A Runner can send a structured `HUMAN_GATE` event.
-
-For Codex CLI non-interactive execution, Remote Control also appends a marker contract to the agent instruction:
-
-```text
-REMOTE_CONTROL_HUMAN_GATE
-{"type":"architecture_change","question":"...","details":"...","options":[{"key":"A","label":"..."},{"key":"B","label":"..."}]}
-```
-
-The parser also accepts request-user-input-shaped structured events and normalizes them to the same model.
-
-The marker is a Remote Control protocol, not a claim that every Codex CLI version emits this shape natively.
-
 ## State transition
+
+Normal response:
 
 ```text
 RUNNING
@@ -57,57 +24,48 @@ WAITING_HUMAN
 RUNNING
 ```
 
-When the gate is created:
+Expired response window:
 
-1. persist the Approval
-2. log `HUMAN_GATE_CREATED`
-3. transition the Job to `WAITING_HUMAN`
-4. mark the Session `WAITING_HUMAN`
-5. notify Telegram
-6. stop the current non-interactive turn while preserving the session identifier
+```text
+WAITING_HUMAN
+  ↓ expires_at
+EXPIRED Approval
+  +
+FAILED Job
+```
 
-When the human responds:
+This is a fail-closed policy. The system never chooses an architecture/destructive option because the human did not respond.
 
-1. validate the responder against the original Job user
-2. resolve/reject the Approval
-3. log `HUMAN_GATE_RESOLVED`
-4. transition the Job to `RUNNING`
-5. resume the same Host/session when available
-6. send the human decision as the next agent instruction
+## Gate detection
 
-If same-session resume fails, the existing R2 fallback reloads repository state and starts a new session.
+A Runner can send structured `HUMAN_GATE`.
+
+For non-interactive Codex execution, Remote Control also appends the `REMOTE_CONTROL_HUMAN_GATE` marker contract to the instruction.
+
+Both normalize to the same Approval Registry.
+
+## Host loss while waiting
+
+If the human responds while the originally assigned Host is offline, the decision remains persisted and the Job moves to `WAITING_HOST`.
+
+When the Host becomes available, the decision is delivered through the normal session/repository resume path.
 
 ## Telegram
 
-An approval message contains option buttons plus:
+Approval messages contain:
 
+- one button per option
 - `Details`
 - `Reject`
 
-If exactly one approval is pending for the user, typing an option key such as `B` also resolves it.
+If exactly one Approval is pending, a short option key such as `B` can also resolve it.
 
-While an Approval is pending, arbitrary non-command text is not treated as steering. This prevents an accidental message from bypassing a required decision.
+Arbitrary text is not converted to steering while an Approval is pending.
 
 ## API
-
-R3 exposes:
 
 ```text
 GET  /approvals
 GET  /approvals/{id}
 POST /approvals/{id}/respond
 ```
-
-The API is intended behind the Controller's existing loopback/private-network boundary. It should not be exposed as an unrestricted public endpoint.
-
-## Scope boundary
-
-R3 does not implement:
-
-- scheduled approval expiry
-- notification retries
-- controller-restart reconciliation of active processes
-- WAITING_HOST recovery
-- WAITING_QUOTA recovery
-
-Those require R4 recovery/scheduler work.

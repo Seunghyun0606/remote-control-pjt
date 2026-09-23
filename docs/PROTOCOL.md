@@ -18,14 +18,36 @@ timestamp
 payload
 ```
 
-R3 continues protocol version 1.
+R4 remains additive on protocol version 1.
 
-## Host lifecycle
+## Connection lifecycle
 
 Runner → Controller:
 
 - `HOST_REGISTER`
+- `RUNNING_JOBS`
 - `HEARTBEAT`
+
+After every reconnect the Runner sends `RUNNING_JOBS` before buffered results.
+
+Example:
+
+```json
+{
+  "type": "RUNNING_JOBS",
+  "payload": {
+    "host_id": "desktop-main",
+    "running_jobs": [
+      {"execution_id": "abc", "session_id": "thread-1"}
+    ],
+    "completed_jobs": [
+      {"execution_id": "def", "session_id": "thread-2"}
+    ]
+  }
+}
+```
+
+Heartbeat also carries the current running execution snapshot.
 
 ## Controller → Runner
 
@@ -34,9 +56,7 @@ Runner → Controller:
 - `JOB_STEER`
 - `JOB_CANCEL`
 
-`JOB_RESUME` and `JOB_STEER` both carry the external session id, instruction and working directory.
-
-R3 Human Gate decisions reuse `JOB_RESUME`: the Controller sends the human decision as the next instruction on the same session when possible.
+Human Gate decisions and recovery resumes reuse `JOB_RESUME`.
 
 ## Runner → Controller
 
@@ -47,29 +67,27 @@ R3 Human Gate decisions reuse `JOB_RESUME`: the Controller sends the human decis
 - `SESSION_STARTED`
 - `HUMAN_GATE`
 
-A `HUMAN_GATE` message is associated with the active execution id and may carry:
+A `JOB_RESULT` may additionally contain:
 
-```json
-{
-  "type": "HUMAN_GATE",
-  "execution_id": "...",
-  "session_id": "...",
-  "event": {
-    "type": "HUMAN_GATE",
-    "approval_type": "architecture_change",
-    "question": "Proceed with schema v3?",
-    "details": "Persistent data changes are required.",
-    "options": [
-      {"key": "A", "label": "Keep v2"},
-      {"key": "B", "label": "Migrate to v3"}
-    ]
-  }
-}
+```text
+retry_kind
+retry_at
 ```
 
-The Controller, not the Runner, persists the Approval and owns the `WAITING_HUMAN` state transition.
+R4 uses `retry_kind=host` or `retry_kind=quota` as typed recovery hints. The Controller still owns the resulting Job state transition.
 
-Reserved for later:
+## Restart adoption
 
-- `JOB_PAUSE` as a dedicated transport primitive
-- running-job reconciliation messages for R4
+The Controller persists remote `execution_id` while a Job is active. When `RUNNING_JOBS` reports the same id after Controller restart, `RunnerGateway.adopt_remote()` recreates the Controller-side waiter without dispatching a duplicate Codex command.
+
+If no matching execution is reported, normal recovery resume occurs after the restart grace period.
+
+## Human Gate
+
+`HUMAN_GATE` remains the structured approval event introduced in R3.
+
+The Controller, not the Runner, persists the Approval and owns `WAITING_HUMAN`.
+
+## Reserved
+
+`JOB_PAUSE` remains reserved as a dedicated transport primitive. Current pause cancels the active turn while preserving session state.

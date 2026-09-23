@@ -1,70 +1,67 @@
 # Security
 
-## R3 controls
+## Control boundaries
 
 1. Telegram authorization uses numeric user IDs from an allowlist.
-2. An Approval response is accepted only from the user ID that owns the original Job.
+2. Approval responses are restricted to the original Job user.
 3. Messenger text never becomes a shell command.
 4. Plain text steering is accepted only for a validated active Job.
-5. While one Approval is pending, arbitrary text cannot bypass the Human Gate as steering.
-6. Human decisions become Codex instructions; option keys are never executed as shell commands.
-7. Project working directories come from server-side configuration, not Messenger input.
-8. Codex uses direct subprocess argument execution, not shell interpolation.
-9. Default Codex sandbox is `workspace-write`.
-10. Controller never stores or forwards Codex/ChatGPT login credentials.
-11. Desktop opens the WebSocket connection outbound; it has no inbound listener.
-12. Controller/Runner transport requires a configured shared secret.
-13. Controller HTTP binds to `127.0.0.1` by default.
+5. Human Gate decisions become Codex instructions, not shell commands.
+6. Project working directories come only from the server-side Project Registry.
+7. Codex is launched with direct subprocess arguments, not shell interpolation.
+8. Default Codex sandbox is `workspace-write`.
+9. Controller never stores or forwards Codex/ChatGPT credentials.
+10. Desktop opens the WebSocket connection outbound; it has no inbound listener.
+11. Controller/Runner transport requires a shared secret.
+12. Controller HTTP binds to `127.0.0.1` by default.
 
-## Approval data
+## Recovery trust boundary
 
-The Approval Registry stores runtime metadata:
+Recovery is Controller-owned code state.
 
-- Job/user association
-- decision type and question
-- options/details
-- status and selected option
-- timestamps
+A Runner or Codex process may report:
 
-It does not store Codex credentials.
+- quota
+- disconnect/error
+- current execution id
+- session id
+- Human Gate
 
-Telegram callback authorization has two layers:
+Those reports do not directly mutate the state machine. JobManager validates the current state and performs allowed transitions.
 
-```text
-numeric allowlist
-  ↓
-Approval requested_by_user match
-```
+## Persisted recovery metadata
 
-A callback copied from another user is therefore rejected.
+The Recovery table stores runtime references such as:
 
-## Human Gate trust boundary
+- Job id
+- Host/retry kind
+- retry timestamp
+- remote execution id
+- Codex session continuation instruction
 
-The agent may request a gate, but the agent does not change runtime state directly. The Controller validates the event and performs the code-defined transition:
+It does not contain Codex login files, ChatGPT credentials, SSH private keys, or OpenAI tokens.
 
-```text
-RUNNING -> WAITING_HUMAN -> RUNNING
-```
+## Remote execution adoption
 
-The Controller also prevents the gated turn from continuing unattended.
+`execution_id` is a correlation identifier, not authentication.
 
-## Runner transport
+A remote Runner can report/adopt jobs only after establishing the authenticated Controller WebSocket using the configured Runner transport secret.
 
-Use a long random shared secret for Controller/Runner transport. Use TLS or a private network when the connection crosses an untrusted network.
+Desktop remains outbound-only.
 
-The Desktop Runner connects outbound. Do not expose an inbound Desktop listener.
+## Quota recovery
+
+Quota retry never weakens the configured Codex sandbox or approval policy. A retry starts/resumes through the same AgentRunner boundary.
+
+## Human Gate expiry
+
+Expired Human Gates fail closed: the Approval becomes `EXPIRED` and the Job becomes `FAILED`. The system does not infer a default architecture/destructive choice.
 
 ## Controller API
 
-The HTTP API binds to loopback by default. It does not become safe for unrestricted Internet exposure merely because Telegram has an allowlist.
+The HTTP API binds to loopback by default. Telegram authorization does not protect an independently exposed HTTP port.
 
-Use a private network/reverse proxy authentication if exposing it beyond the local host. Broader API authentication is outside R3.
-
-## Codex authentication
-
-Each execution Host owns its own Codex CLI authentication under that Host's local user account.
-
-Never copy Codex authentication files, ChatGPT session credentials, or OpenAI access tokens into the Controller database or `.env`.
+Use a private network or authenticated reverse proxy before exposing the API outside the trusted host.
 
 ## Secrets
 
@@ -73,4 +70,4 @@ Never copy Codex authentication files, ChatGPT session credentials, or OpenAI ac
 - Telegram bot credential
 - Controller/Runner transport secret
 
-Do not place production SSH keys or broad user-home credentials inside an agent workspace.
+Codex authentication belongs to each execution Host's local user account.
