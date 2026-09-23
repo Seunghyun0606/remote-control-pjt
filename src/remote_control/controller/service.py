@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from remote_control.controller.command_router import Command, CommandRouter, Intent
 from remote_control.controller.job_manager import JobManager
 from remote_control.controller.states import JobState
@@ -29,10 +31,12 @@ class ControllerService:
         projects: ProjectRegistry,
         jobs: JobManager,
         hosts: HostRegistry | None = None,
+        diagnostics: Callable[[], str] | None = None,
     ) -> None:
         self.projects = projects
         self.jobs = jobs
         self.hosts = hosts
+        self.diagnostics = diagnostics
         self.router = CommandRouter(projects)
 
     async def handle_text(
@@ -157,14 +161,18 @@ class ControllerService:
                     "/run — 이 프로젝트 작업 시작\n"
                     "/status — 이 프로젝트 active Job\n"
                     "/jobs — 이 프로젝트 최근 Job\n"
-                    "/job <job-id>\n/pause [job-id]\n/resume [job-id]\n"
+                    "/job <job-id>\n/retry <failed-job-id>\n"
+                    "/sessions\n/session <session-id>\n"
+                    "/pause [job-id]\n/resume [job-id]\n"
                     "/steer [--job <job-id>] <instruction>\n/stop [job-id]\n"
                     "일반 메시지 — active Job 1개면 추가 지시, 없으면 새 Job"
                 )
             return (
                 "Remote Agent Control\n"
                 "/projects\n/status\n/hosts\n/run <project> [--host <host-id>]\n"
-                "/jobs\n/job <job-id>\n/pause [job-id]\n/resume [job-id]\n"
+                "/jobs\n/job <job-id>\n/retry <failed-job-id>\n"
+                "/sessions\n/session <session-id>\n/doctor\n"
+                "/pause [job-id]\n/resume [job-id]\n"
                 "/steer [--job <job-id>] <instruction>\n/stop [job-id]"
             )
         if command.intent == Intent.PROJECTS:
@@ -186,6 +194,10 @@ class ControllerService:
                 f"capabilities={','.join(sorted(host.capabilities)) or '-'}"
                 for host in hosts
             )
+        if command.intent == Intent.DOCTOR:
+            if self.diagnostics is None:
+                return "Runtime doctor가 활성화되지 않았습니다."
+            return self.diagnostics()
         if command.intent == Intent.STATUS:
             active = await self.jobs.active_for_user(
                 user_id,
@@ -237,6 +249,55 @@ class ControllerService:
                     f"host={job.assigned_host or '-'}{_recovery_suffix(recovery)}"
                 )
             return "\n".join(lines)
+        if command.intent == Intent.SESSIONS:
+            if self.jobs.sessions is None:
+                return "Session Registry가 활성화되지 않았습니다."
+            sessions = await self.jobs.sessions.list(limit=100)
+            lines: list[str] = []
+            for session in sessions:
+                job = await self.jobs.jobs.get(session.job_id)
+                if job is None or job.requested_by_user != user_id:
+                    continue
+                if project_id is not None and job.project_id != project_id:
+                    continue
+                lines.append(
+                    f"{session.id} {session.project_id} {session.status} "
+                    f"job={session.job_id} last={session.last_active_at.isoformat()}"
+                )
+                if len(lines) >= 20:
+                    break
+            if not lines:
+                return (
+                    "이 project의 Codex Session이 없습니다."
+                    if project_id is not None
+                    else "Codex Session이 없습니다."
+                )
+            return "\n".join(lines)
+        if command.intent == Intent.SESSION:
+            if self.jobs.sessions is None:
+                return "Session Registry가 활성화되지 않았습니다."
+            assert command.job_id is not None
+            session = await self.jobs.sessions.get(command.job_id)
+            if session is None:
+                raise KeyError(f"unknown session: {command.job_id}")
+            job = await self.jobs.select_for_user(
+                user_id,
+                job_id=session.job_id,
+                project_id=project_id,
+            )
+            return (
+                f"{session.id}\n"
+                f"Project: {session.project_id}\n"
+                f"Job: {session.job_id}\n"
+                f"Job state: {job.state}\n"
+                f"Host: {session.host_id}\n"
+                f"Codex session: {session.external_session_id}\n"
+                f"Session state: {session.status}\n"
+                f"Created: {session.created_at.isoformat()}\n"
+                f"Last active: {session.last_active_at.isoformat()}\n"
+                f"Final result: {job.result or '-'}\n"
+                f"Error: {job.error or '-'}"
+            )
         if command.intent == Intent.JOB:
             assert command.job_id is not None
             job = await self.jobs.select_for_user(
@@ -251,7 +312,27 @@ class ControllerService:
             return (
                 f"{job.id}\nProject: {job.project_id}\nState: {job.state}\n"
                 f"Host: {job.assigned_host or '-'}\nSession: {job.external_session_id or '-'}"
-                f"{adapter_line}{task_line}{_recovery_detail(recovery)}"
+                f"{adapter_line}{task_line}"
+                f"\nError: {job.error or '-'}"
+                f"{_recovery_detail(recovery)}"
+            )
+        if command.intent == Intent.RETRY:
+            assert command.job_id is not None
+            original = await self.jobs.select_for_user(
+                user_id,
+                job_id=command.job_id,
+                states={JobState.FAILED},
+                project_id=project_id,
+            )
+            retried = await self.jobs.retry_failed(original.id)
+            return (
+                f"↻ 실패 Job 재시도 생성\n"
+                f"Retry of: {original.id}\n"
+                f"Job: {retried.id}\n"
+                f"Project: {retried.project_id}\n"
+                f"State: {retried.state}\n"
+                f"Host: {retried.assigned_host or '-'}\n"
+                f"Session: {retried.external_session_id or '-'}"
             )
         if command.intent == Intent.PAUSE:
             job = await self.jobs.select_for_user(
@@ -323,6 +404,9 @@ def _recovery_suffix(record: RecoveryRecord | None) -> str:
     if record is None:
         return ""
     parts = [f"recovery={record.kind}", f"attempt={record.attempt_count}"]
+    if record.last_error:
+        reason = " ".join(record.last_error.split())
+        parts.append(f"reason={reason[:160]}")
     if record.next_retry_at is not None:
         parts.append(f"retry_at={record.next_retry_at.isoformat()}")
     return " " + " ".join(parts)
@@ -337,6 +421,7 @@ def _recovery_detail(record: RecoveryRecord | None) -> str:
         f"\nRecovery mode: {record.mode}"
         f"\nRetry attempt: {record.attempt_count}"
         f"\nNext retry: {next_retry}"
+        f"\nRecovery error: {record.last_error or '-'}"
     )
 
 
