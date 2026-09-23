@@ -29,8 +29,48 @@ class ControllerService:
         self.router = CommandRouter(projects)
 
     async def handle_text(self, text: str, *, channel: str, user_id: str) -> str:
+        stripped = text.strip()
+        if stripped and not stripped.startswith("/"):
+            pending = await self.jobs.pending_approvals_for_user(user_id)
+            if len(pending) == 1:
+                resolved = await self.jobs.match_pending_approval(user_id, stripped)
+                if resolved is not None:
+                    return _approval_response_text(resolved.id, resolved.selected_option, False)
+                options = ", ".join(
+                    option.key for option in self.jobs.approvals.options(pending[0])
+                )
+                return (
+                    f"⚠ Human Gate 응답 대기 중입니다. "
+                    f"선택지({options}) 또는 Telegram 버튼을 사용하세요."
+                )
+
         command = self.router.parse(text)
         return await self.execute(command, channel=channel, user_id=user_id)
+
+    async def approval_details(self, approval_id: str, *, user_id: str):
+        return await self.jobs.approval_details(approval_id, user_id=user_id)
+
+    async def respond_approval(
+        self,
+        approval_id: str,
+        *,
+        user_id: str,
+        option_key: str | None = None,
+        rejected: bool = False,
+        response_text: str | None = None,
+    ) -> str:
+        record = await self.jobs.respond_approval(
+            approval_id,
+            user_id=user_id,
+            option_key=option_key,
+            rejected=rejected,
+            response_text=response_text,
+        )
+        return _approval_response_text(
+            record.id,
+            record.selected_option,
+            rejected,
+        )
 
     async def execute(self, command: Command, *, channel: str, user_id: str) -> str:
         if command.intent == Intent.HELP:
@@ -138,3 +178,20 @@ class ControllerService:
             stopped = await self.jobs.cancel(job.id)
             return f"⏹ {stopped.id} 중지됨 ({stopped.state})"
         raise RuntimeError(f"unsupported intent: {command.intent}")
+
+
+def _approval_response_text(
+    approval_id: str,
+    selected_option: str | None,
+    rejected: bool,
+) -> str:
+    if rejected:
+        return (
+            f"⛔ Human Gate {approval_id} 거절됨\n"
+            "같은 Codex session에 거절 결정을 전달하고 안전한 대안을 요청합니다."
+        )
+    return (
+        f"✅ Human Gate {approval_id} 응답 완료\n"
+        f"선택: {selected_option}\n"
+        "같은 Codex session으로 작업을 재개합니다."
+    )
