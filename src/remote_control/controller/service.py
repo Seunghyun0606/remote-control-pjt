@@ -162,7 +162,7 @@ class ControllerService:
                     "/status — 이 프로젝트 active Job\n"
                     "/jobs — 이 프로젝트 최근 Job\n"
                     "/job <job-id>\n/retry <failed-job-id>\n"
-                    "/sessions\n/session <session-id>\n"
+                    "/sessions\n/session — 현재 Project Session\n/session new — 새 Session\n"
                     "/pause [job-id]\n/resume [job-id]\n"
                     "/steer [--job <job-id>] <instruction>\n/stop [job-id]\n"
                     "일반 메시지 — active Job 1개면 추가 지시, 없으면 새 Job"
@@ -250,53 +250,73 @@ class ControllerService:
                 )
             return "\n".join(lines)
         if command.intent == Intent.SESSIONS:
-            if self.jobs.sessions is None:
-                return "Session Registry가 활성화되지 않았습니다."
-            sessions = await self.jobs.sessions.list(limit=100)
-            lines: list[str] = []
-            for session in sessions:
-                job = await self.jobs.jobs.get(session.job_id)
-                if job is None or job.requested_by_user != user_id:
-                    continue
-                if project_id is not None and job.project_id != project_id:
-                    continue
-                lines.append(
-                    f"{session.id} {session.project_id} {session.status} "
-                    f"job={session.job_id} last={session.last_active_at.isoformat()}"
-                )
-                if len(lines) >= 20:
-                    break
-            if not lines:
-                return (
-                    "이 project의 Codex Session이 없습니다."
-                    if project_id is not None
-                    else "Codex Session이 없습니다."
-                )
-            return "\n".join(lines)
-        if command.intent == Intent.SESSION:
-            if self.jobs.sessions is None:
-                return "Session Registry가 활성화되지 않았습니다."
-            assert command.job_id is not None
-            session = await self.jobs.sessions.get(command.job_id)
-            if session is None:
-                raise KeyError(f"unknown session: {command.job_id}")
-            job = await self.jobs.select_for_user(
+            if self.jobs.project_sessions is None:
+                return "Project Session Registry가 활성화되지 않았습니다."
+            sessions = await self.jobs.project_sessions.list_for_user(
                 user_id,
-                job_id=session.job_id,
                 project_id=project_id,
+                limit=20,
             )
+            if not sessions:
+                return (
+                    "이 project의 Project Session이 없습니다."
+                    if project_id is not None
+                    else "Project Session이 없습니다."
+                )
+            return "\n".join(
+                f"{session.id} {session.project_id} {session.status} "
+                f"codex={session.external_session_id or '-'} "
+                f"last_job={session.last_job_id or '-'} "
+                f"last={session.last_active_at.isoformat()}"
+                for session in sessions
+            )
+        if command.intent == Intent.NEW_SESSION:
+            if self.jobs.project_sessions is None:
+                return "Project Session Registry가 활성화되지 않았습니다."
+            if project_id is None:
+                raise ValueError("/session new 는 project topic에서 실행하세요")
+            session = await self.jobs.project_sessions.new_session(
+                project_id=project_id,
+                owner_user_id=user_id,
+            )
+            return (
+                f"🆕 새 Project Session을 만들었습니다.\n"
+                f"Session: {session.id}\n"
+                f"Project: {session.project_id}\n"
+                "다음 일반 메시지부터 새 Codex thread를 사용합니다."
+            )
+        if command.intent == Intent.SESSION:
+            if self.jobs.project_sessions is None:
+                return "Project Session Registry가 활성화되지 않았습니다."
+            if command.job_id is None:
+                if project_id is None:
+                    raise ValueError(
+                        "project topic에서는 /session, 그 외에서는 /session <session-id>를 사용하세요"
+                    )
+                session = await self.jobs.project_sessions.active_for(
+                    project_id,
+                    user_id,
+                )
+                if session is None:
+                    return "현재 project의 active Project Session이 없습니다."
+            else:
+                session = await self.jobs.project_sessions.get(command.job_id)
+                if session is None:
+                    raise KeyError(f"unknown project session: {command.job_id}")
+                if session.owner_user_id != user_id:
+                    raise ValueError("project session belongs to another user")
+                if project_id is not None and session.project_id != project_id:
+                    raise ValueError("project session belongs to another project topic")
             return (
                 f"{session.id}\n"
                 f"Project: {session.project_id}\n"
-                f"Job: {session.job_id}\n"
-                f"Job state: {job.state}\n"
-                f"Host: {session.host_id}\n"
-                f"Codex session: {session.external_session_id}\n"
-                f"Session state: {session.status}\n"
+                f"State: {session.status}\n"
+                f"Codex session: {session.external_session_id or '-'}\n"
+                f"Host: {session.host_id or '-'}\n"
+                f"Last Job: {session.last_job_id or '-'}\n"
+                f"Lock: {session.locked_by_job_id or '-'}\n"
                 f"Created: {session.created_at.isoformat()}\n"
-                f"Last active: {session.last_active_at.isoformat()}\n"
-                f"Final result: {job.result or '-'}\n"
-                f"Error: {job.error or '-'}"
+                f"Last active: {session.last_active_at.isoformat()}"
             )
         if command.intent == Intent.JOB:
             assert command.job_id is not None
