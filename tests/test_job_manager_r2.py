@@ -79,7 +79,7 @@ async def test_pause_and_resume_same_session(project_registry, database):
 
 @pytest.mark.asyncio
 async def test_steering_is_applied_on_next_turn(project_registry, database):
-    runner = FakeAgentRunner(delay=0.05)
+    runner = FakeAgentRunner(delay=0.2)
     manager = build_manager(project_registry, database, runner)
 
     job = await manager.create(
@@ -99,7 +99,7 @@ async def test_steering_is_applied_on_next_turn(project_registry, database):
 
 @pytest.mark.asyncio
 async def test_resume_failure_falls_back_to_new_session(project_registry, database):
-    runner = FakeAgentRunner(delay=0.05, resume_returncode=1)
+    runner = FakeAgentRunner(delay=0.2, resume_returncode=1)
     manager = build_manager(project_registry, database, runner)
 
     job = await manager.create(
@@ -121,7 +121,7 @@ async def test_resume_failure_falls_back_to_new_session(project_registry, databa
 
 @pytest.mark.asyncio
 async def test_resume_rebinds_when_codex_returns_new_thread(project_registry, database):
-    runner = FakeAgentRunner(delay=0.05, resume_session_id="new-thread")
+    runner = FakeAgentRunner(delay=0.2, resume_session_id="new-thread")
     manager = build_manager(project_registry, database, runner)
 
     job = await manager.create(
