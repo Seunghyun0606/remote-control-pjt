@@ -279,8 +279,13 @@ class JobManager:
             return
         await asyncio.shield(task)
 
-    async def active_for_user(self, user_id: str) -> list[JobRecord]:
-        return await self.jobs.list_active_for_user(user_id)
+    async def active_for_user(
+        self,
+        user_id: str,
+        *,
+        project_id: str | None = None,
+    ) -> list[JobRecord]:
+        return await self.jobs.list_active_for_user(user_id, project_id=project_id)
 
     async def project_work_for(self, job_id: str) -> ProjectWorkRecord | None:
         if self.project_work is None:
@@ -292,10 +297,23 @@ class JobManager:
             return None
         return await self.recovery.get(job_id)
 
-    async def pending_approvals_for_user(self, user_id: str) -> list[ApprovalRecord]:
+    async def pending_approvals_for_user(
+        self,
+        user_id: str,
+        *,
+        project_id: str | None = None,
+    ) -> list[ApprovalRecord]:
         if self.approvals is None:
             return []
-        return await self.approvals.pending_for_user(user_id)
+        pending = await self.approvals.pending_for_user(user_id)
+        if project_id is None:
+            return pending
+        scoped: list[ApprovalRecord] = []
+        for record in pending:
+            job = await self.jobs.get(record.job_id)
+            if job is not None and job.project_id == project_id:
+                scoped.append(record)
+        return scoped
 
     async def approval_details(self, approval_id: str, *, user_id: str) -> ApprovalPrompt:
         if self.approvals is None:
@@ -309,10 +327,15 @@ class JobManager:
         self,
         user_id: str,
         text: str,
+        *,
+        project_id: str | None = None,
     ) -> ApprovalRecord | None:
         if self.approvals is None:
             return None
-        pending = await self.approvals.pending_for_user(user_id)
+        pending = await self.pending_approvals_for_user(
+            user_id,
+            project_id=project_id,
+        )
         if len(pending) != 1:
             return None
         record = pending[0]
@@ -400,17 +423,20 @@ class JobManager:
         *,
         job_id: str | None = None,
         states: set[JobState] | None = None,
+        project_id: str | None = None,
     ) -> JobRecord:
         if job_id is not None:
             job = await self.require(job_id)
             if job.requested_by_user != user_id:
                 raise ValueError("job belongs to another user")
+            if project_id is not None and job.project_id != project_id:
+                raise ValueError("job belongs to another project topic")
             if states is not None and JobState(job.state) not in states:
                 allowed = ", ".join(sorted(state.value for state in states))
                 raise ValueError(f"job {job_id} must be in one of: {allowed}")
             return job
 
-        candidates = await self.active_for_user(user_id)
+        candidates = await self.active_for_user(user_id, project_id=project_id)
         if states is not None:
             candidates = [job for job in candidates if JobState(job.state) in states]
         if not candidates:

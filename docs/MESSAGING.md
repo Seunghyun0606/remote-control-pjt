@@ -46,6 +46,40 @@ When ProjectWork has a task id, notification headers include it:
 
 Telegram uses polling and a numeric user-ID allowlist.
 
+On startup the provider registers the supported command menu with Telegram using `setMyCommands`.
+
+Private Project Topics are supported when the bot has Telegram private topic mode enabled.
+
+```text
+Bot
+├─ Project A Topic
+├─ Project B Topic
+└─ Project C Topic
+```
+
+`/start` and `/sync` reconcile `config/projects.yaml` with persisted Telegram topic mappings.
+
+The Controller stores:
+
+```text
+telegram_project_topics
+  user_id + project_id -> chat_id + message_thread_id
+
+telegram_message_bindings
+  chat_id + message_id -> project_id + job_id
+```
+
+Inside a mapped Project Topic:
+
+- `/run` starts that Project without repeating the project id.
+- `/status`, `/jobs`, pause/resume/stop are scoped to that Project.
+- Plain text starts a Job when no Project Job is active.
+- Plain text steers the single eligible Job when exactly one is active.
+- Multiple eligible Jobs produce an inline Job chooser.
+- Replying to a bot Job message steers the Job bound to that exact Telegram message.
+
+Asynchronous progress, recovery, approval and final notifications are routed back to the Project Topic when a mapping exists. If topic mode is unavailable, Telegram falls back to the private chat without a thread.
+
 Human Gate replies use inline keyboard callbacks. Every callback passes both:
 
 - Telegram allowlist validation
