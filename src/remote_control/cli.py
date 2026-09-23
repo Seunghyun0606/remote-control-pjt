@@ -11,6 +11,7 @@ from remote_control.api.app import create_app
 from remote_control.approvals.registry import ApprovalRegistry
 from remote_control.controller.job_manager import JobManager
 from remote_control.controller.service import ControllerService
+from remote_control.diagnostics import collect_diagnostics, format_diagnostics, validate_startup
 from remote_control.hosts.registry import HostRegistry
 from remote_control.messaging.slack import SlackProvider
 from remote_control.messaging.telegram import TelegramProvider
@@ -47,6 +48,16 @@ app.add_typer(controller_app, name="controller")
 app.add_typer(project_app, name="project")
 
 
+@app.command("doctor")
+def doctor() -> None:
+    """Check local runtime configuration, executables and project paths."""
+    settings = Settings()
+    projects = (
+        ProjectRegistry.from_yaml(settings.resolved_config_path)
+        if settings.resolved_config_path.exists()
+        else None
+    )
+    typer.echo(format_diagnostics(collect_diagnostics(settings, projects=projects)))
 
 
 @project_app.command("add")
@@ -66,7 +77,7 @@ def project_add(
     """Register a project in the Remote Control registry."""
     settings = Settings()
     project = add_project(
-        settings.config_path,
+        settings.resolved_config_path,
         project_id=project_id,
         name=name,
         adapter=adapter,
@@ -98,10 +109,15 @@ async def _run_controller(*, no_telegram: bool) -> None:
     if not settings.runner_token:
         raise RuntimeError("CONTROLLER_RUNNER_TOKEN is required")
 
-    db = Database(settings.db_url)
-    await db.init()
+    projects = ProjectRegistry.from_yaml(settings.resolved_config_path)
+    validate_startup(settings, projects)
 
-    projects = ProjectRegistry.from_yaml(settings.config_path)
+    logging.info("runtime home: %s", settings.resolved_home_path)
+    logging.info("project config: %s", settings.resolved_config_path)
+    logging.info("database: %s", settings.resolved_db_url)
+
+    db = Database(settings.resolved_db_url)
+    await db.init()
     events = EventRepository(db)
     hosts = HostRegistry(
         hosts=HostRepository(db),
