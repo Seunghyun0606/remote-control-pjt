@@ -586,7 +586,16 @@ class JobManager:
             payload={"attempt": record.attempt_count},
         )
         instruction = record.resume_instruction or QUOTA_RESUME_INSTRUCTION
-        await self.recovery.delete(job.id)
+        await self.recovery.upsert(
+            job.id,
+            kind=RecoveryKind.QUOTA.value,
+            mode=RecoveryMode.RESUME.value,
+            attempt_count=record.attempt_count,
+            next_retry_at=None,
+            execution_id=record.execution_id,
+            resume_instruction=instruction,
+            last_error=record.last_error,
+        )
         self._start_task(job.id, self._execute_resume(job.id, instruction))
         await self._notify(job.id, "↻ Codex quota 대기 시간이 끝나 자동 재시도합니다.")
         return True
@@ -600,7 +609,16 @@ class JobManager:
         await self._transition(job.id, JobState.ASSIGNED, assigned_host=host_id)
         mode = RecoveryMode(record.mode)
         if mode == RecoveryMode.START:
-            await self.recovery.delete(job.id)
+            await self.recovery.upsert(
+                job.id,
+                kind=RecoveryKind.HOST.value,
+                mode=RecoveryMode.START.value,
+                attempt_count=record.attempt_count,
+                next_retry_at=None,
+                execution_id=record.execution_id,
+                resume_instruction=record.resume_instruction,
+                last_error=record.last_error,
+            )
             self._start_task(job.id, self._execute_new(job.id))
         else:
             await self._transition(job.id, JobState.STARTING)
@@ -608,7 +626,16 @@ class JobManager:
             if self.sessions is not None:
                 await self.sessions.mark(job.id, SessionStatus.ACTIVE)
             instruction = record.resume_instruction or RESTART_RESUME_INSTRUCTION
-            await self.recovery.delete(job.id)
+            await self.recovery.upsert(
+                job.id,
+                kind=record.kind,
+                mode=RecoveryMode.RESUME.value,
+                attempt_count=record.attempt_count,
+                next_retry_at=None,
+                execution_id=record.execution_id,
+                resume_instruction=instruction,
+                last_error=record.last_error,
+            )
             self._start_task(job.id, self._execute_resume(job.id, instruction))
 
         await self.events.append(
@@ -665,6 +692,9 @@ class JobManager:
             job = await self._transition(job_id, JobState.STARTING)
             handle = await self._start_new_turn(job, job.instruction)
             await self._set_handle(job_id, handle)
+            current = await self.require(job_id)
+            if JobState(current.state) != JobState.STARTING:
+                return
             await self._transition(job_id, JobState.RUNNING)
             result = await self._await_handle(job_id, handle)
             if result is None:
