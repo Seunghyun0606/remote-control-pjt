@@ -173,6 +173,35 @@ def test_telegram_command_menu_and_message_scope_helpers():
 
 
 @pytest.mark.asyncio
+async def test_sync_project_topics_creates_mapping(project_registry, database):
+    manager = JobManager(
+        projects=project_registry,
+        jobs=JobRepository(database),
+        events=EventRepository(database),
+        runner=FakeAgentRunner(),
+        local_host_id="lightsail-main",
+    )
+    controller = ControllerService(projects=project_registry, jobs=manager)
+    topics = TelegramProjectTopicRepository(database)
+    bindings = TelegramMessageBindingRepository(database)
+    bot = _FakeBot()
+    provider = _provider(
+        controller=controller,
+        topics=topics,
+        bindings=bindings,
+        bot=bot,
+    )
+
+    result = await provider.sync_project_topics(user_id="100", chat_id="100")
+
+    assert "생성 1" in result
+    topic = await topics.get(user_id="100", project_id="demo")
+    assert topic is not None
+    assert topic.topic_name == "Demo Project"
+    assert topic.message_thread_id == 101
+
+
+@pytest.mark.asyncio
 async def test_project_topic_bare_run_is_scoped(project_registry, database):
     manager = JobManager(
         projects=project_registry,
@@ -199,6 +228,9 @@ async def test_project_topic_bare_run_is_scoped(project_registry, database):
         project_id="demo",
     )
     assert "demo" in status
+
+    job = (await manager.list(limit=1))[0]
+    await manager.wait_until_idle(job.id)
 
 
 @pytest.mark.asyncio
