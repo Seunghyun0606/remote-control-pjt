@@ -13,6 +13,11 @@ from remote_control.controller.job_manager import JobManager
 from remote_control.controller.service import ControllerService
 from remote_control.hosts.registry import HostRegistry
 from remote_control.messaging.telegram import TelegramProvider
+from remote_control.projects.adapters import ProjectAdapterRegistry
+from remote_control.projects.operations import (
+    HybridProjectOperationExecutor,
+    LocalProjectOperationExecutor,
+)
 from remote_control.projects.registry import ProjectRegistry
 from remote_control.recovery.scheduler import RecoveryScheduler
 from remote_control.runners.codex import CodexRunner
@@ -25,6 +30,7 @@ from remote_control.storage.repositories import (
     EventRepository,
     HostRepository,
     JobRepository,
+    ProjectWorkRepository,
     RecoveryRepository,
     SessionRepository,
 )
@@ -39,7 +45,7 @@ app.add_typer(controller_app, name="controller")
 def controller_start(
     no_telegram: bool = typer.Option(False, "--no-telegram", help="Do not start Telegram polling"),
 ) -> None:
-    """Start the R4 controller."""
+    """Start the R5 controller."""
     asyncio.run(_run_controller(no_telegram=no_telegram))
 
 
@@ -66,7 +72,7 @@ async def _run_controller(*, no_telegram: bool) -> None:
     await hosts.register_local(
         name="Controller Local Runner",
         os_name=platform.system().lower(),
-        capabilities={"codex", "git", "long_running", "shell"},
+        capabilities={"codex", "git", "projectctl", "long_running", "shell"},
     )
     sessions = SessionRegistry(
         sessions=SessionRepository(db),
@@ -77,6 +83,7 @@ async def _run_controller(*, no_telegram: bool) -> None:
         events=events,
     )
     recovery = RecoveryRepository(db)
+    project_work = ProjectWorkRepository(db)
 
     local_runner = CodexRunner(
         executable=settings.codex_executable,
@@ -89,6 +96,21 @@ async def _run_controller(*, no_telegram: bool) -> None:
         local_runner=local_runner,
         gateway=gateway,
     )
+    project_operations = HybridProjectOperationExecutor(
+        local_host_id=settings.host_id,
+        local=LocalProjectOperationExecutor(
+            projectctl_executable=settings.projectctl_executable,
+            git_executable=settings.git_executable,
+            timeout_seconds=settings.project_operation_timeout_seconds,
+        ),
+        gateway=gateway,
+        timeout_seconds=settings.project_operation_timeout_seconds,
+    )
+    project_adapters = ProjectAdapterRegistry(
+        operations=project_operations,
+        work=project_work,
+        events=events,
+    )
     manager = JobManager(
         projects=projects,
         jobs=JobRepository(db),
@@ -99,6 +121,8 @@ async def _run_controller(*, no_telegram: bool) -> None:
         sessions=sessions,
         approvals=approvals,
         recovery=recovery,
+        project_adapters=project_adapters,
+        project_work=project_work,
         progress_interval_seconds=settings.progress_interval_seconds,
         quota_retry_initial_seconds=settings.quota_retry_initial_seconds,
         quota_retry_max_seconds=settings.quota_retry_max_seconds,
