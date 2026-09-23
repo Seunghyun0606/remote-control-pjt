@@ -67,7 +67,7 @@ class SlackProvider(MessagingProvider):
         if cached:
             return cached
         result = await self.app.client.conversations_open(users=user_id)
-        channel = result.get("channel") if isinstance(result, dict) else None
+        channel = result.get("channel")
         channel_id = channel.get("id") if isinstance(channel, dict) else None
         if not isinstance(channel_id, str) or not channel_id:
             raise RuntimeError(f"Slack DM channel could not be opened for {user_id}")
