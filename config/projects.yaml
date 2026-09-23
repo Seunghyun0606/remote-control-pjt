@@ -1,0 +1,10 @@
+projects:
+  example:
+    name: Example Project
+    adapter: generic_git
+    repository:
+      path:
+        lightsail-main: /home/codex/projects/example
+    allowed_hosts:
+      - lightsail-main
+    default_host: lightsail-main
