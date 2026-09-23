@@ -74,7 +74,7 @@ class RunnerDaemon:
     async def _handle(self, websocket: ClientConnection, envelope: Envelope) -> None:
         if envelope.type == "JOB_START":
             await self._start_job(websocket, envelope, resume=False)
-        elif envelope.type == "JOB_RESUME":
+        elif envelope.type in {"JOB_RESUME", "JOB_STEER"}:
             await self._start_job(websocket, envelope, resume=True)
         elif envelope.type == "JOB_CANCEL":
             execution_id = str(envelope.payload.get("execution_id") or "")
