@@ -60,6 +60,10 @@ Codex quota detection accepts:
 1. structured rate/usage-limit events
 2. structured retry/reset fields when present
 3. known quota/rate-limit text as a fallback
+4. Codex error codes such as `usage_limit_exceeded` / `rate_limit_exceeded`
+5. text-only reset hints such as `try again at Sep 25th, 2026 2:20 PM`
+
+Structured reset timestamps have priority. If only a text reset time is available, the Controller interprets timezone-less text in the Controller Host's local timezone and stores the resulting UTC `next_retry_at`.
 
 If a future reset timestamp is available, it becomes `next_retry_at`.
 
@@ -79,6 +83,21 @@ REMOTE_CONTROL_QUOTA_RETRY_MAX_SECONDS=7200
 ```
 
 The attempt count survives retries and resets only when the Job completes/cancels/fails.
+
+Messenger observability:
+
+```text
+/status
+JOB-... demo WAITING_QUOTA host=desktop-main recovery=QUOTA attempt=2 retry_at=...
+
+/job JOB-...
+Recovery: QUOTA
+Recovery mode: RESUME
+Retry attempt: 2
+Next retry: ...
+```
+
+When the retry becomes due, the Scheduler sends a quota-resumed notification and prefers the existing Codex session before falling back to repository state.
 
 ## Recovery Scheduler
 
