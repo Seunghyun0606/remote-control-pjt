@@ -40,6 +40,8 @@ ControllerService -> CommandRouter
   +----> ApprovalRegistry
   +----> RecoveryRepository
   +----> ProjectWorkRepository
+  +----> TelegramProjectTopicRepository
+  +----> TelegramMessageBindingRepository
   |
 JobManager <---- RecoveryScheduler
   |
@@ -169,9 +171,25 @@ The recovery scheduler handles:
 - `WAITING_QUOTA`
 - Project OS `FINALIZE` recovery through the Host retry path
 
-## R6 messaging and dashboard
+## Messaging and project conversation scope
 
 Messaging providers register notification callbacks by channel. Telegram and Slack can run simultaneously without replacing each other's notifier.
+
+Telegram can add a project scope derived from `message_thread_id`. That scope never changes the server-side Project Registry; it only selects which registered Project commands and Job conversations apply to.
+
+Telegram message bindings provide conversation addressing:
+
+```text
+Project Topic
+   ↓ project_id
+ControllerService
+
+Reply to bot message
+   ↓ message_id
+Job binding
+   ↓
+exact Codex Job/session
+```
 
 Slack uses outbound Socket Mode. Provider-specific payloads stop at the messaging boundary; ControllerService receives normalized text plus channel/user identity.
 
