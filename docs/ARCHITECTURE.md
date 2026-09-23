@@ -15,7 +15,7 @@ Remote Agent Control stores runtime state:
 
 Project/product state remains outside this control plane. When Project OS is used, its canonical state stays under `.project-os` and is accessed through `projectctl`.
 
-## R0 ~ R5
+## R0 ~ R6
 
 ```text
 Telegram
