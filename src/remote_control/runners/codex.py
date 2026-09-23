@@ -28,6 +28,30 @@ def build_codex_command(
     ]
 
 
+def build_codex_resume_command(
+    *,
+    executable: str,
+    sandbox: str,
+    approval_policy: str,
+    working_directory: Path,
+    session_id: str,
+) -> list[str]:
+    return [
+        executable,
+        "exec",
+        "resume",
+        session_id,
+        "--json",
+        "--sandbox",
+        sandbox,
+        "--cd",
+        str(working_directory),
+        "--config",
+        f'approval_policy="{approval_policy}"',
+        "-",
+    ]
+
+
 class CodexRunHandle(RunHandle):
     def __init__(
         self,
@@ -79,15 +103,53 @@ class CodexRunner(AgentRunner):
         on_event: RunEventCallback | None = None,
     ) -> RunHandle:
         del project_id, host_id
+        self._validate_working_directory(working_directory)
+        return await self._spawn(
+            build_codex_command(
+                executable=self.executable,
+                sandbox=self.sandbox,
+                approval_policy=self.approval_policy,
+                working_directory=working_directory,
+            ),
+            instruction=instruction,
+            on_event=on_event,
+        )
+
+    async def resume(
+        self,
+        *,
+        session_id: str,
+        instruction: str,
+        working_directory: Path,
+        host_id: str | None = None,
+        on_event: RunEventCallback | None = None,
+    ) -> RunHandle:
+        del host_id
+        self._validate_working_directory(working_directory)
+        return await self._spawn(
+            build_codex_resume_command(
+                executable=self.executable,
+                sandbox=self.sandbox,
+                approval_policy=self.approval_policy,
+                working_directory=working_directory,
+                session_id=session_id,
+            ),
+            instruction=instruction,
+            on_event=on_event,
+        )
+
+    @staticmethod
+    def _validate_working_directory(working_directory: Path) -> None:
         if not working_directory.exists() or not working_directory.is_dir():
             raise FileNotFoundError(f"working directory not found: {working_directory}")
 
-        command = build_codex_command(
-            executable=self.executable,
-            sandbox=self.sandbox,
-            approval_policy=self.approval_policy,
-            working_directory=working_directory,
-        )
+    async def _spawn(
+        self,
+        command: list[str],
+        *,
+        instruction: str,
+        on_event: RunEventCallback | None,
+    ) -> RunHandle:
         process = await asyncio.create_subprocess_exec(
             *command,
             stdin=asyncio.subprocess.PIPE,
@@ -124,8 +186,8 @@ class CodexRunner(AgentRunner):
             except json.JSONDecodeError:
                 event = {"type": "raw_output", "text": line}
 
-            session_id = session_id or _extract_session_id(event)
-            final_message = _extract_final_message(event) or final_message
+            session_id = session_id or extract_session_id(event)
+            final_message = extract_final_message(event) or final_message
             if on_event is not None:
                 await on_event(event)
 
@@ -141,7 +203,7 @@ class CodexRunner(AgentRunner):
         )
 
 
-def _extract_session_id(event: dict) -> str | None:
+def extract_session_id(event: dict) -> str | None:
     for key in ("thread_id", "session_id"):
         value = event.get(key)
         if isinstance(value, str) and value:
@@ -154,7 +216,7 @@ def _extract_session_id(event: dict) -> str | None:
     return None
 
 
-def _extract_final_message(event: dict) -> str | None:
+def extract_final_message(event: dict) -> str | None:
     event_type = str(event.get("type", ""))
     if event_type not in {"item.completed", "turn.completed", "message.completed"}:
         return None

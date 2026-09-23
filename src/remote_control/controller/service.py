@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from remote_control.controller.command_router import Command, CommandRouter, Intent
 from remote_control.controller.job_manager import JobManager
+from remote_control.controller.states import JobState
 from remote_control.hosts.registry import HostRegistry
 from remote_control.projects.registry import ProjectRegistry
 
@@ -36,7 +37,8 @@ class ControllerService:
             return (
                 "Remote Agent Control\n"
                 "/projects\n/status\n/hosts\n/run <project> [--host <host-id>]\n"
-                "/jobs\n/job <job-id>\n/stop"
+                "/jobs\n/job <job-id>\n/pause [job-id]\n/resume [job-id]\n"
+                "/steer [--job <job-id>] <instruction>\n/stop [job-id]"
             )
         if command.intent == Intent.PROJECTS:
             projects = self.projects.list()
@@ -57,7 +59,7 @@ class ControllerService:
         if command.intent == Intent.STATUS:
             active = await self.jobs.active_for_user(user_id)
             if not active:
-                return "현재 실행 중인 Job이 없습니다."
+                return "현재 active Job이 없습니다."
             return "\n".join(
                 f"{job.id} {job.project_id} {job.state} host={job.assigned_host or '-'}"
                 for job in active
@@ -92,10 +94,47 @@ class ControllerService:
                 f"{job.id}\nProject: {job.project_id}\nState: {job.state}\n"
                 f"Host: {job.assigned_host or '-'}\nSession: {job.external_session_id or '-'}"
             )
+        if command.intent == Intent.PAUSE:
+            job = await self.jobs.select_for_user(
+                user_id,
+                job_id=command.job_id,
+                states={JobState.RUNNING},
+            )
+            paused = await self.jobs.pause(job.id)
+            return (
+                f"⏸ {paused.id} 일시정지됨\n"
+                f"Session: {paused.external_session_id or '-'}\n"
+                "/resume 으로 같은 Codex session 재개를 시도할 수 있습니다."
+            )
+        if command.intent == Intent.RESUME:
+            job = await self.jobs.select_for_user(
+                user_id,
+                job_id=command.job_id,
+                states={JobState.PAUSED},
+            )
+            resumed = await self.jobs.resume(job.id)
+            return (
+                f"▶ {resumed.id} 재개 요청\n"
+                f"Host: {resumed.assigned_host or '-'}\n"
+                f"Session: {resumed.external_session_id or '-'}"
+            )
+        if command.intent == Intent.STEER:
+            assert command.instruction is not None
+            job = await self.jobs.select_for_user(
+                user_id,
+                job_id=command.job_id,
+                states={JobState.RUNNING},
+            )
+            await self.jobs.steer(job.id, command.instruction)
+            return (
+                f"↪ {job.id} 추가 지시 접수\n"
+                "현재 turn을 강제 종료하지 않고, 다음 Codex turn에서 같은 session에 적용합니다."
+            )
         if command.intent == Intent.STOP:
-            active = await self.jobs.active_for_user(user_id)
-            if not active:
-                return "중지할 active Job이 없습니다."
-            job = await self.jobs.cancel(active[0].id)
-            return f"⏹ {job.id} 중지됨 ({job.state})"
+            job = await self.jobs.select_for_user(
+                user_id,
+                job_id=command.job_id,
+            )
+            stopped = await self.jobs.cancel(job.id)
+            return f"⏹ {stopped.id} 중지됨 ({stopped.state})"
         raise RuntimeError(f"unsupported intent: {command.intent}")

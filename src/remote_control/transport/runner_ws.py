@@ -39,6 +39,14 @@ class RemoteRunHandle(RunHandle):
             self.host_id,
             message("JOB_CANCEL", execution_id=self.execution_id),
         )
+        if not self._result_future.done():
+            self._result_future.set_result(
+                AgentRunResult(
+                    returncode=130,
+                    session_id=self.session_id,
+                    final_message="cancelled by controller",
+                )
+            )
 
 
 @dataclass(slots=True)
@@ -91,6 +99,44 @@ class RunnerGateway:
         working_directory: Path,
         on_event: RunEventCallback | None = None,
     ) -> RunHandle:
+        return await self._start_remote_operation(
+            message_type="JOB_START",
+            host_id=host_id,
+            instruction=instruction,
+            working_directory=working_directory,
+            on_event=on_event,
+            project_id=project_id,
+        )
+
+    async def resume_remote(
+        self,
+        *,
+        host_id: str,
+        session_id: str,
+        instruction: str,
+        working_directory: Path,
+        on_event: RunEventCallback | None = None,
+    ) -> RunHandle:
+        return await self._start_remote_operation(
+            message_type="JOB_RESUME",
+            host_id=host_id,
+            instruction=instruction,
+            working_directory=working_directory,
+            on_event=on_event,
+            session_id=session_id,
+        )
+
+    async def _start_remote_operation(
+        self,
+        *,
+        message_type: str,
+        host_id: str,
+        instruction: str,
+        working_directory: Path,
+        on_event: RunEventCallback | None,
+        project_id: str | None = None,
+        session_id: str | None = None,
+    ) -> RunHandle:
         if not self.is_connected(host_id):
             raise ConnectionError(f"runner {host_id!r} is not connected")
         execution_id = uuid4().hex
@@ -101,23 +147,24 @@ class RunnerGateway:
             gateway=self,
             result_future=future,
         )
+        handle.session_id = session_id
         self._pending[execution_id] = _PendingRun(
             host_id=host_id,
             future=future,
             handle=handle,
             on_event=on_event,
         )
+        payload = {
+            "execution_id": execution_id,
+            "instruction": instruction,
+            "working_directory": str(working_directory),
+        }
+        if project_id is not None:
+            payload["project_id"] = project_id
+        if session_id is not None:
+            payload["session_id"] = session_id
         try:
-            await self.send(
-                host_id,
-                message(
-                    "JOB_START",
-                    execution_id=execution_id,
-                    project_id=project_id,
-                    instruction=instruction,
-                    working_directory=str(working_directory),
-                ),
-            )
+            await self.send(host_id, message(message_type, **payload))
         except Exception:
             self._pending.pop(execution_id, None)
             raise
@@ -134,16 +181,20 @@ class RunnerGateway:
             pid = payload.get("pid")
             pending.handle.pid = int(pid) if isinstance(pid, int) else None
             session_id = payload.get("session_id")
-            if isinstance(session_id, str):
+            if isinstance(session_id, str) and session_id:
                 pending.handle.session_id = session_id
             return
 
         if envelope.type in {"JOB_PROGRESS", "SESSION_STARTED"}:
             session_id = payload.get("session_id")
-            if isinstance(session_id, str):
+            if isinstance(session_id, str) and session_id:
                 pending.handle.session_id = session_id
             if pending.on_event is not None:
-                await pending.on_event({"type": envelope.type, **payload})
+                event = payload.get("event")
+                if isinstance(event, dict):
+                    await pending.on_event(event)
+                else:
+                    await pending.on_event({"type": envelope.type, **payload})
             return
 
         if envelope.type == "JOB_RESULT":

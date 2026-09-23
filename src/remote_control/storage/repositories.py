@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import select
 
 from remote_control.storage.db import Database
-from remote_control.storage.models import EventRecord, HostRecord, JobRecord
+from remote_control.storage.models import EventRecord, HostRecord, JobRecord, SessionRecord
 
 
 class JobRepository:
@@ -116,6 +116,49 @@ class HostRepository:
             record = await session.get(HostRecord, host_id)
             if record is None:
                 raise KeyError(f"unknown host: {host_id}")
+            for key, value in changes.items():
+                setattr(record, key, value)
+            await session.commit()
+            await session.refresh(record)
+            return record
+
+
+class SessionRepository:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def add(self, record: SessionRecord) -> SessionRecord:
+        async with self.db.sessions() as session:
+            session.add(record)
+            await session.commit()
+            await session.refresh(record)
+            return record
+
+    async def get(self, session_id: str) -> SessionRecord | None:
+        async with self.db.sessions() as session:
+            return await session.get(SessionRecord, session_id)
+
+    async def get_for_job(self, job_id: str) -> SessionRecord | None:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(SessionRecord).where(SessionRecord.job_id == job_id)
+            )
+            return result.scalar_one_or_none()
+
+    async def list(self, limit: int = 100) -> list[SessionRecord]:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(SessionRecord)
+                .order_by(SessionRecord.last_active_at.desc())
+                .limit(limit)
+            )
+            return list(result.scalars())
+
+    async def update(self, session_id: str, **changes: Any) -> SessionRecord:
+        async with self.db.sessions() as session:
+            record = await session.get(SessionRecord, session_id)
+            if record is None:
+                raise KeyError(f"unknown session: {session_id}")
             for key, value in changes.items():
                 setattr(record, key, value)
             await session.commit()

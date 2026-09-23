@@ -15,9 +15,15 @@ from remote_control.messaging.telegram import TelegramProvider
 from remote_control.projects.registry import ProjectRegistry
 from remote_control.runners.codex import CodexRunner
 from remote_control.runners.hybrid import HybridAgentRunner
+from remote_control.sessions.registry import SessionRegistry
 from remote_control.settings import Settings
 from remote_control.storage.db import Database
-from remote_control.storage.repositories import EventRepository, HostRepository, JobRepository
+from remote_control.storage.repositories import (
+    EventRepository,
+    HostRepository,
+    JobRepository,
+    SessionRepository,
+)
 from remote_control.transport.runner_ws import RunnerGateway
 
 app = typer.Typer(help="Remote Agent Control")
@@ -29,7 +35,7 @@ app.add_typer(controller_app, name="controller")
 def controller_start(
     no_telegram: bool = typer.Option(False, "--no-telegram", help="Do not start Telegram polling"),
 ) -> None:
-    """Start the R1 controller."""
+    """Start the R2 controller."""
     asyncio.run(_run_controller(no_telegram=no_telegram))
 
 
@@ -58,6 +64,10 @@ async def _run_controller(*, no_telegram: bool) -> None:
         os_name=platform.system().lower(),
         capabilities={"codex", "git", "long_running", "shell"},
     )
+    sessions = SessionRegistry(
+        sessions=SessionRepository(db),
+        events=events,
+    )
 
     local_runner = CodexRunner(
         executable=settings.codex_executable,
@@ -77,6 +87,8 @@ async def _run_controller(*, no_telegram: bool) -> None:
         runner=runner,
         local_host_id=settings.host_id,
         hosts=hosts,
+        sessions=sessions,
+        progress_interval_seconds=settings.progress_interval_seconds,
     )
     controller = ControllerService(projects=projects, jobs=manager, hosts=hosts)
 

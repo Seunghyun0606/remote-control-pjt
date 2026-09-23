@@ -39,6 +39,10 @@ class Settings(_BaseSettings):
         default=45,
         validation_alias="REMOTE_CONTROL_HEARTBEAT_TIMEOUT_SECONDS",
     )
+    progress_interval_seconds: int = Field(
+        default=300,
+        validation_alias="REMOTE_CONTROL_PROGRESS_INTERVAL_SECONDS",
+    )
     runner_token: str = Field(default="", validation_alias="CONTROLLER_RUNNER_TOKEN")
 
     telegram_bot_token: str | None = Field(
