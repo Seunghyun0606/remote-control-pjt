@@ -97,8 +97,9 @@ def collect_diagnostics(
 
 def validate_startup(settings: Settings, projects: ProjectRegistry) -> None:
     failures: list[str] = []
+    required_names = {"Config", "Codex", "Git", "Projectctl"}
     for item in collect_diagnostics(settings, projects=projects, run_versions=False):
-        if not item.ok and item.name != "Runtime Home":
+        if not item.ok and item.name in required_names:
             failures.append(f"{item.name}: {item.detail}")
     if failures:
         joined = "\n- ".join(failures)
