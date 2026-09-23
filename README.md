@@ -2,7 +2,7 @@
 
 Telegram/Slack에서 **현재 머신의 Codex**를 실행하고, 진행 상태·추가 지시·Human Gate·사용량 제한 복구·Project OS 연동까지 관리하는 Runtime Control Plane입니다.
 
-현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.8.0**입니다.
+현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.9.0**입니다.
 
 ## 전체 개요
 
@@ -215,6 +215,8 @@ python -c "import secrets; print(secrets.token_hex(32))"
 ```dotenv
 REMOTE_CONTROL_HOST_ID=desktop-main
 
+# Use an absolute path so Job/Session history does not depend on the launch directory.
+REMOTE_CONTROL_HOME=C:/path/to/remote-control-pjt
 REMOTE_CONTROL_DB_URL=sqlite+aiosqlite:///./remote-control.db
 REMOTE_CONTROL_CONFIG=./config/projects.yaml
 REMOTE_CONTROL_API_HOST=127.0.0.1
@@ -256,7 +258,30 @@ Get-Content .\config\projects.yaml
 
 Controller는 시작할 때 Project Registry를 읽으므로 프로젝트를 추가했다면 Controller를 재시작합니다.
 
-### 2-4. Desktop Controller 시작
+### 2-4. Desktop 실행환경 진단
+
+Controller를 시작하기 전에:
+
+```powershell
+remote-control doctor
+```
+
+를 실행합니다. Windows npm 설치의 `codex.cmd` / `codex.ps1`도 자동으로 resolve하며, Codex/Git/프로젝트 경로와 실제 DB 위치를 표시합니다.
+
+예:
+
+```text
+Remote Control Doctor
+✅ Host: desktop-main
+✅ Codex: C:\Users\...\npm\codex.CMD (cmd); codex-cli ...
+✅ Git: C:\Program Files\Git\cmd\git.EXE ...
+✅ Project tab-pets: C:\...\tab-pets
+✅ Runtime Home: C:\...\remote-control-pjt
+```
+
+`REMOTE_CONTROL_HOME`을 절대경로로 지정하면 다른 PowerShell 작업 디렉터리에서 실행해도 같은 `remote-control.db`와 `config/projects.yaml`을 사용합니다.
+
+### 2-5. Desktop Controller 시작
 
 ```powershell
 remote-control controller start
@@ -356,6 +381,7 @@ python -c "import secrets; print(secrets.token_hex(32))"
 ```dotenv
 REMOTE_CONTROL_HOST_ID=lightsail-main
 
+REMOTE_CONTROL_HOME=/home/ubuntu/remote-control-pjt
 REMOTE_CONTROL_DB_URL=sqlite+aiosqlite:///./remote-control.db
 REMOTE_CONTROL_CONFIG=./config/projects.yaml
 REMOTE_CONTROL_API_HOST=127.0.0.1
@@ -647,6 +673,12 @@ Remote Control은 implementation handoff까지 담당하고 Project OS review/ev
 /status
 /jobs
 /job <job-id>
+/retry <failed-job-id>
+
+/sessions
+/session <session-id>
+
+/doctor
 
 /run <project-id>
 /run <project-id> --host <host-id>
@@ -704,6 +736,79 @@ Bot이 보낸 Job progress/result 메시지에 Telegram **Reply**로 답하면 �
 ```
 
 따라서 여러 프로젝트와 여러 Codex Job을 동시에 실행해도 Topic + Reply를 기준으로 대화를 분리할 수 있습니다.
+
+---
+
+
+## 실패 Job 재시도
+
+`FAILED`는 자동 복구 대상이 아닙니다. 환경 문제를 수정한 뒤:
+
+```text
+/retry JOB-...
+```
+
+를 사용합니다.
+
+기존 FAILED Job의 이력은 그대로 유지하고 새 Job을 생성합니다.
+
+```text
+JOB-A FAILED
+   ↓ /retry JOB-A
+JOB-B RUNNING
+```
+
+기존 Codex session ID가 있으면 새 Job은 해당 session resume을 우선 시도합니다. session이 없으면 원래 instruction으로 새 Codex 실행을 시작합니다.
+
+Project OS Job은 canonical task state 중복을 피하기 위해 `/retry`로 복제하지 않습니다. 이 경우 `/run`으로 현재 Project OS state를 다시 평가합니다.
+
+---
+
+## Codex Session 조회
+
+Project Topic에서:
+
+```text
+/sessions
+```
+
+을 보내면 해당 사용자와 Project에 속한 최근 Codex Session만 표시합니다.
+
+상세:
+
+```text
+/session SESSION-...
+```
+
+표시 항목:
+
+- Remote Control Session ID
+- Project / Job
+- Job state
+- Host
+- Codex external session ID
+- Session state
+- Created / Last active
+- Final result / Error
+
+Remote Control DB에는 transcript 전체가 아니라 Job ↔ Codex session metadata를 저장합니다. 실제 Codex conversation은 Codex session 자체가 source of truth입니다.
+
+---
+
+## Runtime Doctor / Windows Codex
+
+`remote-control doctor`와 Telegram `/doctor`는 현재 Host와 실행환경을 점검합니다.
+
+Windows에서 npm으로 설치된 Codex가 다음처럼 보여도 정상입니다.
+
+```text
+codex.ps1
+codex.cmd
+```
+
+v0.9.0부터 Remote Control이 `.cmd/.bat`은 `cmd.exe`, `.ps1`은 PowerShell launcher를 통해 실행하므로 native `codex.exe` 경로를 수동으로 찾아 `.env`에 넣을 필요가 없습니다.
+
+Controller 시작 시에도 Codex/Git/필요한 projectctl executable을 preflight합니다. 실행 파일이 없으면 Job을 만든 뒤 모호한 `[WinError 2]`로 실패하는 대신 Controller 시작 단계에서 명확한 오류를 냅니다.
 
 ---
 
@@ -912,5 +1017,6 @@ Manual smoke test:
 - [x] R6 — Slack / Web UI
 - [x] Production hardening — quota signal/retry visibility + independent local-node guide
 - [x] Telegram Project Topics — command menu / topic scope / reply-to-job / multi-job selection
+- [x] Runtime hardening v0.9 — Windows npm Codex wrappers / doctor / FAILED retry / session history / stable runtime home / Windows CI
 
-Package version: **0.8.0**
+Package version: **0.9.0**
