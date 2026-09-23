@@ -4,6 +4,7 @@ import asyncio
 import logging
 import platform
 from pathlib import Path
+from typing import Annotated
 
 import typer
 import uvicorn
@@ -51,11 +52,10 @@ app.add_typer(project_app, name="project")
 
 @app.command("doctor")
 def doctor(
-    env_file: Path | None = typer.Option(
-        None,
-        "--env-file",
-        help="Explicit .env file path",
-    ),
+    env_file: Annotated[
+        Path | None,
+        typer.Option("--env-file", help="Explicit .env file path"),
+    ] = None,
 ) -> None:
     """Check local runtime configuration, executables and project paths."""
     settings = Settings(_env_file=env_file or ".env")
@@ -80,11 +80,10 @@ def project_add(
         "--actor",
         help="Project OS handoff actor",
     ),
-    env_file: Path | None = typer.Option(
-        None,
-        "--env-file",
-        help="Explicit .env file path",
-    ),
+    env_file: Annotated[
+        Path | None,
+        typer.Option("--env-file", help="Explicit .env file path"),
+    ] = None,
 ) -> None:
     """Register a project in the Remote Control registry."""
     settings = Settings(_env_file=env_file or ".env")
@@ -107,11 +106,10 @@ def project_add(
 @controller_app.command("start")
 def controller_start(
     no_telegram: bool = typer.Option(False, "--no-telegram", help="Do not start Telegram polling"),
-    env_file: Path | None = typer.Option(
-        None,
-        "--env-file",
-        help="Explicit .env file path",
-    ),
+    env_file: Annotated[
+        Path | None,
+        typer.Option("--env-file", help="Explicit .env file path"),
+    ] = None,
 ) -> None:
     """Start the controller."""
     asyncio.run(_run_controller(no_telegram=no_telegram, env_file=env_file))
