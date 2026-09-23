@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import platform
+import subprocess
+
 import pytest
 
 from remote_control.executables import ExecutableResolutionError, resolve_executable
@@ -47,3 +50,20 @@ def test_missing_executable_has_actionable_error(monkeypatch):
     monkeypatch.setattr("remote_control.executables.shutil.which", lambda name: None)
     with pytest.raises(ExecutableResolutionError, match="required executable not found: codex"):
         resolve_executable("codex", os_name="Windows")
+
+
+@pytest.mark.skipif(platform.system() != "Windows", reason="Windows wrapper integration test")
+def test_windows_cmd_wrapper_executes_via_cmd(tmp_path):
+    wrapper = tmp_path / "tool.cmd"
+    wrapper.write_text("@echo off\r\necho wrapper-ok\r\n", encoding="utf-8")
+
+    resolution = resolve_executable(str(wrapper), os_name="Windows")
+    completed = subprocess.run(
+        resolution.build_command([]),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert "wrapper-ok" in completed.stdout
