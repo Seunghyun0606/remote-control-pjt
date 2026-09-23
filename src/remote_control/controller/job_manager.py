@@ -120,6 +120,10 @@ class JobManager:
                 raise ValueError(
                     f"host {job.assigned_host!r} is offline; WAITING_HOST recovery is Phase R4"
                 )
+        previous_task = self._tasks.get(job_id)
+        if previous_task is not None and not previous_task.done():
+            await asyncio.shield(previous_task)
+
         await self._transition(job_id, JobState.RUNNING)
         if self.sessions is not None:
             await self.sessions.mark(job_id, SessionStatus.ACTIVE)
@@ -221,7 +225,12 @@ class JobManager:
     def _start_task(self, job_id: str, coroutine) -> None:
         task = asyncio.create_task(coroutine, name=f"job:{job_id}")
         self._tasks[job_id] = task
-        task.add_done_callback(lambda _: self._tasks.pop(job_id, None))
+
+        def cleanup(done_task: asyncio.Task[None]) -> None:
+            if self._tasks.get(job_id) is done_task:
+                self._tasks.pop(job_id, None)
+
+        task.add_done_callback(cleanup)
 
     async def _execute_new(self, job_id: str) -> None:
         try:
