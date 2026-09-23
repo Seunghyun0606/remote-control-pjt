@@ -15,6 +15,8 @@ from remote_control.storage.models import (
     ProjectWorkRecord,
     RecoveryRecord,
     SessionRecord,
+    TelegramMessageBindingRecord,
+    TelegramProjectTopicRecord,
 )
 
 
@@ -322,6 +324,129 @@ class ProjectWorkRepository:
                 raise KeyError(f"unknown project work: {job_id}")
             for key, value in changes.items():
                 setattr(record, key, value)
+            await session.commit()
+            await session.refresh(record)
+            return record
+
+
+class TelegramProjectTopicRepository:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def get(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+    ) -> TelegramProjectTopicRecord | None:
+        async with self.db.sessions() as session:
+            return await session.get(
+                TelegramProjectTopicRecord,
+                {"user_id": user_id, "project_id": project_id},
+            )
+
+    async def find_by_thread(
+        self,
+        *,
+        chat_id: str,
+        message_thread_id: int,
+    ) -> TelegramProjectTopicRecord | None:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(TelegramProjectTopicRecord)
+                .where(TelegramProjectTopicRecord.chat_id == chat_id)
+                .where(TelegramProjectTopicRecord.message_thread_id == message_thread_id)
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
+
+    async def list_for_user(self, user_id: str) -> list[TelegramProjectTopicRecord]:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(TelegramProjectTopicRecord)
+                .where(TelegramProjectTopicRecord.user_id == user_id)
+                .order_by(TelegramProjectTopicRecord.project_id)
+            )
+            return list(result.scalars())
+
+    async def upsert(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        chat_id: str,
+        message_thread_id: int,
+        topic_name: str,
+    ) -> TelegramProjectTopicRecord:
+        async with self.db.sessions() as session:
+            record = await session.get(
+                TelegramProjectTopicRecord,
+                {"user_id": user_id, "project_id": project_id},
+            )
+            if record is None:
+                record = TelegramProjectTopicRecord(
+                    user_id=user_id,
+                    project_id=project_id,
+                    chat_id=chat_id,
+                    message_thread_id=message_thread_id,
+                    topic_name=topic_name,
+                )
+                session.add(record)
+            else:
+                record.chat_id = chat_id
+                record.message_thread_id = message_thread_id
+                record.topic_name = topic_name
+            await session.commit()
+            await session.refresh(record)
+            return record
+
+
+class TelegramMessageBindingRepository:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def get(
+        self,
+        *,
+        chat_id: str,
+        message_id: int,
+    ) -> TelegramMessageBindingRecord | None:
+        async with self.db.sessions() as session:
+            return await session.get(
+                TelegramMessageBindingRecord,
+                {"chat_id": chat_id, "message_id": message_id},
+            )
+
+    async def upsert(
+        self,
+        *,
+        chat_id: str,
+        message_id: int,
+        message_thread_id: int | None,
+        user_id: str,
+        project_id: str,
+        job_id: str,
+    ) -> TelegramMessageBindingRecord:
+        async with self.db.sessions() as session:
+            record = await session.get(
+                TelegramMessageBindingRecord,
+                {"chat_id": chat_id, "message_id": message_id},
+            )
+            if record is None:
+                record = TelegramMessageBindingRecord(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    message_thread_id=message_thread_id,
+                    user_id=user_id,
+                    project_id=project_id,
+                    job_id=job_id,
+                )
+                session.add(record)
+            else:
+                record.message_thread_id = message_thread_id
+                record.user_id = user_id
+                record.project_id = project_id
+                record.job_id = job_id
             await session.commit()
             await session.refresh(record)
             return record
