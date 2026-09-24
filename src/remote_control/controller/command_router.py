@@ -22,6 +22,7 @@ class Intent(StrEnum):
     SESSIONS = "SESSIONS"
     SESSION = "SESSION"
     NEW_SESSION = "NEW_SESSION"
+    USE_SESSION = "USE_SESSION"
     DOCTOR = "DOCTOR"
     HELP = "HELP"
 
@@ -81,8 +82,12 @@ class CommandRouter:
                 return Command(Intent.SESSION)
             if len(args) == 1 and args[0].casefold() == "new":
                 return Command(Intent.NEW_SESSION)
+            if len(args) == 2 and args[0].casefold() == "use":
+                return Command(Intent.USE_SESSION, job_id=args[1])
             if len(args) != 1:
-                raise CommandParseError("usage: /session [new|<session-id>]")
+                raise CommandParseError(
+                    "usage: /session [new|use <session-id>|<session-id>]"
+                )
             return Command(Intent.SESSION, job_id=args[0])
         if command == "/retry":
             if len(args) != 1:
