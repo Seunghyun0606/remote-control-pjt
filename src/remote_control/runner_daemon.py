@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from pathlib import Path
 
 from websockets.asyncio.client import ClientConnection, connect
@@ -338,7 +339,7 @@ def _result_message(execution_id: str, result: AgentRunResult) -> Envelope:
     )
 
 
-def _sanitize_event(event: dict) -> dict:
+def _sanitize_event(event: dict, *, now: datetime | None = None) -> dict:
     result: dict = {"type": str(event.get("type") or "agent_event")}
     session_id = extract_session_id(event)
     if session_id:
@@ -375,7 +376,7 @@ def _sanitize_event(event: dict) -> dict:
     # Text-only Codex reset hints do not carry a timezone. Parse them on the
     # Runner where Codex produced the message, then send an explicit UTC ISO
     # timestamp so a Controller in another timezone cannot reinterpret it.
-    quota = detect_quota_event(event)
+    quota = detect_quota_event(event, now=now)
     if quota is not None and quota.reset_at is not None:
         result["reset_at"] = quota.reset_at.isoformat()
 
