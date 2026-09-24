@@ -323,6 +323,83 @@ class JobManager:
             self._start_task(retry.id, self._execute_new(retry.id))
         return await self.require(retry.id)
 
+    async def retry_waiting(self, job_id: str) -> JobRecord:
+        job = await self.require(job_id)
+        state = JobState(job.state)
+        if state not in {JobState.WAITING_HOST, JobState.WAITING_QUOTA}:
+            raise ValueError(
+                f"job {job_id} must be WAITING_HOST or WAITING_QUOTA"
+            )
+        if self.recovery is None:
+            raise ValueError("Recovery Registry가 활성화되지 않았습니다.")
+
+        async with self._job_locks[f"manual-retry:{job_id}"]:
+            job = await self.require(job_id)
+            state = JobState(job.state)
+            if state not in {JobState.WAITING_HOST, JobState.WAITING_QUOTA}:
+                return job
+
+            record = await self.recovery.get(job.id)
+            if record is None:
+                mode = (
+                    RecoveryMode.RESUME
+                    if job.external_session_id
+                    else RecoveryMode.START
+                )
+                record = await self.recovery.upsert(
+                    job.id,
+                    kind=(
+                        RecoveryKind.QUOTA.value
+                        if state == JobState.WAITING_QUOTA
+                        else RecoveryKind.HOST.value
+                    ),
+                    mode=mode.value,
+                    attempt_count=0,
+                    next_retry_at=datetime.now(timezone.utc),
+                    execution_id=None,
+                    resume_instruction=(
+                        QUOTA_RESUME_INSTRUCTION
+                        if state == JobState.WAITING_QUOTA
+                        else (
+                            RESTART_RESUME_INSTRUCTION
+                            if mode == RecoveryMode.RESUME
+                            else None
+                        )
+                    ),
+                    last_error="manual retry reconstructed missing recovery metadata",
+                )
+
+            await self.events.append(
+                "WAITING_JOB_RETRY_REQUESTED",
+                job_id=job.id,
+                project_id=job.project_id,
+                host_id=job.assigned_host,
+                payload={
+                    "state": state.value,
+                    "kind": record.kind,
+                    "mode": record.mode,
+                    "forced": True,
+                },
+            )
+
+            if state == JobState.WAITING_QUOTA:
+                resumed = await self._retry_quota(job, record)
+            else:
+                resumed = await self._retry_host(job, record)
+
+            if not resumed:
+                await self.events.append(
+                    "WAITING_JOB_RETRY_DEFERRED",
+                    job_id=job.id,
+                    project_id=job.project_id,
+                    host_id=job.assigned_host,
+                    payload={
+                        "state": state.value,
+                        "reason": "required host is still unavailable",
+                    },
+                )
+            return await self.require(job.id)
+
     async def pause(self, job_id: str) -> JobRecord:
         job = await self.require(job_id)
         if JobState(job.state) != JobState.RUNNING:
@@ -596,6 +673,9 @@ class JobManager:
         if self.recovery is None:
             return 0
         current = now or datetime.now(timezone.utc)
+        preexisting_waiting_host = await self.jobs.list_states(
+            {JobState.WAITING_HOST.value}
+        )
         recoverable = await self.jobs.list_states(
             {
                 JobState.ASSIGNED.value,
@@ -705,9 +785,9 @@ class JobManager:
                     last_error="recovered WAITING_QUOTA without retry metadata",
                 )
 
-        waiting_host = await self.jobs.list_states({JobState.WAITING_HOST.value})
-        for job in waiting_host:
-            if await self.recovery.get(job.id) is None:
+        for job in preexisting_waiting_host:
+            existing = await self.recovery.get(job.id)
+            if existing is None:
                 await self.recovery.upsert(
                     job.id,
                     kind=RecoveryKind.HOST.value,
@@ -719,8 +799,37 @@ class JobManager:
                     attempt_count=0,
                     next_retry_at=current,
                     execution_id=None,
-                    resume_instruction=RESTART_RESUME_INSTRUCTION,
+                    resume_instruction=(
+                        RESTART_RESUME_INSTRUCTION
+                        if await self._external_session_id(job)
+                        else None
+                    ),
                     last_error="recovered WAITING_HOST without recovery metadata",
+                )
+            else:
+                await self.recovery.upsert(
+                    job.id,
+                    kind=existing.kind,
+                    mode=existing.mode,
+                    attempt_count=existing.attempt_count,
+                    next_retry_at=current,
+                    execution_id=existing.execution_id,
+                    resume_instruction=existing.resume_instruction,
+                    last_error=existing.last_error,
+                )
+                await self.events.append(
+                    "WAITING_HOST_REARMED_ON_STARTUP",
+                    job_id=job.id,
+                    project_id=job.project_id,
+                    host_id=job.assigned_host,
+                    payload={
+                        "previous_retry_at": (
+                            existing.next_retry_at.isoformat()
+                            if existing.next_retry_at
+                            else None
+                        ),
+                        "next_retry_at": current.isoformat(),
+                    },
                 )
         return count
 
