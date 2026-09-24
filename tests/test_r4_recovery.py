@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from remote_control.approvals.registry import ApprovalRegistry, ApprovalStatus
-from remote_control.controller.job_manager import JobManager
+from remote_control.controller.job_manager import JobManager, RESTART_RESUME_INSTRUCTION
 from remote_control.hosts.models import HostStatus
 from remote_control.hosts.registry import HostRegistry
 from remote_control.human_gate import ApprovalOption, HumanGateRequest
