@@ -190,7 +190,10 @@ def _parse_reset_value(
     *,
     now: datetime | None = None,
 ) -> datetime | None:
-    current = _aware(now or datetime.now(timezone.utc))
+    reference = now or datetime.now().astimezone()
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    current = reference.astimezone(timezone.utc)
     if isinstance(value, (int, float)):
         if key == "retry_after_seconds" or (key == "retry_after" and value < 10_000_000):
             return current + timedelta(seconds=max(float(value), 0))
@@ -208,7 +211,9 @@ def _parse_reset_value(
             parsed = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
         except ValueError:
             return None
-        return _aware(parsed)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=reference.tzinfo)
+        return parsed.astimezone(timezone.utc)
     return None
 
 
