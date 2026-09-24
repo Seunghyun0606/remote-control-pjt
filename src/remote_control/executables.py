@@ -22,7 +22,10 @@ class ExecutableResolution:
     def build_command(self, args: list[str]) -> list[str]:
         if self.kind == "cmd":
             command = subprocess.list2cmdline([self.resolved, *args])
-            return [*self.launcher, command]
+            # npm-installed CLIs such as codex are commonly .CMD wrappers on
+            # Windows. Set the inherited console code page before launching so
+            # native child output is UTF-8 instead of the locale OEM code page.
+            return [*self.launcher, f"chcp 65001 >nul && {command}"]
         if self.kind == "powershell":
             return [*self.launcher, self.resolved, *args]
         return [self.resolved, *args]
