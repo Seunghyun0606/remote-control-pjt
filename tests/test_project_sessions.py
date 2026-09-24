@@ -257,3 +257,68 @@ async def test_inflight_legacy_job_lazily_creates_project_session(database):
     assert bound.status == "ACTIVE"
     assert bound.locked_by_job_id == "JOB-INFLIGHT"
     assert bound.external_session_id == "thread-inflight"
+
+
+
+@pytest.mark.asyncio
+async def test_old_project_session_can_be_reactivated_and_resumed(project_registry, database):
+    events, sessions, project_sessions = _registries(database)
+    runner = FakeAgentRunner(delay=0.01, resume_session_id="fake-session")
+    manager = JobManager(
+        projects=project_registry,
+        jobs=JobRepository(database),
+        events=events,
+        runner=runner,
+        local_host_id="lightsail-main",
+        sessions=sessions,
+        project_sessions=project_sessions,
+    )
+    controller = ControllerService(projects=project_registry, jobs=manager)
+
+    first = await manager.create(
+        project_id="demo",
+        instruction="first context",
+        requested_by_channel="telegram",
+        requested_by_user="100",
+    )
+    await manager.wait_until_idle(first.id)
+    old_session = await project_sessions.active_for("demo", "100")
+    assert old_session is not None
+    assert old_session.external_session_id == "fake-session"
+
+    await controller.handle_text(
+        "/session new",
+        channel="telegram",
+        user_id="100",
+        project_id="demo",
+    )
+    replacement = await project_sessions.active_for("demo", "100")
+    assert replacement is not None
+    assert replacement.id != old_session.id
+
+    response = await controller.handle_text(
+        f"/session use {old_session.id}",
+        channel="telegram",
+        user_id="100",
+        project_id="demo",
+    )
+    assert "다시 활성화" in response
+
+    active = await project_sessions.active_for("demo", "100")
+    assert active is not None
+    assert active.id == old_session.id
+    assert active.external_session_id == "fake-session"
+    closed_replacement = await project_sessions.get(replacement.id)
+    assert closed_replacement is not None
+    assert closed_replacement.status == "CLOSED"
+
+    resumed_job = await manager.create(
+        project_id="demo",
+        instruction="return to old context",
+        requested_by_channel="telegram",
+        requested_by_user="100",
+    )
+    await manager.wait_until_idle(resumed_job.id)
+
+    assert runner.resumed[-1]["session_id"] == "fake-session"
+    assert "return to old context" in runner.resumed[-1]["instruction"]

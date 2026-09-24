@@ -26,6 +26,12 @@ class RecoveryScheduler:
     async def start(self) -> None:
         if self._task is not None and not self._task.done():
             return
+        try:
+            await self.tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("initial recovery scheduler tick failed")
         self._task = asyncio.create_task(self._run(), name="recovery-scheduler")
 
     async def stop(self) -> None:

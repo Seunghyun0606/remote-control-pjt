@@ -230,6 +230,72 @@ class ProjectSessionRegistry:
             )
             return updated
 
+    async def use_session(
+        self,
+        *,
+        session_id: str,
+        project_id: str,
+        owner_user_id: str,
+    ) -> ProjectSessionRecord:
+        key = (project_id, owner_user_id)
+        async with self._locks[key]:
+            target = await self.sessions.get(session_id)
+            if target is None:
+                raise KeyError(f"unknown project session: {session_id}")
+            if target.owner_user_id != owner_user_id:
+                raise ValueError("project session belongs to another user")
+            if target.project_id != project_id:
+                raise ValueError("project session belongs to another project")
+            if not target.external_session_id:
+                raise ValueError("project session has no Codex thread to resume")
+            if target.locked_by_job_id:
+                raise ProjectSessionBusyError(target.id, target.locked_by_job_id)
+
+            current = await self.sessions.active_for(project_id, owner_user_id)
+            now = datetime.now(timezone.utc)
+            if current is not None and current.id != target.id:
+                if current.locked_by_job_id:
+                    raise ProjectSessionBusyError(
+                        current.id,
+                        current.locked_by_job_id,
+                    )
+                await self.sessions.update(
+                    current.id,
+                    status=ProjectSessionStatus.CLOSED.value,
+                    closed_at=now,
+                    last_active_at=now,
+                )
+                await self.events.append(
+                    "PROJECT_SESSION_CLOSED",
+                    project_id=project_id,
+                    host_id=current.host_id,
+                    payload={
+                        "project_session_id": current.id,
+                        "external_session_id": current.external_session_id,
+                        "owner_user_id": owner_user_id,
+                        "reason": "session_use",
+                    },
+                )
+
+            activated = await self.sessions.update(
+                target.id,
+                status=ProjectSessionStatus.IDLE.value,
+                locked_by_job_id=None,
+                closed_at=None,
+                last_active_at=now,
+            )
+            await self.events.append(
+                "PROJECT_SESSION_ACTIVATED",
+                project_id=project_id,
+                host_id=activated.host_id,
+                payload={
+                    "project_session_id": activated.id,
+                    "external_session_id": activated.external_session_id,
+                    "owner_user_id": owner_user_id,
+                },
+            )
+            return activated
+
     async def new_session(
         self,
         *,

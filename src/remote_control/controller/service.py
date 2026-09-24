@@ -161,8 +161,9 @@ class ControllerService:
                     "/run — 이 프로젝트 작업 시작\n"
                     "/status — 이 프로젝트 active Job\n"
                     "/jobs — 이 프로젝트 최근 Job\n"
-                    "/job <job-id>\n/retry <failed-job-id>\n"
-                    "/sessions\n/session — 현재 Project Session\n/session new — 새 Session\n"
+                    "/job <job-id>\n/retry <failed-or-waiting-job-id>\n"
+                    "/sessions\n/session — 현재 Project Session\n"
+                    "/session new — 새 Session\n/session use <session-id> — 과거 Session 재사용\n"
                     "/pause [job-id]\n/resume [job-id]\n"
                     "/steer [--job <job-id>] <instruction>\n/stop [job-id]\n"
                     "일반 메시지 — active Job 1개면 추가 지시, 없으면 새 Job"
@@ -170,8 +171,8 @@ class ControllerService:
             return (
                 "Remote Agent Control\n"
                 "/projects\n/status\n/hosts\n/run <project> [--host <host-id>]\n"
-                "/jobs\n/job <job-id>\n/retry <failed-job-id>\n"
-                "/sessions\n/session <session-id>\n/doctor\n"
+                "/jobs\n/job <job-id>\n/retry <failed-or-waiting-job-id>\n"
+                "/sessions\n/session <session-id>\n/session use <session-id>\n/doctor\n"
                 "/pause [job-id]\n/resume [job-id]\n"
                 "/steer [--job <job-id>] <instruction>\n/stop [job-id]"
             )
@@ -285,6 +286,25 @@ class ControllerService:
                 f"Project: {session.project_id}\n"
                 "다음 일반 메시지부터 새 Codex thread를 사용합니다."
             )
+        if command.intent == Intent.USE_SESSION:
+            if self.jobs.project_sessions is None:
+                return "Project Session Registry가 활성화되지 않았습니다."
+            if project_id is None:
+                raise ValueError("/session use 는 project topic에서 실행하세요")
+            assert command.job_id is not None
+            session = await self.jobs.project_sessions.use_session(
+                session_id=command.job_id,
+                project_id=project_id,
+                owner_user_id=user_id,
+            )
+            return (
+                f"↩ 이전 Project Session을 다시 활성화했습니다.\n"
+                f"Session: {session.id}\n"
+                f"Project: {session.project_id}\n"
+                f"Codex session: {session.external_session_id}\n"
+                f"Host: {session.host_id or '-'}\n"
+                "다음 새 Job부터 이 Codex thread를 이어서 사용합니다."
+            )
         if command.intent == Intent.SESSION:
             if self.jobs.project_sessions is None:
                 return "Project Session Registry가 활성화되지 않았습니다."
@@ -341,18 +361,38 @@ class ControllerService:
             original = await self.jobs.select_for_user(
                 user_id,
                 job_id=command.job_id,
-                states={JobState.FAILED},
                 project_id=project_id,
             )
-            retried = await self.jobs.retry_failed(original.id)
-            return (
-                f"↻ 실패 Job 재시도 생성\n"
-                f"Retry of: {original.id}\n"
-                f"Job: {retried.id}\n"
-                f"Project: {retried.project_id}\n"
-                f"State: {retried.state}\n"
-                f"Host: {retried.assigned_host or '-'}\n"
-                f"Session: {retried.external_session_id or '-'}"
+            state = JobState(original.state)
+            if state == JobState.FAILED:
+                retried = await self.jobs.retry_failed(original.id)
+                return (
+                    f"↻ 실패 Job 재시도 생성\n"
+                    f"Retry of: {original.id}\n"
+                    f"Job: {retried.id}\n"
+                    f"Project: {retried.project_id}\n"
+                    f"State: {retried.state}\n"
+                    f"Host: {retried.assigned_host or '-'}\n"
+                    f"Session: {retried.external_session_id or '-'}"
+                )
+            if state in {JobState.WAITING_HOST, JobState.WAITING_QUOTA}:
+                retried = await self.jobs.retry_waiting(original.id)
+                return (
+                    f"↻ 대기 Job 즉시 재시도 요청\n"
+                    f"Job: {retried.id}\n"
+                    f"Project: {retried.project_id}\n"
+                    f"State: {retried.state}\n"
+                    f"Host: {retried.assigned_host or '-'}\n"
+                    f"Session: {retried.external_session_id or '-'}"
+                )
+            if state == JobState.WAITING_HUMAN:
+                raise ValueError(
+                    "WAITING_HUMAN Job은 /retry로 승인 단계를 건너뛸 수 없습니다. "
+                    "Human Gate에 응답하세요."
+                )
+            raise ValueError(
+                f"job {original.id} is {state.value}; "
+                "/retry supports FAILED, WAITING_HOST, or WAITING_QUOTA"
             )
         if command.intent == Intent.PAUSE:
             job = await self.jobs.select_for_user(

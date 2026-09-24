@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from remote_control.approvals.registry import ApprovalRegistry, ApprovalStatus
-from remote_control.controller.job_manager import JobManager
+from remote_control.controller.job_manager import JobManager, RESTART_RESUME_INSTRUCTION
 from remote_control.hosts.models import HostStatus
 from remote_control.hosts.registry import HostRegistry
 from remote_control.human_gate import ApprovalOption, HumanGateRequest
@@ -641,3 +641,65 @@ async def test_scheduler_expires_human_gate(project_registry, database):
     assert expired.status == ApprovalStatus.EXPIRED.value
     failed = await manager.require(job.id)
     assert failed.state == "FAILED"
+
+
+
+@pytest.mark.asyncio
+async def test_preexisting_waiting_host_is_rearmed_and_retried_on_scheduler_start(
+    project_registry,
+    database,
+):
+    runner = FakeAgentRunner(resume_session_id="thread-waiting")
+    manager, hosts, sessions, _, recovery = await build_runtime(
+        database=database,
+        projects=project_registry,
+        runner=runner,
+        restart_grace_seconds=0,
+    )
+    job = JobRecord(
+        id="JOB-PREEXISTING-WAITING-HOST",
+        project_id="demo",
+        requested_by_channel="test",
+        requested_by_user="u1",
+        requested_host="lightsail-main",
+        assigned_host="lightsail-main",
+        instruction="unfinished waiting work",
+        state="WAITING_HOST",
+        external_session_id="thread-waiting",
+    )
+    await manager.jobs.add(job)
+    await sessions.record(
+        job_id=job.id,
+        project_id="demo",
+        host_id="lightsail-main",
+        external_session_id="thread-waiting",
+    )
+
+    now = datetime.now(timezone.utc)
+    future_retry = now + timedelta(hours=24)
+    await recovery.upsert(
+        job.id,
+        kind=RecoveryKind.HOST.value,
+        mode=RecoveryMode.RESUME.value,
+        attempt_count=1,
+        next_retry_at=future_retry,
+        execution_id=None,
+        resume_instruction=RESTART_RESUME_INSTRUCTION,
+        last_error="host unavailable before controller restart",
+    )
+
+    await manager.reconcile_startup(now=now)
+    rearmed = await recovery.get(job.id)
+    assert rearmed is not None
+    retry_at_value = _aware(rearmed.next_retry_at)
+    assert retry_at_value <= now
+
+    scheduler = RecoveryScheduler(jobs=manager, hosts=hosts, interval_seconds=60)
+    await scheduler.start()
+    try:
+        await wait_for_state(manager, job.id, "COMPLETED")
+    finally:
+        await scheduler.stop()
+
+    assert runner.resumed
+    assert runner.resumed[0]["session_id"] == "thread-waiting"

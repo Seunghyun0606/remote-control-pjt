@@ -2,7 +2,7 @@
 
 Telegram/Slack에서 **현재 머신의 Codex**를 실행하고, 진행 상태·추가 지시·Human Gate·사용량 제한 복구·Project OS 연동까지 관리하는 Runtime Control Plane입니다.
 
-현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.10.0**입니다.
+현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.10.1**입니다.
 
 ## 전체 개요
 
@@ -87,12 +87,16 @@ Job 1 → Job 2 → Job 3
 Project Topic에서 사용할 수 있는 명령:
 
 ```text
-/session        현재 active Project Session
-/session new    현재 context를 닫고 다음 Job부터 새 Codex thread 사용
-/sessions       최근 Project Session 목록
+/session                         현재 active Project Session
+/session new                     새 Project Session 생성
+/session use <project-session-id> 과거 Session을 다시 active로 전환
+/sessions                        최근 Project Session 목록
 ```
 
 Session rollover는 이전 Codex thread를 삭제하지 않습니다. Remote Control DB에서는 CLOSED history로 남기고 다음 Job이 새 thread를 생성합니다.
+
+과거 Session으로 돌아가려면 `/sessions`에서 ID를 찾은 뒤 `/session use <project-session-id>`를 실행합니다. 현재 active Session은 CLOSED history로 전환되고 선택한 과거 Session이 다시 IDLE/active 대상이 됩니다. 다음 새 Job은 그 Session의 Codex thread를 resume합니다.
+
 
 Desktop에서 Telegram이 사용한 Codex thread를 직접 이어서 보려면 Remote Control과 interactive Codex가 같은 `CODEX_HOME`을 사용해야 합니다. `.env`에 예를 들어 다음처럼 지정합니다.
 
@@ -109,6 +113,17 @@ codex resume --include-non-interactive <codex-session-id>
 Remote Runner를 사용하는 경우에도 해당 Runner 프로세스의 `CODEX_HOME`이 실제 Desktop Codex store와 같아야 합니다. Session은 host-local Codex storage에 의존하므로 기존 thread가 있는 Project는 가능한 한 같은 host에서 이어가는 것이 안전합니다.
 
 Resume 시 Codex가 요청한 thread와 다른 `thread.started` ID를 반환하면 Remote Control은 정상 resume으로 인정하지 않습니다. 해당 프로세스를 중단하고 기존 repository state를 다시 읽는 새 Codex thread로 한 번 복구합니다.
+
+### WAITING Job 수동 재실행과 재시작 복구
+
+`/retry <job-id>`는 상태에 따라 다르게 동작합니다.
+
+- `FAILED`: 기존 동작대로 새 retry Job을 생성합니다.
+- `WAITING_HOST`: 같은 Job을 즉시 다시 실행 시도합니다.
+- `WAITING_QUOTA`: 예약된 retry 시각을 기다리지 않고 같은 Job을 즉시 resume 시도합니다.
+- `WAITING_HUMAN`: Human Gate 결정을 우회하지 않으며, 승인/거절 응답이 필요합니다.
+
+Controller가 재시작될 때 이미 `WAITING_HOST`였던 Job은 즉시 recovery due 상태로 다시 등록됩니다. RecoveryScheduler는 시작 직후 첫 tick을 동기적으로 실행하므로 사용 가능한 host라면 별도의 다음 scheduler interval을 기다리지 않고 재개를 시도합니다. `WAITING_QUOTA`의 미래 retry 시각은 재시작만으로 무시하지 않으며, 즉시 시도하려면 사용자가 `/retry <job-id>`를 실행합니다.
 
 ---
 
