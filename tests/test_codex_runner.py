@@ -3,7 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from remote_control.runners.codex import build_codex_command, build_codex_resume_command
+from remote_control.runners.codex import (
+    build_codex_command,
+    build_codex_environment,
+    build_codex_resume_command,
+    prepare_codex_instruction,
+)
 
 
 def test_codex_command_is_argument_vector():
@@ -32,6 +37,35 @@ def test_codex_resume_command_uses_explicit_session_id():
     assert "--json" in command
     assert "--cd" in command
     assert command[-1] == "-"
+
+
+def test_windows_instruction_adds_utf8_guard_without_changing_user_text():
+    original = "README의 한글 문구를 확인해줘"
+    prepared = prepare_codex_instruction(original, os_name="Windows")
+
+    assert prepared.startswith(original)
+    assert "repository text is UTF-8" in prepared
+    assert "-Encoding UTF8" in prepared
+    assert "mojibake" in prepared
+
+
+def test_non_windows_instruction_is_unchanged():
+    original = "README의 한글 문구를 확인해줘"
+    assert prepare_codex_instruction(original, os_name="Linux") == original
+
+
+def test_windows_codex_environment_forces_python_utf8(monkeypatch):
+    monkeypatch.setenv("PYTHONUTF8", "0")
+    monkeypatch.setenv("PYTHONIOENCODING", "cp949")
+
+    env = build_codex_environment(
+        codex_home=r"C:\Users\tester\.codex",
+        os_name="Windows",
+    )
+
+    assert env["PYTHONUTF8"] == "1"
+    assert env["PYTHONIOENCODING"] == "utf-8"
+    assert env["CODEX_HOME"] == r"C:\Users\tester\.codex"
 
 
 class _AsyncLines:
