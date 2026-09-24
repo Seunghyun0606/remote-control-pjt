@@ -9,6 +9,7 @@ from websockets.exceptions import ConnectionClosed
 
 from remote_control.human_gate import extract_human_gate
 from remote_control.projects.operations import LocalProjectOperationExecutor
+from remote_control.recovery.quota import detect_quota_event
 from remote_control.runners.base import AgentRunResult, RunHandle
 from remote_control.runners.codex import CodexRunner, extract_session_id
 from remote_control.settings import RunnerSettings
@@ -370,6 +371,13 @@ def _sanitize_event(event: dict) -> dict:
         value = event.get(key)
         if isinstance(value, (str, int, float)):
             result[key] = value
+
+    # Text-only Codex reset hints do not carry a timezone. Parse them on the
+    # Runner where Codex produced the message, then send an explicit UTC ISO
+    # timestamp so a Controller in another timezone cannot reinterpret it.
+    quota = detect_quota_event(event)
+    if quota is not None and quota.reset_at is not None:
+        result["reset_at"] = quota.reset_at.isoformat()
 
     options = event.get("options")
     if isinstance(options, list):
