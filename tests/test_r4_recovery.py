@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from remote_control.recovery.models import RecoveryKind, RecoveryMode
 from remote_control.recovery.quota import detect_quota_event, detect_quota_text, retry_at
 from remote_control.recovery.scheduler import RecoveryScheduler
 from remote_control.runners.base import AgentRunResult, AgentRunner, RunEventCallback, RunHandle
+from remote_control.runner_daemon import _sanitize_event
 from remote_control.runners.fake import FakeAgentRunner, FakeRunHandle
 from remote_control.sessions.registry import SessionRegistry
 from remote_control.storage.models import JobRecord
@@ -225,6 +227,64 @@ def test_quota_retry_backoff_and_structured_reset():
     )
     assert signal is not None
     assert signal.reset_at == reset
+
+    seoul = ZoneInfo("Asia/Seoul")
+    local_now = datetime(2026, 9, 24, 17, 37, 8, tzinfo=seoul)
+
+    stale_time_only = detect_quota_text(
+        "You've hit your usage limit. Try again at 5:37 PM.",
+        now=local_now,
+    )
+    assert stale_time_only is not None
+    assert stale_time_only.reset_at is None
+    assert retry_at(
+        attempt_count=2,
+        initial_seconds=1800,
+        max_seconds=7200,
+        reset_at=stale_time_only.reset_at,
+        now=local_now.astimezone(timezone.utc),
+    ) == local_now.astimezone(timezone.utc) + timedelta(hours=1)
+
+    future_time_only = detect_quota_text(
+        "You've hit your usage limit. Try again at 5:38 PM.",
+        now=local_now,
+    )
+    assert future_time_only is not None
+    assert future_time_only.reset_at == datetime(
+        2026,
+        9,
+        24,
+        8,
+        38,
+        tzinfo=timezone.utc,
+    )
+
+    naive_structured = detect_quota_event(
+        {
+            "type": "error",
+            "message": "You've hit your usage limit.",
+            "reset_at": "2026-09-24T17:40:00",
+        },
+        now=local_now,
+    )
+    assert naive_structured is not None
+    assert naive_structured.reset_at == datetime(
+        2026,
+        9,
+        24,
+        8,
+        40,
+        tzinfo=timezone.utc,
+    )
+
+    sanitized = _sanitize_event(
+        {
+            "type": "error",
+            "message": "You've hit your usage limit. Try again at 5:38 PM.",
+        },
+        now=local_now,
+    )
+    assert sanitized["reset_at"] == "2026-09-24T08:38:00+00:00"
 
     text_signal = detect_quota_text(
         "You've hit your usage limit. Add credits to continue, "
