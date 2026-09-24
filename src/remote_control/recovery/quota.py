@@ -57,7 +57,11 @@ def detect_quota_text(
     )
 
 
-def detect_quota_event(event: dict[str, Any]) -> QuotaSignal | None:
+def detect_quota_event(
+    event: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> QuotaSignal | None:
     event_type = str(event.get("type") or event.get("event_type") or "").casefold()
     typed_limit = "rate_limit" in event_type or "usage_limit" in event_type
     error_like = (
@@ -70,9 +74,9 @@ def detect_quota_event(event: dict[str, Any]) -> QuotaSignal | None:
     if not error_like:
         return None
 
-    reset_at = _extract_reset(event)
+    reset_at = _extract_reset(event, now=now)
     for text in _text_values(event):
-        signal = detect_quota_text(text)
+        signal = detect_quota_text(text, now=now)
         if signal is not None:
             return QuotaSignal(
                 message=signal.message,
@@ -144,11 +148,18 @@ def _extract_text_reset(
         microsecond=0,
     )
     if localized <= current:
-        localized += timedelta(days=1)
+        # A time-only hint is ambiguous once the clock has passed it. Treat it
+        # as stale instead of assuming "tomorrow", otherwise a retry a few
+        # seconds after the reset boundary can incorrectly jump by ~24 hours.
+        return None
     return localized.astimezone(timezone.utc)
 
 
-def _extract_reset(value: Any) -> datetime | None:
+def _extract_reset(
+    value: Any,
+    *,
+    now: datetime | None = None,
+) -> datetime | None:
     if isinstance(value, dict):
         for key in (
             "resets_at",
@@ -158,26 +169,31 @@ def _extract_reset(value: Any) -> datetime | None:
             "retry_after_seconds",
         ):
             if key in value:
-                parsed = _parse_reset_value(key, value[key])
+                parsed = _parse_reset_value(key, value[key], now=now)
                 if parsed is not None:
                     return parsed
         for nested in value.values():
-            parsed = _extract_reset(nested)
+            parsed = _extract_reset(nested, now=now)
             if parsed is not None:
                 return parsed
     elif isinstance(value, list):
         for nested in value:
-            parsed = _extract_reset(nested)
+            parsed = _extract_reset(nested, now=now)
             if parsed is not None:
                 return parsed
     return None
 
 
-def _parse_reset_value(key: str, value: Any) -> datetime | None:
-    now = datetime.now(timezone.utc)
+def _parse_reset_value(
+    key: str,
+    value: Any,
+    *,
+    now: datetime | None = None,
+) -> datetime | None:
+    current = _aware(now or datetime.now(timezone.utc))
     if isinstance(value, (int, float)):
         if key == "retry_after_seconds" or (key == "retry_after" and value < 10_000_000):
-            return now + timedelta(seconds=max(float(value), 0))
+            return current + timedelta(seconds=max(float(value), 0))
         if value > 1_000_000_000:
             return datetime.fromtimestamp(float(value), tz=timezone.utc)
         return None
@@ -187,7 +203,7 @@ def _parse_reset_value(key: str, value: Any) -> datetime | None:
         if not stripped:
             return None
         if stripped.isdigit():
-            return _parse_reset_value(key, int(stripped))
+            return _parse_reset_value(key, int(stripped), now=current)
         try:
             parsed = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
         except ValueError:
