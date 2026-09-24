@@ -15,8 +15,9 @@ WINDOWS_UTF8_GUIDANCE = (
     "Windows UTF-8 I/O rule: repository text is UTF-8. "
     "Avoid PowerShell text aliases/cmdlets that can fall back to the legacy ANSI code page. "
     "Prefer rg, git, or Python with explicit UTF-8 for text reads/writes. "
+    "Use a UTF-8-safe read on the first attempt; do not probe with legacy PowerShell and then retry. "
     "If Windows PowerShell text cmdlets are necessary, pass -Encoding UTF8 explicitly. "
-    "Do not rewrite files merely because shell output is mojibake; re-read them through a UTF-8-safe path."
+    "Do not rewrite files merely because shell output is mojibake."
 )
 
 
