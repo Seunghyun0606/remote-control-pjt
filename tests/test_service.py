@@ -262,3 +262,138 @@ async def test_status_includes_waiting_host_reason(project_registry, database):
     )
     assert "WAITING_HOST" in status
     assert "reason=no online host is available" in status
+
+
+
+@pytest.mark.asyncio
+async def test_retry_waiting_quota_runs_same_job_immediately(project_registry, database):
+    recovery = RecoveryRepository(database)
+    runner = FakeAgentRunner(delay=0.01, resume_session_id="thread-quota")
+    manager = JobManager(
+        projects=project_registry,
+        jobs=JobRepository(database),
+        events=EventRepository(database),
+        runner=runner,
+        local_host_id="lightsail-main",
+        recovery=recovery,
+    )
+    job = JobRecord(
+        id="JOB-WAITING-QUOTA-RETRY",
+        project_id="demo",
+        requested_by_channel="telegram",
+        requested_by_user="100",
+        requested_host="lightsail-main",
+        assigned_host="lightsail-main",
+        instruction="continue quota job",
+        state="WAITING_QUOTA",
+        external_session_id="thread-quota",
+    )
+    await manager.jobs.add(job)
+    await recovery.upsert(
+        job.id,
+        kind="QUOTA",
+        mode="RESUME",
+        attempt_count=2,
+        next_retry_at=datetime(2026, 9, 25, 5, 30, tzinfo=timezone.utc),
+        execution_id=None,
+        resume_instruction="resume now",
+        last_error="usage_limit_exceeded",
+    )
+    controller = ControllerService(projects=project_registry, jobs=manager)
+
+    response = await controller.handle_text(
+        f"/retry {job.id}",
+        channel="telegram",
+        user_id="100",
+        project_id="demo",
+    )
+    assert "대기 Job 즉시 재시도" in response
+
+    await manager.wait_until_idle(job.id)
+    current = await manager.require(job.id)
+    assert current.state == "COMPLETED"
+    assert runner.resumed
+    assert runner.resumed[0]["session_id"] == "thread-quota"
+
+
+@pytest.mark.asyncio
+async def test_retry_waiting_host_runs_same_job_immediately(project_registry, database):
+    recovery = RecoveryRepository(database)
+    runner = FakeAgentRunner(delay=0.01, resume_session_id="thread-host")
+    manager = JobManager(
+        projects=project_registry,
+        jobs=JobRepository(database),
+        events=EventRepository(database),
+        runner=runner,
+        local_host_id="lightsail-main",
+        recovery=recovery,
+    )
+    job = JobRecord(
+        id="JOB-WAITING-HOST-RETRY",
+        project_id="demo",
+        requested_by_channel="telegram",
+        requested_by_user="100",
+        requested_host="lightsail-main",
+        assigned_host="lightsail-main",
+        instruction="continue host job",
+        state="WAITING_HOST",
+        external_session_id="thread-host",
+    )
+    await manager.jobs.add(job)
+    await recovery.upsert(
+        job.id,
+        kind="HOST",
+        mode="RESUME",
+        attempt_count=0,
+        next_retry_at=datetime(2026, 9, 25, 5, 30, tzinfo=timezone.utc),
+        execution_id=None,
+        resume_instruction="resume after host",
+        last_error="host unavailable",
+    )
+    controller = ControllerService(projects=project_registry, jobs=manager)
+
+    response = await controller.handle_text(
+        f"/retry {job.id}",
+        channel="telegram",
+        user_id="100",
+        project_id="demo",
+    )
+    assert "대기 Job 즉시 재시도" in response
+
+    await manager.wait_until_idle(job.id)
+    current = await manager.require(job.id)
+    assert current.state == "COMPLETED"
+    assert runner.resumed
+    assert runner.resumed[0]["session_id"] == "thread-host"
+
+
+@pytest.mark.asyncio
+async def test_retry_does_not_bypass_waiting_human(project_registry, database):
+    manager = JobManager(
+        projects=project_registry,
+        jobs=JobRepository(database),
+        events=EventRepository(database),
+        runner=FakeAgentRunner(),
+        local_host_id="lightsail-main",
+    )
+    job = JobRecord(
+        id="JOB-WAITING-HUMAN-RETRY",
+        project_id="demo",
+        requested_by_channel="telegram",
+        requested_by_user="100",
+        requested_host="lightsail-main",
+        assigned_host="lightsail-main",
+        instruction="need approval",
+        state="WAITING_HUMAN",
+        external_session_id="thread-human",
+    )
+    await manager.jobs.add(job)
+    controller = ControllerService(projects=project_registry, jobs=manager)
+
+    with pytest.raises(ValueError, match="Human Gate"):
+        await controller.handle_text(
+            f"/retry {job.id}",
+            channel="telegram",
+            user_id="100",
+            project_id="demo",
+        )
