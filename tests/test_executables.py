@@ -29,6 +29,7 @@ def test_windows_cmd_wrapper_is_launched_through_cmd(monkeypatch):
         "/s",
         "/c",
     ]
+    assert command[4].startswith("chcp 65001 >nul && ")
     assert "codex.CMD" in command[4]
     assert "exec" in command[4]
 
