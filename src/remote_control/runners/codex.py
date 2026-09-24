@@ -3,11 +3,50 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import platform
 from pathlib import Path
 
 from remote_control.executables import ExecutableResolutionError, resolve_executable
 from remote_control.recovery.quota import detect_quota_event, detect_quota_text
 from remote_control.runners.base import AgentRunResult, AgentRunner, RunEventCallback, RunHandle
+
+
+WINDOWS_UTF8_GUIDANCE = (
+    "Windows UTF-8 I/O rule: repository text is UTF-8. "
+    "Avoid PowerShell text aliases/cmdlets that can fall back to the legacy ANSI code page. "
+    "Prefer rg, git, or Python with explicit UTF-8 for text reads/writes. "
+    "If Windows PowerShell text cmdlets are necessary, pass -Encoding UTF8 explicitly. "
+    "Do not rewrite files merely because shell output is mojibake; re-read them through a UTF-8-safe path."
+)
+
+
+def prepare_codex_instruction(
+    instruction: str,
+    *,
+    os_name: str | None = None,
+) -> str:
+    system = (os_name or platform.system()).casefold()
+    if system != "windows":
+        return instruction
+    return f"{instruction.rstrip()}\n\n---\n\n{WINDOWS_UTF8_GUIDANCE}\n"
+
+
+def build_codex_environment(
+    *,
+    codex_home: str | None,
+    os_name: str | None = None,
+) -> dict[str, str]:
+    child_env = os.environ.copy()
+    system = (os_name or platform.system()).casefold()
+    if system == "windows":
+        # These cover Python-based fallbacks and keep the launched Codex process
+        # in a UTF-8-oriented environment. PowerShell file cmdlets still need
+        # explicit UTF-8 handling, which is enforced by the instruction guard.
+        child_env["PYTHONUTF8"] = "1"
+        child_env["PYTHONIOENCODING"] = "utf-8"
+    if codex_home:
+        child_env["CODEX_HOME"] = codex_home
+    return child_env
 
 
 def build_codex_command(
@@ -161,9 +200,7 @@ class CodexRunner(AgentRunner):
         try:
             resolution = resolve_executable(command[0])
             process_command = resolution.build_command(command[1:])
-            child_env = os.environ.copy()
-            if self.codex_home:
-                child_env["CODEX_HOME"] = self.codex_home
+            child_env = build_codex_environment(codex_home=self.codex_home)
             process = await asyncio.create_subprocess_exec(
                 *process_command,
                 stdin=asyncio.subprocess.PIPE,
@@ -185,7 +222,8 @@ class CodexRunner(AgentRunner):
                 f"error={exc}"
             ) from exc
         assert process.stdin is not None
-        process.stdin.write(instruction.encode("utf-8"))
+        prepared_instruction = prepare_codex_instruction(instruction)
+        process.stdin.write(prepared_instruction.encode("utf-8"))
         await process.stdin.drain()
         process.stdin.close()
 
