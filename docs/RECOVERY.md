@@ -63,9 +63,9 @@ Codex quota detection accepts:
 4. Codex error codes such as `usage_limit_exceeded` / `rate_limit_exceeded`
 5. text-only reset hints such as `try again at Sep 25th, 2026 2:20 PM`
 
-Structured reset timestamps have priority. If only a text reset time is available, the Controller interprets timezone-less text in the Controller Host's local timezone and stores the resulting UTC `next_retry_at`.
+Structured reset timestamps have priority. For remote execution, timezone-less quota hints are interpreted on the Runner where Codex produced the message and normalized to an explicit UTC timestamp before they reach the Controller. This prevents a UTC Controller and a local-time Desktop Runner from assigning different meanings to the same reset hint.
 
-If a future reset timestamp is available, it becomes `next_retry_at`.
+If a future reset timestamp is available, it becomes `next_retry_at`. A time-only hint that is already in the past is treated as stale and does **not** roll over to the next day; the normal exponential backoff is used instead. This avoids an accidental ~24 hour delay when a retry lands a few seconds after the advertised reset minute.
 
 Otherwise the default policy is:
 
