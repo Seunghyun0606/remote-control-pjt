@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -42,6 +43,10 @@ from remote_control.transport.runner_ws import RunnerGateway
 
 Notifier = Callable[[str, str], Awaitable[None]]
 ApprovalNotifier = Callable[[str, ApprovalPrompt], Awaitable[None]]
+
+logger = logging.getLogger(__name__)
+
+_NOTIFICATION_RETRY_DELAYS = (0.5, 1.0)
 
 RESUME_INSTRUCTION = (
     "Resume this job from the existing repository and Codex session state. "
@@ -1075,6 +1080,16 @@ class JobManager:
         def cleanup(done_task: asyncio.Task[None]) -> None:
             if self._tasks.get(job_id) is done_task:
                 self._tasks.pop(job_id, None)
+            try:
+                exc = done_task.exception()
+            except asyncio.CancelledError:
+                return
+            if exc is not None:
+                logger.error(
+                    "Unhandled Job task exception job_id=%s",
+                    job_id,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
 
         task.add_done_callback(cleanup)
 
@@ -1961,16 +1976,29 @@ class JobManager:
         if work is not None and work.task_id:
             scope.append(work.task_id)
         scope.append(job.id)
-        await notifier(
-            job.requested_by_user,
-            f"[{' / '.join(scope)}]\n{message}",
+        text = f"[{' / '.join(scope)}]\n{message}"
+
+        async def send() -> None:
+            await notifier(job.requested_by_user, text)
+
+        await self._deliver_notification(
+            job,
+            notification_type="message",
+            send=send,
         )
 
     async def _notify_approval(self, job_id: str, approval: ApprovalPrompt) -> None:
         job = await self.require(job_id)
         approval_notifier = self._approval_notifiers.get(job.requested_by_channel)
         if approval_notifier is not None:
-            await approval_notifier(job.requested_by_user, approval)
+            async def send_approval() -> None:
+                await approval_notifier(job.requested_by_user, approval)
+
+            await self._deliver_notification(
+                job,
+                notification_type="approval",
+                send=send_approval,
+            )
             return
 
         options = "\n".join(
@@ -1980,6 +2008,72 @@ class JobManager:
             job_id,
             f"⚠ Human Gate\n\n{approval.question}\n\n{options}",
         )
+
+    async def _deliver_notification(
+        self,
+        job: JobRecord,
+        *,
+        notification_type: str,
+        send: Callable[[], Awaitable[None]],
+    ) -> bool:
+        attempts = 1 + len(_NOTIFICATION_RETRY_DELAYS)
+        last_error: Exception | None = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                await send()
+                return True
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                if attempt >= attempts:
+                    break
+                delay = _NOTIFICATION_RETRY_DELAYS[attempt - 1]
+                logger.warning(
+                    "Notification delivery failed; retrying job_id=%s channel=%s "
+                    "type=%s attempt=%s/%s delay=%.1fs error=%s",
+                    job.id,
+                    job.requested_by_channel,
+                    notification_type,
+                    attempt,
+                    attempts,
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+
+        assert last_error is not None
+        logger.error(
+            "Notification delivery failed permanently job_id=%s channel=%s "
+            "type=%s attempts=%s error=%s",
+            job.id,
+            job.requested_by_channel,
+            notification_type,
+            attempts,
+            last_error,
+            exc_info=(type(last_error), last_error, last_error.__traceback__),
+        )
+        try:
+            await self.events.append(
+                "NOTIFICATION_FAILED",
+                job_id=job.id,
+                project_id=job.project_id,
+                host_id=job.assigned_host,
+                payload={
+                    "channel": job.requested_by_channel,
+                    "notification_type": notification_type,
+                    "attempts": attempts,
+                    "error_type": type(last_error).__name__,
+                    "error": str(last_error)[:1000],
+                },
+            )
+        except Exception:
+            logger.exception(
+                "Failed to persist NOTIFICATION_FAILED event job_id=%s",
+                job.id,
+            )
+        return False
 
 
 def _with_control_protocol(instruction: str) -> str:

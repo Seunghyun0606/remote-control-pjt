@@ -36,6 +36,10 @@ This prevents one provider from overwriting another when Telegram and Slack are 
 
 Later progress, recovery, Human Gate and final notifications return only through the provider that created the Job.
 
+Notification delivery is best-effort with short retries. A transient Telegram/Slack network failure must not change the Job lifecycle state or replace the original Agent error. After the initial attempt, JobManager retries twice with short backoff. If all attempts fail, it logs the error and appends a `NOTIFICATION_FAILED` event containing the channel, notification type, attempt count and delivery error.
+
+Unexpected background Job task exceptions are explicitly consumed and logged by the task completion callback so asyncio does not emit an unobserved `Task exception was never retrieved` warning.
+
 When ProjectWork has a task id, notification headers include it:
 
 ```text
