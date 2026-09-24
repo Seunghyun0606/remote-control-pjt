@@ -54,6 +54,10 @@ def test_retry_sessions_and_doctor_commands(project_registry):
     new_session = router.parse("/session new")
     assert new_session.intent == Intent.NEW_SESSION
 
+    use_session = router.parse("/session use SESSION-OLD")
+    assert use_session.intent == Intent.USE_SESSION
+    assert use_session.job_id == "SESSION-OLD"
+
     session = router.parse("/session SESSION-1")
     assert session.intent == Intent.SESSION
     assert session.job_id == "SESSION-1"
