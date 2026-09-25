@@ -16,6 +16,8 @@
 12. Desktop opens the WebSocket connection outbound; it has no inbound listener.
 13. Controller/Runner transport requires a shared secret.
 14. Controller HTTP binds to `127.0.0.1` by default.
+15. Non-loopback HTTP bind requires `CONTROLLER_API_TOKEN`.
+16. When configured, the Control API token protects REST and Web UI HTTP endpoints except `/health`.
 
 ## Project Operation whitelist
 
@@ -67,11 +69,36 @@ A claimed Project OS work item is pinned to its original Host during recovery to
 Codex authentication and any Project OS environment-specific credentials remain local to each execution Host.
 
 
+## Control API authentication
+
+The Runner WebSocket and the HTTP Control API use separate secrets:
+
+```dotenv
+CONTROLLER_RUNNER_TOKEN=<runner-shared-secret>
+CONTROLLER_API_TOKEN=<http-api-secret>
+```
+
+If `REMOTE_CONTROL_API_HOST` is non-loopback, Controller startup fails unless `CONTROLLER_API_TOKEN` is configured.
+
+When configured, HTTP requests except `/health` must provide either:
+
+```http
+Authorization: Bearer <token>
+```
+
+or:
+
+```http
+X-Remote-Control-Token: <token>
+```
+
+Do not reuse Telegram, Slack or Codex credentials as the Control API token.
+
 ## Web dashboard boundary
 
 The R6 `/ui` surface renders runtime state only. It does not expose run, steer, stop, approval or shell controls.
 
-`/dashboard` and the existing HTTP API still contain operational information. The Controller remains loopback-bound by default. If browser access is exposed beyond the trusted host, put it behind an authenticated reverse proxy or private network.
+`/dashboard` and the existing HTTP API still contain operational information. The Controller remains loopback-bound by default. If `CONTROLLER_API_TOKEN` is configured, `/ui` and `/dashboard` are protected by the same HTTP authentication boundary. For browser-facing remote access, prefer an authenticated reverse proxy/private network rather than exposing the Controller directly.
 
 ## Slack boundary
 
