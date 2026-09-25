@@ -4,13 +4,16 @@ import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
 from remote_control.event_payloads import sanitize_agent_event
 from remote_control.human_gate import extract_human_gate
+from remote_control.process_control import terminate_process_tree
 from remote_control.projects.operations import LocalProjectOperationExecutor
+from remote_control.runner_journal import RunnerExecutionJournal
 from remote_control.runners.base import AgentRunResult, RunHandle
 from remote_control.runners.codex import CodexRunner, extract_session_id
 from remote_control.settings import RunnerSettings
@@ -20,8 +23,16 @@ logger = logging.getLogger(__name__)
 
 
 class RunnerDaemon:
-    def __init__(self, settings: RunnerSettings) -> None:
+    def __init__(
+        self,
+        settings: RunnerSettings,
+        *,
+        journal: RunnerExecutionJournal | None = None,
+    ) -> None:
         self.settings = settings
+        self.boot_id = uuid4().hex
+        self.journal = journal or RunnerExecutionJournal(settings.resolved_state_path)
+        self._journal_recovered = False
         self.runner = CodexRunner(
             executable=settings.codex_executable,
             sandbox=settings.codex_sandbox,
@@ -41,6 +52,7 @@ class RunnerDaemon:
         self._background_tasks: set[asyncio.Task[None]] = set()
 
     async def run_forever(self) -> None:
+        await self._recover_persisted_executions()
         while True:
             try:
                 await self._run_connection()
@@ -68,6 +80,7 @@ class RunnerDaemon:
                     name=self.settings.name,
                     os=self.settings.os_name,
                     capabilities=sorted(self.settings.capabilities),
+                    runner_boot_id=self.boot_id,
                 ),
             )
             await self._send(
@@ -152,6 +165,25 @@ class RunnerDaemon:
             handle = self.running.get(execution_id)
             if handle is not None:
                 await handle.cancel()
+            elif execution_id in self.completed:
+                await self._send(
+                    websocket,
+                    _result_message(execution_id, self.completed[execution_id]),
+                )
+            else:
+                await self._send(
+                    websocket,
+                    message(
+                        "JOB_ERROR",
+                        execution_id=execution_id,
+                        error="execution not found on runner; termination is unconfirmed",
+                        retry_kind="cancel_unconfirmed",
+                    ),
+                )
+        elif envelope.type == "JOB_RESULT_ACK":
+            execution_id = str(envelope.payload.get("execution_id") or "")
+            self.completed.pop(execution_id, None)
+            self.journal.remove(execution_id)
         elif envelope.type == "PROJECT_OPERATION_REQUEST":
             await self._project_operation(websocket, envelope)
 
@@ -245,6 +277,7 @@ class RunnerDaemon:
             if current_session and current_session != seen_session:
                 seen_session = current_session
                 self.running_sessions[execution_id] = current_session
+                self.journal.update_session(execution_id, current_session)
                 await self._send_current(
                     message(
                         "SESSION_STARTED",
@@ -287,6 +320,29 @@ class RunnerDaemon:
                 message("JOB_ERROR", execution_id=execution_id, error=str(exc)),
             )
             return
+
+        if handle.pid is None:
+            await handle.cancel()
+            await self._send(
+                websocket,
+                message(
+                    "JOB_ERROR",
+                    execution_id=execution_id,
+                    error="runner started Codex without a process id",
+                ),
+            )
+            return
+        try:
+            self.journal.start(
+                execution_id=execution_id,
+                pid=handle.pid,
+                working_directory=working_directory_text,
+                boot_id=self.boot_id,
+                session_id=seen_session or handle.session_id,
+            )
+        except Exception:
+            await handle.cancel()
+            raise
 
         self.running[execution_id] = handle
         await self._send(
@@ -352,6 +408,7 @@ class RunnerDaemon:
             result.session_id = self.running_sessions.get(execution_id)
         self.running.pop(execution_id, None)
         self.running_sessions.pop(execution_id, None)
+        self.journal.complete(execution_id, result)
         self.completed[execution_id] = result
         await self._flush_completed()
 
@@ -365,7 +422,35 @@ class RunnerDaemon:
             except (OSError, ConnectionClosed):
                 return
             else:
-                self.completed.pop(execution_id, None)
+                # Keep the completed result until the Controller sends JOB_RESULT_ACK.
+                # This makes completion delivery durable across Runner reconnect/restart.
+                continue
+
+    async def _recover_persisted_executions(self) -> None:
+        if self._journal_recovered:
+            return
+        for entry in self.journal.list():
+            if entry.state == "COMPLETED":
+                self.completed[entry.execution_id] = entry.to_result()
+                continue
+
+            stopped = await terminate_process_tree(entry.pid, timeout_seconds=10)
+            if not stopped:
+                raise RuntimeError(
+                    "refusing to start Runner because an orphan Codex process "
+                    f"could not be terminated: execution={entry.execution_id} pid={entry.pid}"
+                )
+            result = AgentRunResult(
+                returncode=130,
+                session_id=entry.session_id,
+                final_message=(
+                    "Runner restarted while this execution was active; "
+                    "the persisted Codex process tree was terminated before reconnect."
+                ),
+            )
+            self.journal.complete(entry.execution_id, result)
+            self.completed[entry.execution_id] = result
+        self._journal_recovered = True
 
     async def _send_current(self, envelope: Envelope) -> bool:
         websocket = self._websocket
