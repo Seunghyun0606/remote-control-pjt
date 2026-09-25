@@ -24,7 +24,10 @@ from remote_control.human_gate import (
     extract_human_gate_from_text,
     human_gate_protocol_instruction,
 )
-from remote_control.process_control import terminate_persisted_codex_process
+from remote_control.process_control import (
+    canonical_working_directory,
+    terminate_persisted_codex_process,
+)
 from remote_control.projects.adapters import NoProjectWork, ProjectAdapterRegistry
 from remote_control.projects.registry import ProjectRegistry
 from remote_control.recovery.models import RecoveryKind, RecoveryMode
@@ -987,9 +990,34 @@ class JobManager:
             if job.assigned_host != host_id:
                 continue
             record = await self.recovery.get(job.id)
-            if record is None or not record.execution_id:
+            if record is None:
                 continue
-            report = reported.get(record.execution_id)
+            execution_id = record.execution_id or self._match_reported_execution(
+                job,
+                host_id=host_id,
+                reported=reported,
+            )
+            if execution_id is None:
+                continue
+            if record.execution_id is None:
+                await self.recovery.upsert(
+                    job.id,
+                    kind=record.kind,
+                    mode=record.mode,
+                    attempt_count=record.attempt_count,
+                    next_retry_at=record.next_retry_at,
+                    execution_id=execution_id,
+                    resume_instruction=record.resume_instruction,
+                    last_error=record.last_error,
+                )
+                await self.events.append(
+                    "RUNNER_EXECUTION_REBOUND",
+                    job_id=job.id,
+                    project_id=job.project_id,
+                    host_id=host_id,
+                    payload={"execution_id": execution_id},
+                )
+            report = reported.get(execution_id)
             if report is None:
                 continue
             session_id = (
@@ -999,7 +1027,7 @@ class JobManager:
             )
             handle = gateway.adopt_remote(
                 host_id=host_id,
-                execution_id=record.execution_id,
+                execution_id=execution_id,
                 session_id=session_id,
                 on_event=self._event_callback(job.id),
             )
@@ -1016,7 +1044,7 @@ class JobManager:
                 project_id=job.project_id,
                 host_id=host_id,
                 payload={
-                    "execution_id": record.execution_id,
+                    "execution_id": execution_id,
                     "session_id": session_id,
                 },
             )
@@ -1027,13 +1055,27 @@ class JobManager:
             if job.assigned_host != host_id:
                 continue
             record = await self.recovery.get(job.id)
-            if (
-                record is None
-                or record.mode != RecoveryMode.CANCEL.value
-                or not record.execution_id
-            ):
+            if record is None or record.mode != RecoveryMode.CANCEL.value:
                 continue
-            report = reported.get(record.execution_id)
+            execution_id = record.execution_id or self._match_reported_execution(
+                job,
+                host_id=host_id,
+                reported=reported,
+            )
+            if execution_id is None:
+                continue
+            if record.execution_id is None:
+                await self.recovery.upsert(
+                    job.id,
+                    kind=record.kind,
+                    mode=record.mode,
+                    attempt_count=record.attempt_count,
+                    next_retry_at=record.next_retry_at,
+                    execution_id=execution_id,
+                    resume_instruction=record.resume_instruction,
+                    last_error=record.last_error,
+                )
+            report = reported.get(execution_id)
             if report is None:
                 continue
             session_id = (
@@ -1043,7 +1085,7 @@ class JobManager:
             )
             handle = gateway.adopt_remote(
                 host_id=host_id,
-                execution_id=record.execution_id,
+                execution_id=execution_id,
                 session_id=session_id,
                 on_event=self._event_callback(job.id),
             )
@@ -1055,12 +1097,42 @@ class JobManager:
                 project_id=job.project_id,
                 host_id=host_id,
                 payload={
-                    "execution_id": record.execution_id,
+                    "execution_id": execution_id,
                     "session_id": session_id,
                 },
             )
             adopted += 1
         return adopted
+
+    def _match_reported_execution(
+        self,
+        job: JobRecord,
+        *,
+        host_id: str,
+        reported: dict[str, dict],
+    ) -> str | None:
+        project = self.projects.get(job.project_id)
+        target = canonical_working_directory(project.path_for(host_id))
+        matches: list[tuple[str, str]] = []
+        for execution_id, report in reported.items():
+            working_directory = report.get("working_directory")
+            if not isinstance(working_directory, str):
+                continue
+            if canonical_working_directory(working_directory) != target:
+                continue
+            started_at = report.get("started_at")
+            matches.append(
+                (
+                    str(started_at) if isinstance(started_at, str) else "",
+                    execution_id,
+                )
+            )
+        if not matches:
+            return None
+        matches.sort()
+        if len(matches) > 1 and matches[-1][0] == matches[-2][0]:
+            return None
+        return matches[-1][1]
 
     async def _terminate_stale_local_processes(self) -> None:
         active_states = {state.value for state in JobState if state not in TERMINAL_STATES}
