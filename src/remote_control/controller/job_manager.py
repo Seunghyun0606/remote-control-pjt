@@ -766,58 +766,6 @@ class JobManager:
             return stale_locks + lease_repairs
         current = now or datetime.now(timezone.utc)
 
-        if snapshot_complete:
-            for job in waiting:
-                current_job = await self.require(job.id)
-                if JobState(current_job.state) != JobState.WAITING_HOST:
-                    continue
-                record = await self.recovery.get(job.id)
-                if record is None or record.mode != RecoveryMode.ADOPT.value:
-                    continue
-
-                known_execution = (
-                    record.execution_id
-                    if record.execution_id in reported
-                    else self._match_reported_execution(
-                        job,
-                        host_id=host_id,
-                        reported=reported,
-                    )
-                )
-                if known_execution is not None:
-                    continue
-
-                session_id = await self._external_session_id(job)
-                safe_mode = (
-                    RecoveryMode.RESUME
-                    if session_id
-                    else RecoveryMode.START
-                )
-                await self.recovery.upsert(
-                    job.id,
-                    kind=record.kind,
-                    mode=safe_mode.value,
-                    attempt_count=record.attempt_count,
-                    next_retry_at=datetime.now(timezone.utc),
-                    execution_id=None,
-                    resume_instruction=(
-                        RESTART_RESUME_INSTRUCTION
-                        if safe_mode == RecoveryMode.RESUME
-                        else None
-                    ),
-                    last_error=(
-                        "Runner Protocol v2 full snapshot confirmed that the "
-                        "previous execution is absent"
-                    ),
-                )
-                await self.events.append(
-                    "RUNNER_EXECUTION_ABSENT_CONFIRMED",
-                    job_id=job.id,
-                    project_id=job.project_id,
-                    host_id=host_id,
-                    payload={"next_mode": safe_mode.value},
-                )
-
         cancelling = await self.jobs.list_states({JobState.CANCELLING.value})
         for job in cancelling:
             if not job.assigned_host or job.assigned_host == self.local_host_id:
@@ -1122,6 +1070,58 @@ class JobManager:
                 },
             )
             adopted += 1
+
+        if snapshot_complete:
+            for job in waiting:
+                current_job = await self.require(job.id)
+                if JobState(current_job.state) != JobState.WAITING_HOST:
+                    continue
+                record = await self.recovery.get(job.id)
+                if record is None or record.mode != RecoveryMode.ADOPT.value:
+                    continue
+
+                known_execution = (
+                    record.execution_id
+                    if record.execution_id in reported
+                    else self._match_reported_execution(
+                        job,
+                        host_id=host_id,
+                        reported=reported,
+                    )
+                )
+                if known_execution is not None:
+                    continue
+
+                session_id = await self._external_session_id(job)
+                safe_mode = (
+                    RecoveryMode.RESUME
+                    if session_id
+                    else RecoveryMode.START
+                )
+                await self.recovery.upsert(
+                    job.id,
+                    kind=record.kind,
+                    mode=safe_mode.value,
+                    attempt_count=record.attempt_count,
+                    next_retry_at=datetime.now(timezone.utc),
+                    execution_id=None,
+                    resume_instruction=(
+                        RESTART_RESUME_INSTRUCTION
+                        if safe_mode == RecoveryMode.RESUME
+                        else None
+                    ),
+                    last_error=(
+                        "Runner Protocol v2 full snapshot confirmed that the "
+                        "previous execution is absent"
+                    ),
+                )
+                await self.events.append(
+                    "RUNNER_EXECUTION_ABSENT_CONFIRMED",
+                    job_id=job.id,
+                    project_id=job.project_id,
+                    host_id=host_id,
+                    payload={"next_mode": safe_mode.value},
+                )
 
         cancelling = await self.jobs.list_states({JobState.CANCELLING.value})
         for job in cancelling:
