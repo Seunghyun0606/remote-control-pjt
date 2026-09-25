@@ -21,3 +21,15 @@ def test_protocol_rejects_unknown_version():
                 "payload": {},
             }
         )
+
+
+
+def test_protocol_rejects_previous_v1_runner():
+    with pytest.raises(ValidationError):
+        Envelope.model_validate(
+            {
+                "protocol_version": 1,
+                "type": "HOST_REGISTER",
+                "payload": {"host_id": "desktop-main"},
+            }
+        )
