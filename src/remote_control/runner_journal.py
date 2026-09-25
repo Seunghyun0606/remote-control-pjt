@@ -13,7 +13,7 @@ from remote_control.runners.base import AgentRunResult
 @dataclass(slots=True)
 class RunnerExecutionEntry:
     execution_id: str
-    pid: int
+    pid: int | None
     working_directory: str
     state: str
     boot_id: str
@@ -49,11 +49,10 @@ class RunnerExecutionJournal:
     def get(self, execution_id: str) -> RunnerExecutionEntry | None:
         return self._entries.get(execution_id)
 
-    def start(
+    def reserve(
         self,
         *,
         execution_id: str,
-        pid: int,
         working_directory: str,
         boot_id: str,
         session_id: str | None,
@@ -61,14 +60,29 @@ class RunnerExecutionJournal:
         now = datetime.now(timezone.utc).isoformat()
         entry = RunnerExecutionEntry(
             execution_id=execution_id,
-            pid=pid,
+            pid=None,
             working_directory=working_directory,
-            state="RUNNING",
+            state="STARTING",
             boot_id=boot_id,
             session_id=session_id,
             started_at=now,
         )
         self._entries[execution_id] = entry
+        self._persist()
+        return entry
+
+    def attach_pid(
+        self,
+        execution_id: str,
+        pid: int,
+    ) -> RunnerExecutionEntry:
+        entry = self._entries.get(execution_id)
+        if entry is None:
+            raise KeyError(f"unknown runner execution: {execution_id}")
+        if pid <= 0:
+            raise ValueError("runner execution pid must be positive")
+        entry.pid = pid
+        entry.state = "RUNNING"
         self._persist()
         return entry
 
@@ -148,16 +162,19 @@ def _entry_from_dict(raw: dict[str, Any]) -> RunnerExecutionEntry:
     working_directory = str(raw.get("working_directory") or "")
     if (
         not execution_id
-        or not isinstance(pid, int)
-        or pid <= 0
-        or state not in {"RUNNING", "COMPLETED"}
+        or (
+            state in {"RUNNING", "COMPLETED"}
+            and (not isinstance(pid, int) or pid <= 0)
+        )
+        or (state == "STARTING" and pid is not None)
+        or state not in {"STARTING", "RUNNING", "COMPLETED"}
         or not boot_id
         or not working_directory
     ):
         raise RuntimeError("runner execution journal contains an invalid execution entry")
     return RunnerExecutionEntry(
         execution_id=execution_id,
-        pid=pid,
+        pid=pid if isinstance(pid, int) else None,
         working_directory=working_directory,
         state=state,
         boot_id=boot_id,
