@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import ntpath
 import os
+import posixpath
 import signal
 import subprocess
 from pathlib import Path
@@ -191,11 +193,12 @@ def process_exists(pid: int) -> bool:
 
 
 def canonical_working_directory(value: str | Path) -> str:
-    text = str(value).strip().replace("\\", "/")
-    while len(text) > 1 and text.endswith("/"):
-        text = text[:-1]
-    if len(text) >= 2 and text[1] == ":":
-        return text.casefold()
-    if text.startswith("//"):
-        return text.casefold()
-    return text
+    raw = str(value).strip()
+    windows_like = (
+        (len(raw) >= 2 and raw[1] == ":")
+        or raw.startswith("\\\\")
+        or raw.startswith("//")
+    )
+    if windows_like:
+        return ntpath.normcase(ntpath.normpath(raw)).replace("\\", "/")
+    return posixpath.normpath(raw.replace("\\", "/"))
