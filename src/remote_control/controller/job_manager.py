@@ -534,6 +534,7 @@ class JobManager:
                     await self._record_cancel_pending(job_id, handle, exc)
                     return await self.require(job_id)
                 await self._finalize_cancellation(job_id)
+                await self._ack_result_handle(job_id, handle)
                 return await self.require(job_id)
 
             task = self._tasks.get(job_id)
@@ -1611,6 +1612,7 @@ class JobManager:
         try:
             await handle.cancel()
             await self._finalize_cancellation(job_id)
+            await self._ack_result_handle(job_id, handle)
         except (ConnectionError, TimeoutError) as exc:
             await self._record_cancel_pending(job_id, handle, exc)
         except asyncio.CancelledError:
@@ -1711,6 +1713,8 @@ class JobManager:
                 JobState.WAITING_HOST,
                 JobState.WAITING_QUOTA,
             }:
+                if JobState(current.state) != JobState.WAITING_HOST:
+                    await self._ack_result_handle(job_id, result_handle)
                 return
 
             if current_result.returncode != 0:
@@ -2412,7 +2416,9 @@ class JobManager:
             return
         try:
             await handle.acknowledge_result()
-        except ConnectionError as exc:
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
             job = await self.require(job_id)
             await self.events.append(
                 "RESULT_ACK_PENDING",
