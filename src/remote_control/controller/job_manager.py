@@ -506,6 +506,34 @@ class JobManager:
 
             current = await self.require(job_id)
             if JobState(current.state) == JobState.CANCELLING:
+                recovery = await self.recovery.get(job_id) if self.recovery is not None else None
+                if (
+                    current.assigned_host
+                    and current.assigned_host != self.local_host_id
+                    and recovery is not None
+                    and recovery.execution_id
+                ):
+                    await self.recovery.upsert(
+                        job_id,
+                        kind=recovery.kind,
+                        mode=RecoveryMode.CANCEL.value,
+                        attempt_count=recovery.attempt_count,
+                        next_retry_at=None,
+                        execution_id=recovery.execution_id,
+                        resume_instruction=None,
+                        last_error="waiting for runner reconnect to confirm cancellation",
+                    )
+                    await self.events.append(
+                        "CANCEL_PENDING",
+                        job_id=job_id,
+                        project_id=current.project_id,
+                        host_id=current.assigned_host,
+                        payload={
+                            "execution_id": recovery.execution_id,
+                            "error": "waiting for runner reconnect to confirm cancellation",
+                        },
+                    )
+                    return await self.require(job_id)
                 await self._finalize_cancellation(job_id)
             return await self.require(job_id)
 
