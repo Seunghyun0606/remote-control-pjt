@@ -8,7 +8,7 @@ from remote_control.execution_leases import ExecutionLeaseRegistry
 from remote_control.projects.models import ProjectDefinition, RepositoryConfig
 from remote_control.projects.registry import ProjectRegistry
 from remote_control.recovery.models import RecoveryKind, RecoveryMode
-from remote_control.runner_daemon import RunnerDaemon
+from remote_control.runner_daemon import RunnerDaemon, RunnerSafetyError
 from remote_control.runner_journal import RunnerExecutionJournal
 from remote_control.runners.fake import FakeAgentRunner
 from remote_control.settings import RunnerSettings
@@ -464,3 +464,27 @@ async def test_runner_reconcile_recovers_missing_execution_id_by_latest_working_
         ),
     )
     await _wait_for_state(manager, "JOB-REMOTE-CRASH-WINDOW", "COMPLETED")
+    assert websocket.sent
+    from remote_control.transport.protocol import Envelope
+    ack = Envelope.model_validate_json(websocket.sent[-1])
+    assert ack.type == "JOB_RESULT_ACK"
+    assert ack.payload["execution_id"] == "exec-current"
+
+
+
+@pytest.mark.asyncio
+async def test_runner_safety_error_stops_reconnect_loop(tmp_path):
+    settings = RunnerSettings(
+        _env_file=None,
+        REMOTE_RUNNER_RECONNECT_SECONDS=0,
+        REMOTE_RUNNER_STATE_PATH=str(tmp_path / "journal.json"),
+    )
+    daemon = RunnerDaemon(settings)
+
+    async def fail_connection():
+        raise RunnerSafetyError("journal safety failed")
+
+    daemon._run_connection = fail_connection
+
+    with pytest.raises(RunnerSafetyError, match="journal safety failed"):
+        await daemon.run_forever()
