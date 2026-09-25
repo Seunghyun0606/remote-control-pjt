@@ -139,14 +139,18 @@ class RunnerDaemon:
             )
 
     def _running_snapshot(self) -> list[dict]:
-        return [
-            {
-                "execution_id": execution_id,
-                "session_id": self.running_sessions.get(execution_id),
-                "working_directory": self.running_working_directories.get(execution_id),
-            }
-            for execution_id in sorted(self.running)
-        ]
+        snapshot: list[dict] = []
+        for execution_id in sorted(self.running):
+            entry = self.journal.get(execution_id)
+            snapshot.append(
+                {
+                    "execution_id": execution_id,
+                    "session_id": self.running_sessions.get(execution_id),
+                    "working_directory": self.running_working_directories.get(execution_id),
+                    "started_at": entry.started_at if entry is not None else None,
+                }
+            )
+        return snapshot
 
     def _completed_snapshot(self) -> list[dict]:
         snapshot: list[dict] = []
@@ -159,6 +163,7 @@ class RunnerDaemon:
                     "working_directory": (
                         entry.working_directory if entry is not None else None
                     ),
+                    "started_at": entry.started_at if entry is not None else None,
                 }
             )
         return snapshot
