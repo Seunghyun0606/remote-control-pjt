@@ -228,20 +228,28 @@ class CodexRunner(AgentRunner):
                 f"configured={command[0]!r}, resolved={resolved!r}, "
                 f"error={exc}"
             ) from exc
-        assert process.stdin is not None
-        prepared_instruction = prepare_codex_instruction(instruction)
-        process.stdin.write(prepared_instruction.encode("utf-8"))
-        await process.stdin.drain()
-        process.stdin.close()
+        try:
+            assert process.stdin is not None
+            prepared_instruction = prepare_codex_instruction(instruction)
+            process.stdin.write(prepared_instruction.encode("utf-8"))
+            await process.stdin.drain()
+            process.stdin.close()
 
-        reader_task = asyncio.create_task(
-            self._read_result(
-                process,
-                on_event=on_event,
-                expected_session_id=expected_session_id,
+            reader_task = asyncio.create_task(
+                self._read_result(
+                    process,
+                    on_event=on_event,
+                    expected_session_id=expected_session_id,
+                )
             )
-        )
-        return CodexRunHandle(process, reader_task)
+            return CodexRunHandle(process, reader_task)
+        except BaseException:
+            await terminate_process_tree(
+                process.pid,
+                process=process,
+                timeout_seconds=10,
+            )
+            raise
 
     async def _read_result(
         self,
