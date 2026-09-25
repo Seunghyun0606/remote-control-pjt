@@ -11,6 +11,8 @@ from remote_control.recovery.quota import detect_quota_event, detect_quota_text
 from remote_control.runners.base import AgentRunResult, AgentRunner, RunEventCallback, RunHandle
 
 
+CODEX_STREAM_LIMIT_BYTES = 16 * 1024 * 1024
+
 WINDOWS_UTF8_GUIDANCE = (
     "Windows UTF-8 I/O rule: repository text is UTF-8. "
     "Avoid PowerShell text aliases/cmdlets that can fall back to the legacy ANSI code page. "
@@ -82,8 +84,6 @@ def build_codex_resume_command(
     return [
         executable,
         "exec",
-        "resume",
-        session_id,
         "--json",
         "--sandbox",
         sandbox,
@@ -91,6 +91,8 @@ def build_codex_resume_command(
         str(working_directory),
         "--config",
         f'approval_policy="{approval_policy}"',
+        "resume",
+        session_id,
         "-",
     ]
 
@@ -208,6 +210,7 @@ class CodexRunner(AgentRunner):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=child_env,
+                limit=CODEX_STREAM_LIMIT_BYTES,
             )
         except ExecutableResolutionError:
             raise
