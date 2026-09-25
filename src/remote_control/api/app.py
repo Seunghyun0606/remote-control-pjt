@@ -312,6 +312,7 @@ def create_app(
                             running_jobs=_dict_list(envelope.payload.get("running_jobs")),
                             completed_jobs=[],
                             gateway=runner_gateway,
+                            snapshot_complete=False,
                         )
                     elif envelope.type == "RUNNING_JOBS":
                         await controller.hosts.heartbeat(host_id)
@@ -320,6 +321,7 @@ def create_app(
                             running_jobs=_dict_list(envelope.payload.get("running_jobs")),
                             completed_jobs=_dict_list(envelope.payload.get("completed_jobs")),
                             gateway=runner_gateway,
+                            snapshot_complete=True,
                         )
                     else:
                         await runner_gateway.handle(host_id, envelope)
