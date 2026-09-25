@@ -11,7 +11,7 @@ from websockets.exceptions import ConnectionClosed
 
 from remote_control.event_payloads import sanitize_agent_event
 from remote_control.human_gate import extract_human_gate
-from remote_control.process_control import terminate_process_tree
+from remote_control.process_control import terminate_persisted_codex_process
 from remote_control.projects.operations import LocalProjectOperationExecutor
 from remote_control.runner_journal import RunnerExecutionJournal
 from remote_control.runners.base import AgentRunResult, RunHandle
@@ -434,7 +434,11 @@ class RunnerDaemon:
                 self.completed[entry.execution_id] = entry.to_result()
                 continue
 
-            stopped = await terminate_process_tree(entry.pid, timeout_seconds=10)
+            stopped = await terminate_persisted_codex_process(
+                entry.pid,
+                working_directory=entry.working_directory,
+                timeout_seconds=10,
+            )
             if not stopped:
                 raise RuntimeError(
                     "refusing to start Runner because an orphan Codex process "
