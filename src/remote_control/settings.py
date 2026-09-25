@@ -73,6 +73,10 @@ class Settings(_BaseSettings):
         default=7200,
         validation_alias="REMOTE_CONTROL_QUOTA_RETRY_MAX_SECONDS",
     )
+    quota_reset_grace_seconds: int = Field(
+        default=600,
+        validation_alias="REMOTE_CONTROL_QUOTA_RESET_GRACE_SECONDS",
+    )
     restart_grace_seconds: int = Field(
         default=10,
         validation_alias="REMOTE_CONTROL_RESTART_GRACE_SECONDS",
