@@ -104,6 +104,7 @@ class _FakeProcess:
         self.stderr = _AsyncBytes()
         self.returncode = None
         self.terminated = False
+        self.pid = 12345
 
     def terminate(self):
         self.terminated = True
@@ -116,9 +117,19 @@ class _FakeProcess:
 
 
 @pytest.mark.asyncio
-async def test_resume_rejects_rebound_thread_identity():
+async def test_resume_rejects_rebound_thread_identity(monkeypatch):
     from remote_control.runners.codex import CodexRunner
 
+    async def terminate(pid, *, process, timeout_seconds):
+        assert pid == 12345
+        assert timeout_seconds == 10
+        process.terminate()
+        return True
+
+    monkeypatch.setattr(
+        "remote_control.runners.codex.terminate_process_tree",
+        terminate,
+    )
     runner = CodexRunner()
     process = _FakeProcess(
         [{"type": "thread.started", "thread_id": "thread-new"}]
