@@ -4,7 +4,8 @@ from pathlib import Path
 import pytest
 
 from remote_control.runners.codex import (
-    CODEX_STREAM_LIMIT_BYTES,
+    CODEX_EVENT_MAX_BYTES,
+    CODEX_READ_CHUNK_BYTES,
     CodexRunner,
     build_codex_command,
     build_codex_environment,
@@ -80,18 +81,15 @@ def test_windows_codex_environment_forces_python_utf8(monkeypatch):
     assert env["CODEX_HOME"] == r"C:\Users\tester\.codex"
 
 
-class _AsyncLines:
-    def __init__(self, lines):
-        self._lines = iter(lines)
+class _AsyncChunkReader:
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
 
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        try:
-            return next(self._lines)
-        except StopIteration as exc:
-            raise StopAsyncIteration from exc
+    async def read(self, size=-1):
+        del size
+        if not self._chunks:
+            return b""
+        return self._chunks.pop(0)
 
 
 class _AsyncBytes:
@@ -101,7 +99,7 @@ class _AsyncBytes:
 
 class _FakeProcess:
     def __init__(self, events):
-        self.stdout = _AsyncLines(
+        self.stdout = _AsyncChunkReader(
             [(json.dumps(event) + "\n").encode("utf-8") for event in events]
         )
         self.stderr = _AsyncBytes()
@@ -158,7 +156,7 @@ class _CaptureStdin:
 class _SpawnedProcess:
     def __init__(self):
         self.stdin = _CaptureStdin()
-        self.stdout = _AsyncLines([])
+        self.stdout = _AsyncChunkReader([])
         self.stderr = _AsyncBytes()
         self.pid = 999
         self.returncode = 0
@@ -174,7 +172,7 @@ class _SpawnedProcess:
 
 
 @pytest.mark.asyncio
-async def test_codex_spawn_uses_large_stream_limit(monkeypatch, tmp_path):
+async def test_codex_spawn_uses_chunk_reader_without_large_line_limit(monkeypatch, tmp_path):
     captured = {}
     process = _SpawnedProcess()
 
@@ -207,5 +205,51 @@ async def test_codex_spawn_uses_large_stream_limit(monkeypatch, tmp_path):
     result = await handle.wait()
 
     assert result.returncode == 0
-    assert captured["kwargs"]["limit"] == CODEX_STREAM_LIMIT_BYTES
-    assert CODEX_STREAM_LIMIT_BYTES >= 16 * 1024 * 1024
+    assert "limit" not in captured["kwargs"]
+    assert CODEX_READ_CHUNK_BYTES == 64 * 1024
+
+
+
+@pytest.mark.asyncio
+async def test_chunk_reader_handles_json_split_across_chunks():
+    from remote_control.runners.codex import _iter_jsonl_records
+
+    reader = _AsyncChunkReader([b'{"type":"thread.', b'started","thread_id":"t1"}\n'])
+    records = [record async for record in _iter_jsonl_records(reader)]
+
+    assert records == [(b'{"type":"thread.started","thread_id":"t1"}', 0)]
+
+
+@pytest.mark.asyncio
+async def test_chunk_reader_truncates_oversized_record_without_failing(monkeypatch):
+    import remote_control.runners.codex as codex_module
+
+    monkeypatch.setattr(codex_module, "CODEX_EVENT_MAX_BYTES", 8)
+    reader = _AsyncChunkReader([b"abcdefghijkl", b"mnop\nnext\n"])
+    records = [record async for record in codex_module._iter_jsonl_records(reader)]
+
+    assert records[0][0] == b"abcdefgh"
+    assert records[0][1] == 8
+    assert records[1] == (b"next", 0)
+
+
+@pytest.mark.asyncio
+async def test_read_result_survives_oversized_jsonl_event(monkeypatch):
+    import remote_control.runners.codex as codex_module
+
+    monkeypatch.setattr(codex_module, "CODEX_EVENT_MAX_BYTES", 16)
+    process = _FakeProcess([])
+    process.stdout = _AsyncChunkReader(
+        [b'{"type":"tool","text":"', b"x" * 64 + b'"}\n']
+    )
+    events = []
+
+    result = await CodexRunner()._read_result(
+        process,
+        on_event=events.append,
+    )
+
+    assert result.returncode == 0
+    assert events
+    assert events[0]["type"] == "raw_output_truncated"
+    assert events[0]["omitted_bytes"] > 0
