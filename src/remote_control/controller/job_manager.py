@@ -93,6 +93,7 @@ class JobManager:
         progress_interval_seconds: int = 300,
         quota_retry_initial_seconds: int = 1800,
         quota_retry_max_seconds: int = 7200,
+        quota_reset_grace_seconds: int = 600,
         restart_grace_seconds: int = 10,
     ) -> None:
         self.projects = projects
@@ -115,6 +116,7 @@ class JobManager:
             quota_retry_max_seconds,
             self.quota_retry_initial_seconds,
         )
+        self.quota_reset_grace_seconds = max(quota_reset_grace_seconds, 0)
         self.restart_grace_seconds = max(restart_grace_seconds, 0)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._handles: dict[str, RunHandle] = {}
@@ -1753,6 +1755,7 @@ class JobManager:
                 initial_seconds=self.quota_retry_initial_seconds,
                 max_seconds=self.quota_retry_max_seconds,
                 reset_at=signal.reset_at,
+                reset_grace_seconds=self.quota_reset_grace_seconds,
             )
             execution_id = getattr(self._handles.get(job_id), "execution_id", None)
             record = await self.recovery.upsert(
