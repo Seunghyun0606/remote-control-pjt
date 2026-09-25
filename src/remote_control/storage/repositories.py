@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from remote_control.storage.db import Database
+logger = logging.getLogger(__name__)
+
 from remote_control.storage.models import (
     ApprovalRecord,
     EventRecord,
@@ -112,18 +117,39 @@ class EventRepository:
         host_id: str | None = None,
         payload: dict[str, Any] | None = None,
     ) -> EventRecord:
-        record = EventRecord(
-            event_type=event_type,
-            job_id=job_id,
-            project_id=project_id,
-            host_id=host_id,
-            payload_json=json.dumps(payload or {}, ensure_ascii=False),
-        )
-        async with self.db.sessions() as session:
-            session.add(record)
-            await session.commit()
-            await session.refresh(record)
-            return record
+        payload_json = json.dumps(payload or {}, ensure_ascii=False)
+        delays = (0.05, 0.1)
+        for attempt in range(1, len(delays) + 2):
+            record = EventRecord(
+                event_type=event_type,
+                job_id=job_id,
+                project_id=project_id,
+                host_id=host_id,
+                payload_json=payload_json,
+            )
+            try:
+                async with self.db.sessions() as session:
+                    session.add(record)
+                    await session.commit()
+                    await session.refresh(record)
+                    return record
+            except OperationalError as exc:
+                if not _is_sqlite_busy_error(exc) or attempt > len(delays):
+                    raise
+                delay = delays[attempt - 1]
+                logger.warning(
+                    "SQLite event write busy; retrying event_type=%s attempt=%s delay=%.2fs",
+                    event_type,
+                    attempt,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+        raise RuntimeError("unreachable event append retry state")
+
+
+def _is_sqlite_busy_error(exc: OperationalError) -> bool:
+    message = str(exc).lower()
+    return "database is locked" in message or "database is busy" in message
 
 
 class HostRepository:
