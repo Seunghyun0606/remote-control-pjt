@@ -338,7 +338,7 @@ class JobManager:
                 ),
                 resume_instruction=(
                     RETRY_RESUME_INSTRUCTION
-                    if mode == RecoveryMode.RESUME
+                    if mode in {RecoveryMode.RESUME, RecoveryMode.ADOPT}
                     else None
                 ),
             )
@@ -766,6 +766,58 @@ class JobManager:
             return stale_locks + lease_repairs
         current = now or datetime.now(timezone.utc)
 
+        if snapshot_complete:
+            for job in waiting:
+                current_job = await self.require(job.id)
+                if JobState(current_job.state) != JobState.WAITING_HOST:
+                    continue
+                record = await self.recovery.get(job.id)
+                if record is None or record.mode != RecoveryMode.ADOPT.value:
+                    continue
+
+                known_execution = (
+                    record.execution_id
+                    if record.execution_id in reported
+                    else self._match_reported_execution(
+                        job,
+                        host_id=host_id,
+                        reported=reported,
+                    )
+                )
+                if known_execution is not None:
+                    continue
+
+                session_id = await self._external_session_id(job)
+                safe_mode = (
+                    RecoveryMode.RESUME
+                    if session_id
+                    else RecoveryMode.START
+                )
+                await self.recovery.upsert(
+                    job.id,
+                    kind=record.kind,
+                    mode=safe_mode.value,
+                    attempt_count=record.attempt_count,
+                    next_retry_at=datetime.now(timezone.utc),
+                    execution_id=None,
+                    resume_instruction=(
+                        RESTART_RESUME_INSTRUCTION
+                        if safe_mode == RecoveryMode.RESUME
+                        else None
+                    ),
+                    last_error=(
+                        "Runner Protocol v2 full snapshot confirmed that the "
+                        "previous execution is absent"
+                    ),
+                )
+                await self.events.append(
+                    "RUNNER_EXECUTION_ABSENT_CONFIRMED",
+                    job_id=job.id,
+                    project_id=job.project_id,
+                    host_id=host_id,
+                    payload={"next_mode": safe_mode.value},
+                )
+
         cancelling = await self.jobs.list_states({JobState.CANCELLING.value})
         for job in cancelling:
             if not job.assigned_host or job.assigned_host == self.local_host_id:
@@ -821,13 +873,16 @@ class JobManager:
         for job in recoverable:
             existing = await self.recovery.get(job.id)
             session_id = await self._external_session_id(job)
-            mode = RecoveryMode.RESUME if session_id else RecoveryMode.START
-            execution_id = existing.execution_id if existing is not None else None
-            delay = (
-                self.restart_grace_seconds
-                if job.assigned_host and job.assigned_host != self.local_host_id
-                else 0
+            remote_uncertain = bool(
+                job.assigned_host
+                and job.assigned_host != self.local_host_id
             )
+            mode = (
+                RecoveryMode.ADOPT
+                if remote_uncertain
+                else (RecoveryMode.RESUME if session_id else RecoveryMode.START)
+            )
+            execution_id = existing.execution_id if existing is not None else None
             if self.sessions is not None:
                 await self.sessions.mark(job.id, SessionStatus.WAITING_HOST)
             await self._transition(job.id, JobState.WAITING_HOST)
@@ -836,9 +891,13 @@ class JobManager:
                 kind=RecoveryKind.RESTART.value,
                 mode=mode.value,
                 attempt_count=existing.attempt_count if existing else 0,
-                next_retry_at=current + timedelta(seconds=delay),
+                next_retry_at=None if mode == RecoveryMode.ADOPT else current,
                 execution_id=execution_id,
-                resume_instruction=RESTART_RESUME_INSTRUCTION if mode == RecoveryMode.RESUME else None,
+                resume_instruction=(
+                    RESTART_RESUME_INSTRUCTION
+                    if mode in {RecoveryMode.RESUME, RecoveryMode.ADOPT}
+                    else None
+                ),
                 last_error="controller restarted while job was active",
             )
             await self.events.append(
@@ -922,31 +981,42 @@ class JobManager:
         for job in preexisting_waiting_host:
             existing = await self.recovery.get(job.id)
             if existing is None:
+                remote_uncertain = bool(
+                    job.assigned_host
+                    and job.assigned_host != self.local_host_id
+                )
+                session_id = await self._external_session_id(job)
+                recovered_mode = (
+                    RecoveryMode.ADOPT
+                    if remote_uncertain
+                    else (RecoveryMode.RESUME if session_id else RecoveryMode.START)
+                )
                 await self.recovery.upsert(
                     job.id,
                     kind=RecoveryKind.HOST.value,
-                    mode=(
-                        RecoveryMode.RESUME.value
-                        if await self._external_session_id(job)
-                        else RecoveryMode.START.value
-                    ),
+                    mode=recovered_mode.value,
                     attempt_count=0,
-                    next_retry_at=current,
+                    next_retry_at=(
+                        None if recovered_mode == RecoveryMode.ADOPT else current
+                    ),
                     execution_id=None,
                     resume_instruction=(
                         RESTART_RESUME_INSTRUCTION
-                        if await self._external_session_id(job)
+                        if recovered_mode in {RecoveryMode.RESUME, RecoveryMode.ADOPT}
                         else None
                     ),
                     last_error="recovered WAITING_HOST without recovery metadata",
                 )
             else:
+                existing_mode = RecoveryMode(existing.mode)
                 await self.recovery.upsert(
                     job.id,
                     kind=existing.kind,
                     mode=existing.mode,
                     attempt_count=existing.attempt_count,
-                    next_retry_at=current,
+                    next_retry_at=(
+                        None if existing_mode == RecoveryMode.ADOPT else current
+                    ),
                     execution_id=existing.execution_id,
                     resume_instruction=existing.resume_instruction,
                     last_error=existing.last_error,
@@ -974,6 +1044,7 @@ class JobManager:
         running_jobs: list[dict],
         completed_jobs: list[dict],
         gateway: RunnerGateway,
+        snapshot_complete: bool = True,
     ) -> int:
         if self.recovery is None:
             return 0
@@ -982,7 +1053,7 @@ class JobManager:
             for item in [*running_jobs, *completed_jobs]
             if isinstance(item, dict) and item.get("execution_id")
         }
-        if not reported:
+        if not reported and not snapshot_complete:
             return 0
 
         waiting = await self.jobs.list_states({JobState.WAITING_HOST.value})
@@ -1379,6 +1450,10 @@ class JobManager:
         return True
 
     async def _retry_host(self, job: JobRecord, record: RecoveryRecord) -> bool:
+        mode = RecoveryMode(record.mode)
+        if mode == RecoveryMode.ADOPT:
+            return False
+
         work = await self.project_work_for(job.id)
         requested_host = (
             work.host_id
@@ -1400,7 +1475,6 @@ class JobManager:
             return False
 
         await self._transition(job.id, JobState.ASSIGNED, assigned_host=host_id)
-        mode = RecoveryMode(record.mode)
         if mode == RecoveryMode.START:
             await self.recovery.upsert(
                 job.id,
@@ -2537,9 +2611,16 @@ class JobManager:
         # local process state or a remote Runner snapshot.
         if self.recovery is not None:
             mode = (
-                RecoveryMode.RESUME
-                if await self._external_session_id(current)
-                else RecoveryMode.START
+                RecoveryMode.ADOPT
+                if (
+                    current.assigned_host
+                    and current.assigned_host != self.local_host_id
+                )
+                else (
+                    RecoveryMode.RESUME
+                    if await self._external_session_id(current)
+                    else RecoveryMode.START
+                )
             )
             await self._enter_host_wait(
                 job_id,
