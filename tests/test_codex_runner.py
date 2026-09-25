@@ -243,9 +243,12 @@ async def test_read_result_survives_oversized_jsonl_event(monkeypatch):
     )
     events = []
 
+    async def capture(event):
+        events.append(event)
+
     result = await CodexRunner()._read_result(
         process,
-        on_event=events.append,
+        on_event=capture,
     )
 
     assert result.returncode == 0
