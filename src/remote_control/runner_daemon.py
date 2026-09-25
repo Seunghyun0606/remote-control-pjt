@@ -11,7 +11,10 @@ from websockets.exceptions import ConnectionClosed
 
 from remote_control.event_payloads import sanitize_agent_event
 from remote_control.human_gate import extract_human_gate
-from remote_control.process_control import terminate_persisted_codex_process
+from remote_control.process_control import (
+    ProcessSafetyError,
+    terminate_persisted_codex_process,
+)
 from remote_control.projects.operations import LocalProjectOperationExecutor
 from remote_control.runner_journal import RunnerExecutionJournal
 from remote_control.runners.base import AgentRunResult, RunHandle
@@ -55,10 +58,13 @@ class RunnerDaemon:
         self._send_lock = asyncio.Lock()
         self._websocket: ClientConnection | None = None
         self._background_tasks: set[asyncio.Task[None]] = set()
+        self._fatal_error: RunnerSafetyError | None = None
 
     async def run_forever(self) -> None:
         await self._recover_persisted_executions()
         while True:
+            if self._fatal_error is not None:
+                raise self._fatal_error
             try:
                 await self._run_connection()
             except asyncio.CancelledError:
@@ -72,6 +78,8 @@ class RunnerDaemon:
                 logger.warning("runner connection lost: %s", exc)
             except Exception:
                 logger.exception("runner connection loop failed; reconnecting")
+            if self._fatal_error is not None:
+                raise self._fatal_error
             await asyncio.sleep(self.settings.reconnect_seconds)
 
     async def _run_connection(self) -> None:
@@ -355,6 +363,17 @@ class RunnerDaemon:
                     host_id=self.settings.host_id,
                     on_event=on_event,
                 )
+        except ProcessSafetyError as exc:
+            try:
+                self.journal.attach_pid(execution_id, exc.pid)
+            except Exception:
+                # Keep the STARTING reservation when PID persistence also fails.
+                # Startup will fail closed rather than guessing that no process exists.
+                pass
+            raise RunnerSafetyError(
+                "Codex start failed and process termination is unconfirmed: "
+                f"execution={execution_id} pid={exc.pid}"
+            ) from exc
         except Exception as exc:
             self.running_sessions.pop(execution_id, None)
             self.running_working_directories.pop(execution_id, None)
@@ -449,6 +468,14 @@ class RunnerDaemon:
                     done_task.get_name(),
                     exc_info=(type(exc), exc, exc.__traceback__),
                 )
+                if isinstance(exc, RunnerSafetyError):
+                    self._fatal_error = exc
+                    websocket = self._websocket
+                    if websocket is not None:
+                        asyncio.create_task(
+                            websocket.close(code=1011),
+                            name="runner-safety-close",
+                        )
 
         task.add_done_callback(cleanup)
         return task
@@ -466,6 +493,11 @@ class RunnerDaemon:
                 session_id=self.running_sessions.get(execution_id) or handle.session_id,
                 final_message="cancelled",
             )
+        except ProcessSafetyError as exc:
+            raise RunnerSafetyError(
+                "Codex process termination is unconfirmed; keeping durable "
+                f"execution state: execution={execution_id} pid={exc.pid}"
+            ) from exc
         except Exception as exc:
             result = AgentRunResult(
                 returncode=1,
