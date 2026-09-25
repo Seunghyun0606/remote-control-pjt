@@ -1,4 +1,4 @@
-# Fully constrained dependency snapshot validated by CI on Python 3.11/3.12
+# Fully constrained application dependency snapshot validated by CI on Python 3.11/3.12
 # and Windows smoke. Constraints do not force installation of platform-only
 # packages such as colorama; they pin them when selected by the resolver.
 aiohappyeyeballs==2.7.1
