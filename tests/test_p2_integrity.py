@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import time
 from types import SimpleNamespace
 
@@ -11,6 +12,7 @@ from remote_control.event_payloads import sanitize_agent_event
 from remote_control.messaging.telegram import TelegramProvider, _PendingSteer
 from remote_control.runners.fake import FakeAgentRunner
 from remote_control.sessions.project_sessions import ProjectSessionRegistry
+from remote_control.storage.db import Database
 from remote_control.storage.migrations import CURRENT_SCHEMA_VERSION
 from remote_control.storage.models import JobRecord
 from remote_control.storage.repositories import (
@@ -47,6 +49,24 @@ async def test_database_migration_baseline_is_recorded_and_idempotent(database):
 
     assert count == CURRENT_SCHEMA_VERSION
     assert version == CURRENT_SCHEMA_VERSION
+
+
+@pytest.mark.asyncio
+async def test_migration_baseline_rejects_incomplete_existing_schema(tmp_path):
+    path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY)")
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = Database(f"sqlite+aiosqlite:///{path}")
+    try:
+        with pytest.raises(RuntimeError, match="baseline schema is missing columns"):
+            await database.init()
+    finally:
+        await database.close()
 
 
 @pytest.mark.asyncio
