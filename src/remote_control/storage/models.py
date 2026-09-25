@@ -65,6 +65,17 @@ class HostRecord(Base):
     )
 
 
+class ExecutionLeaseRecord(Base):
+    __tablename__ = "execution_leases"
+
+    lease_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    project_id: Mapped[str] = mapped_column(String(128), index=True)
+    host_id: Mapped[str] = mapped_column(String(128), index=True)
+    working_directory: Mapped[str] = mapped_column(Text)
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class ProjectSessionRecord(Base):
     __tablename__ = "project_sessions"
 
