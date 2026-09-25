@@ -42,7 +42,7 @@ def test_codex_resume_command_places_exec_options_before_resume():
         "--sandbox",
         "workspace-write",
         "--cd",
-        "/srv/project",
+        str(Path("/srv/project")),
         "--config",
         'approval_policy="never"',
         "resume",
