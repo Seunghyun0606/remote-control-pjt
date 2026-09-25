@@ -1033,6 +1033,7 @@ class JobManager:
             )
             await self._transition(job.id, JobState.ASSIGNED, assigned_host=host_id)
             await self._transition(job.id, JobState.STARTING)
+            self._handles[job.id] = handle
             await self._set_handle(job.id, handle)
             await self._transition(job.id, JobState.RUNNING)
             if self.sessions is not None:
@@ -1089,6 +1090,7 @@ class JobManager:
                 session_id=session_id,
                 on_event=self._event_callback(job.id),
             )
+            self._handles[job.id] = handle
             await self._set_handle(job.id, handle)
             self._start_task(job.id, self._execute_cancel_adopted(job.id, handle))
             await self.events.append(
@@ -1538,6 +1540,7 @@ class JobManager:
                 return
 
             handle = await self._start_new_turn(job, instruction)
+            self._handles[job_id] = handle
             await self._set_handle(job_id, handle)
             current = await self.require(job_id)
             if JobState(current.state) != JobState.STARTING:
@@ -1847,7 +1850,8 @@ class JobManager:
                     host_id=job.assigned_host,
                     on_event=self._event_callback(job_id),
                 )
-                await self._set_handle(job_id, handle)
+                self._handles[job_id] = handle
+            await self._set_handle(job_id, handle)
                 current = await self.require(job_id)
                 if JobState(current.state) != JobState.RUNNING:
                     await handle.cancel()
@@ -1969,6 +1973,7 @@ class JobManager:
                 resume_instruction=instruction,
             )
             return None
+        self._handles[job_id] = handle
         await self._set_handle(job_id, handle)
         current = await self.require(job_id)
         if JobState(current.state) != JobState.RUNNING:
