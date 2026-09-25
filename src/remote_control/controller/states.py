@@ -13,6 +13,7 @@ class JobState(StrEnum):
     WAITING_HOST = "WAITING_HOST"
     WAITING_QUOTA = "WAITING_QUOTA"
     PAUSED = "PAUSED"
+    CANCELLING = "CANCELLING"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
     COMPLETED = "COMPLETED"
@@ -21,11 +22,12 @@ class JobState(StrEnum):
 TERMINAL_STATES = {JobState.FAILED, JobState.CANCELLED, JobState.COMPLETED}
 
 _ALLOWED_TRANSITIONS: dict[JobState, set[JobState]] = {
-    JobState.QUEUED: {JobState.ASSIGNED, JobState.CANCELLED, JobState.WAITING_HOST},
-    JobState.ASSIGNED: {JobState.STARTING, JobState.CANCELLED, JobState.WAITING_HOST},
+    JobState.QUEUED: {JobState.ASSIGNED, JobState.CANCELLING, JobState.CANCELLED, JobState.WAITING_HOST},
+    JobState.ASSIGNED: {JobState.STARTING, JobState.CANCELLING, JobState.CANCELLED, JobState.WAITING_HOST},
     JobState.STARTING: {
         JobState.RUNNING,
         JobState.FAILED,
+        JobState.CANCELLING,
         JobState.CANCELLED,
         JobState.WAITING_HOST,
         JobState.WAITING_QUOTA,
@@ -37,6 +39,7 @@ _ALLOWED_TRANSITIONS: dict[JobState, set[JobState]] = {
         JobState.WAITING_HOST,
         JobState.WAITING_QUOTA,
         JobState.PAUSED,
+        JobState.CANCELLING,
         JobState.FAILED,
         JobState.CANCELLED,
         JobState.COMPLETED,
@@ -45,6 +48,7 @@ _ALLOWED_TRANSITIONS: dict[JobState, set[JobState]] = {
         JobState.RUNNING,
         JobState.WAITING_HOST,
         JobState.FAILED,
+        JobState.CANCELLING,
         JobState.CANCELLED,
         JobState.COMPLETED,
     },
@@ -52,22 +56,26 @@ _ALLOWED_TRANSITIONS: dict[JobState, set[JobState]] = {
         JobState.RUNNING,
         JobState.WAITING_HOST,
         JobState.FAILED,
+        JobState.CANCELLING,
         JobState.CANCELLED,
     },
-    JobState.WAITING_HOST: {JobState.ASSIGNED, JobState.CANCELLED, JobState.FAILED},
+    JobState.WAITING_HOST: {JobState.ASSIGNED, JobState.CANCELLING, JobState.CANCELLED, JobState.FAILED},
     JobState.WAITING_QUOTA: {
         JobState.RUNNING,
         JobState.STARTING,
         JobState.WAITING_HOST,
+        JobState.CANCELLING,
         JobState.CANCELLED,
         JobState.FAILED,
     },
     JobState.PAUSED: {
         JobState.RUNNING,
         JobState.WAITING_HOST,
+        JobState.CANCELLING,
         JobState.CANCELLED,
         JobState.FAILED,
     },
+    JobState.CANCELLING: {JobState.CANCELLED},
     JobState.FAILED: set(),
     JobState.CANCELLED: set(),
     JobState.COMPLETED: set(),
