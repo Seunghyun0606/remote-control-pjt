@@ -269,6 +269,7 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
         runner_gateway=gateway,
         runner_token=settings.runner_token,
         api_token=settings.api_token,
+        api_principal=settings.api_principal,
         web_ui_enabled=settings.web_ui_enabled,
     )
     config = uvicorn.Config(
