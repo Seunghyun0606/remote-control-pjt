@@ -387,7 +387,13 @@ class RunnerDaemon:
                     seen_session or handle.session_id or "",
                 )
         except Exception as exc:
-            await handle.cancel()
+            try:
+                await handle.cancel()
+            except Exception as cancel_exc:
+                raise RunnerSafetyError(
+                    "runner could not terminate Codex after PID persistence "
+                    f"failure: execution={execution_id}: {cancel_exc}"
+                ) from exc
             self.running_sessions.pop(execution_id, None)
             self.running_working_directories.pop(execution_id, None)
             try:
