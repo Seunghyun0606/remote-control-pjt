@@ -14,6 +14,7 @@ from remote_control.approvals.registry import ApprovalRegistry
 from remote_control.controller.job_manager import JobManager
 from remote_control.controller.service import ControllerService
 from remote_control.diagnostics import collect_diagnostics, format_diagnostics, validate_startup
+from remote_control.execution_leases import ExecutionLeaseRegistry
 from remote_control.hosts.registry import HostRegistry
 from remote_control.messaging.slack import SlackProvider
 from remote_control.messaging.telegram import TelegramProvider
@@ -34,6 +35,7 @@ from remote_control.storage.db import Database
 from remote_control.storage.repositories import (
     ApprovalRepository,
     EventRepository,
+    ExecutionLeaseRepository,
     HostRepository,
     JobRepository,
     ProjectSessionRepository,
@@ -141,6 +143,10 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
     db = Database(settings.resolved_db_url)
     await db.init()
     events = EventRepository(db)
+    execution_leases = ExecutionLeaseRegistry(
+        leases=ExecutionLeaseRepository(db),
+        events=events,
+    )
     hosts = HostRegistry(
         hosts=HostRepository(db),
         events=events,
@@ -209,6 +215,7 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
         recovery=recovery,
         project_adapters=project_adapters,
         project_work=project_work,
+        execution_leases=execution_leases,
         progress_interval_seconds=settings.progress_interval_seconds,
         quota_retry_initial_seconds=settings.quota_retry_initial_seconds,
         quota_retry_max_seconds=settings.quota_retry_max_seconds,
@@ -296,9 +303,10 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
             started_providers.append(slack)
         await server.serve()
     finally:
+        await scheduler.stop()
+        await manager.shutdown()
         for provider in reversed(started_providers):
             await provider.stop()
-        await scheduler.stop()
         await db.close()
 
 
