@@ -63,10 +63,28 @@ async def test_migration_baseline_rejects_incomplete_existing_schema(tmp_path):
 
     database = Database(f"sqlite+aiosqlite:///{path}")
     try:
-        with pytest.raises(RuntimeError, match="baseline schema is missing columns"):
+        with pytest.raises(RuntimeError, match="database schema drift detected"):
             await database.init()
     finally:
         await database.close()
+
+
+@pytest.mark.asyncio
+async def test_database_startup_rejects_missing_expected_index(database):
+    async with database.engine.begin() as connection:
+        await connection.execute(text("DROP INDEX ix_jobs_project_id"))
+
+    with pytest.raises(RuntimeError, match="indexes="):
+        await database.init()
+
+
+@pytest.mark.asyncio
+async def test_database_startup_rejects_unexpected_column(database):
+    async with database.engine.begin() as connection:
+        await connection.execute(text("ALTER TABLE jobs ADD COLUMN rogue TEXT"))
+
+    with pytest.raises(RuntimeError, match="unexpected_columns"):
+        await database.init()
 
 
 @pytest.mark.asyncio
