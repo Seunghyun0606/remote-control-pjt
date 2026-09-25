@@ -7,6 +7,7 @@ import platform
 from pathlib import Path
 
 from remote_control.executables import ExecutableResolutionError, resolve_executable
+from remote_control.process_control import subprocess_group_kwargs, terminate_process_tree
 from remote_control.recovery.quota import detect_quota_event, detect_quota_text
 from remote_control.runners.base import AgentRunResult, AgentRunner, RunEventCallback, RunHandle
 
@@ -118,12 +119,13 @@ class CodexRunHandle(RunHandle):
     async def cancel(self) -> None:
         if self._process.returncode is not None:
             return
-        self._process.terminate()
-        try:
-            await asyncio.wait_for(self._process.wait(), timeout=10)
-        except TimeoutError:
-            self._process.kill()
-            await self._process.wait()
+        stopped = await terminate_process_tree(
+            self.pid,
+            process=self._process,
+            timeout_seconds=10,
+        )
+        if not stopped:
+            raise RuntimeError(f"failed to terminate Codex process tree pid={self.pid}")
         if not self._reader_task.done():
             self._reader_task.cancel()
 
@@ -211,6 +213,7 @@ class CodexRunner(AgentRunner):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=child_env,
+                **subprocess_group_kwargs(),
             )
         except ExecutableResolutionError:
             raise
@@ -285,7 +288,15 @@ class CodexRunner(AgentRunner):
                     f"expected={expected_session_id} actual={event_session_id}"
                 )
                 if process.returncode is None:
-                    process.terminate()
+                    stopped = await terminate_process_tree(
+                        process.pid,
+                        process=process,
+                        timeout_seconds=10,
+                    )
+                    if not stopped:
+                        raise RuntimeError(
+                            f"failed to terminate mismatched Codex process tree pid={process.pid}"
+                        )
                 break
 
             session_id = session_id or event_session_id
