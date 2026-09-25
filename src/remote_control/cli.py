@@ -13,7 +13,12 @@ from remote_control.api.app import create_app
 from remote_control.approvals.registry import ApprovalRegistry
 from remote_control.controller.job_manager import JobManager
 from remote_control.controller.service import ControllerService
-from remote_control.diagnostics import collect_diagnostics, format_diagnostics, validate_startup
+from remote_control.diagnostics import (
+    collect_diagnostics,
+    format_diagnostics,
+    validate_controller_configuration,
+    validate_startup,
+)
 from remote_control.execution_leases import ExecutionLeaseRegistry
 from remote_control.hosts.registry import HostRegistry
 from remote_control.messaging.slack import SlackProvider
@@ -125,13 +130,7 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     settings = Settings(_env_file=env_file or ".env")
-    if not settings.runner_token:
-        raise RuntimeError("CONTROLLER_RUNNER_TOKEN is required")
-    if not settings.api_is_loopback and not settings.api_token:
-        raise RuntimeError(
-            "CONTROLLER_API_TOKEN is required when REMOTE_CONTROL_API_HOST "
-            "is not loopback"
-        )
+    validate_controller_configuration(settings, no_telegram=no_telegram)
 
     projects = ProjectRegistry.from_yaml(settings.resolved_config_path)
     validate_startup(settings, projects)
@@ -241,18 +240,6 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
     )
 
     await manager.reconcile_startup()
-
-    if not no_telegram and not settings.telegram_bot_token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is required unless --no-telegram is used")
-    if settings.slack_enabled:
-        if not settings.slack_bot_token or not settings.slack_app_token:
-            raise RuntimeError(
-                "SLACK_BOT_TOKEN and SLACK_APP_TOKEN are required when Slack is enabled"
-            )
-        if not settings.slack_allowed_user_ids:
-            raise RuntimeError(
-                "SLACK_ALLOWED_USER_IDS is required when Slack is enabled"
-            )
 
     telegram: TelegramProvider | None = None
     if not no_telegram:
