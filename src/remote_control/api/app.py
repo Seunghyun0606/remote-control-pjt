@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+import secrets
+
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from remote_control.api.dashboard import DashboardService, render_dashboard_html
@@ -35,10 +37,25 @@ def create_app(
     *,
     runner_gateway: RunnerGateway | None = None,
     runner_token: str = "",
+    api_token: str = "",
     web_ui_enabled: bool = True,
 ) -> FastAPI:
     app = FastAPI(title="Remote Agent Control", version="0.10.0")
     dashboard = DashboardService(controller)
+
+    if api_token:
+        @app.middleware("http")
+        async def require_control_api_auth(request: Request, call_next):
+            if request.url.path == "/health":
+                return await call_next(request)
+            provided = _control_api_token(request)
+            if provided is None or not secrets.compare_digest(provided, api_token):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "control API authentication required"},
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            return await call_next(request)
 
     @app.get("/health")
     async def health() -> dict:
@@ -315,6 +332,16 @@ def create_app(
                         await controller.hosts.disconnect(host_id)
 
     return app
+
+
+def _control_api_token(request: Request) -> str | None:
+    authorization = request.headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+        if token:
+            return token
+    token = request.headers.get("x-remote-control-token", "").strip()
+    return token or None
 
 
 def _job_view(job) -> dict:
