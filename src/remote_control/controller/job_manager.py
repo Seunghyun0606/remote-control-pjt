@@ -1137,11 +1137,20 @@ class JobManager:
     async def _terminate_stale_local_processes(self) -> None:
         active_states = {state.value for state in JobState if state not in TERMINAL_STATES}
         for job in await self.jobs.list_states(active_states):
-            if (
-                job.assigned_host != self.local_host_id
-                or job.pid is None
-                or job.pid <= 0
-            ):
+            if job.assigned_host != self.local_host_id:
+                continue
+            state = JobState(job.state)
+            if job.pid is None or job.pid <= 0:
+                if state in {
+                    JobState.STARTING,
+                    JobState.RUNNING,
+                    JobState.CANCELLING,
+                }:
+                    raise RuntimeError(
+                        "refusing Controller startup because local execution state "
+                        "is active but its PID was not durably recorded: "
+                        f"job={job.id} state={state.value}"
+                    )
                 continue
             project = self.projects.get(job.project_id)
             stopped = await terminate_persisted_codex_process(
@@ -1233,6 +1242,15 @@ class JobManager:
             job = await self.require(job_id)
             state = JobState(job.state)
             if state in TERMINAL_STATES:
+                continue
+
+            if state == JobState.CANCELLING:
+                if job.assigned_host == self.local_host_id:
+                    await handle.cancel()
+                    await self.jobs.update(job_id, pid=None)
+                    await self._finalize_cancellation(job_id)
+                else:
+                    await self._persist_cancel_intent(job_id, handle)
                 continue
 
             if job.assigned_host == self.local_host_id:
@@ -2023,13 +2041,16 @@ class JobManager:
         current = await self.require(job_id)
         current_state = JobState(current.state)
         if current_state == JobState.CANCELLING:
-            if result.retry_kind != "host":
+            if result.retry_kind not in {"host", "cancel_unconfirmed"}:
                 await self._finalize_cancellation(job_id, result=result)
             else:
                 await self._record_cancel_pending(
                     job_id,
                     handle,
-                    ConnectionError(result.final_message or "runner disconnected"),
+                    ConnectionError(
+                        result.final_message
+                        or "runner could not confirm execution termination"
+                    ),
                 )
             return None
         if current_state in {
