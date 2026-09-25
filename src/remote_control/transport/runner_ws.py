@@ -37,9 +37,10 @@ class RemoteRunHandle(RunHandle):
     async def cancel(self) -> None:
         if self._result_future.done():
             result = self._result_future.result()
-            if result.retry_kind == "host":
+            if result.retry_kind in {"host", "cancel_unconfirmed"}:
                 raise ConnectionError(
-                    result.final_message or f"runner {self.host_id!r} disconnected"
+                    result.final_message
+                    or f"runner {self.host_id!r} could not confirm execution state"
                 )
             return
         await self.gateway.cancel_remote(
@@ -338,14 +339,9 @@ class RunnerGateway:
         execution_id = str(payload.get("execution_id") or "")
         pending = self._pending.get(execution_id)
         if pending is None or pending.host_id != host_id:
-            if envelope.type == "JOB_RESULT" and execution_id:
-                try:
-                    await self.send(
-                        host_id,
-                        message("JOB_RESULT_ACK", execution_id=execution_id),
-                    )
-                except ConnectionError:
-                    pass
+            # Do not ACK an unknown durable result. Without a pending/adopted
+            # execution the Controller cannot prove that the result is no longer
+            # needed for recovery.
             return
 
         if envelope.type == "JOB_ACCEPTED":
