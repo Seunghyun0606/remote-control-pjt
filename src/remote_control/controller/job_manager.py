@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from remote_control.approvals.registry import ApprovalPrompt, ApprovalRegistry
 from remote_control.controller.states import JobState, TERMINAL_STATES, validate_transition
+from remote_control.event_payloads import sanitize_agent_event
 from remote_control.feedback import FeedbackPolicy, FeedbackThrottler
 from remote_control.hosts.registry import HostRegistry
 from remote_control.hosts.router import HostRouter, HostUnavailable
@@ -1839,7 +1840,7 @@ class JobManager:
                     job_id=job_id,
                     project_id=job.project_id,
                     host_id=job.assigned_host,
-                    payload=_small_event(event),
+                    payload=sanitize_agent_event(event),
                 )
             except Exception:
                 logger.exception(
@@ -2404,63 +2405,6 @@ def _approval_instruction(
         decision += f"\nAdditional human note:\n{response_text.strip()}"
     decision += f"\n\nOriginal question:\n{prompt.question}"
     return decision
-
-
-def _small_event(event: dict) -> dict:
-    allowed: dict = {}
-    for key in (
-        "type",
-        "event_type",
-        "message",
-        "text",
-        "error",
-        "thread_id",
-        "session_id",
-        "question",
-        "prompt",
-        "details",
-        "description",
-        "header",
-        "approval_type",
-        "resets_at",
-        "reset_at",
-        "retry_at",
-        "retry_after",
-        "retry_after_seconds",
-    ):
-        value = event.get(key)
-        if isinstance(value, (str, int, float, bool)) or value is None:
-            allowed[key] = value
-
-    options = event.get("options")
-    if isinstance(options, list):
-        allowed["options"] = options[:8]
-
-    item = event.get("item")
-    if isinstance(item, dict):
-        clean_item = {}
-        for key in (
-            "type",
-            "text",
-            "content",
-            "command",
-            "status",
-            "exit_code",
-            "question",
-            "prompt",
-            "details",
-            "description",
-            "header",
-            "approval_type",
-        ):
-            value = item.get(key)
-            if isinstance(value, (str, int, float, bool)) or value is None:
-                clean_item[key] = value
-        item_options = item.get("options")
-        if isinstance(item_options, list):
-            clean_item["options"] = item_options[:8]
-        allowed["item"] = clean_item
-    return allowed
 
 
 def _resume_failure_allows_fallback(message: str | None) -> bool:
