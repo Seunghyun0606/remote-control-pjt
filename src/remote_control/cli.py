@@ -304,10 +304,12 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
         await server.serve()
     finally:
         await scheduler.stop()
-        await manager.shutdown()
-        for provider in reversed(started_providers):
-            await provider.stop()
-        await db.close()
+        try:
+            await manager.shutdown()
+        finally:
+            for provider in reversed(started_providers):
+                await provider.stop()
+            await db.close()
 
 
 if __name__ == "__main__":
