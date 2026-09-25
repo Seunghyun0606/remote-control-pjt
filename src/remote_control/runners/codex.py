@@ -11,7 +11,8 @@ from remote_control.recovery.quota import detect_quota_event, detect_quota_text
 from remote_control.runners.base import AgentRunResult, AgentRunner, RunEventCallback, RunHandle
 
 
-CODEX_STREAM_LIMIT_BYTES = 16 * 1024 * 1024
+CODEX_READ_CHUNK_BYTES = 64 * 1024
+CODEX_EVENT_MAX_BYTES = 32 * 1024 * 1024
 
 WINDOWS_UTF8_GUIDANCE = (
     "Windows UTF-8 I/O rule: repository text is UTF-8. "
@@ -210,7 +211,6 @@ class CodexRunner(AgentRunner):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=child_env,
-                limit=CODEX_STREAM_LIMIT_BYTES,
             )
         except ExecutableResolutionError:
             raise
@@ -255,14 +255,23 @@ class CodexRunner(AgentRunner):
         quota_signal = None
         stderr_task = asyncio.create_task(process.stderr.read())
 
-        async for raw_line in process.stdout:
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                event = {"type": "raw_output", "text": line}
+        async for raw_line, omitted_bytes in _iter_jsonl_records(process.stdout):
+            if omitted_bytes:
+                preview = raw_line[:4000].decode("utf-8", errors="replace").strip()
+                event = {
+                    "type": "raw_output_truncated",
+                    "text": preview,
+                    "retained_bytes": len(raw_line),
+                    "omitted_bytes": omitted_bytes,
+                }
+            else:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    event = {"type": "raw_output", "text": line}
 
             event_session_id = extract_session_id(event)
             if (
@@ -311,6 +320,43 @@ class CodexRunner(AgentRunner):
             retry_kind="quota" if quota_signal is not None else None,
             retry_at=quota_signal.reset_at if quota_signal is not None else None,
         )
+
+
+async def _iter_jsonl_records(stream):
+    buffer = bytearray()
+    omitted_bytes = 0
+
+    while True:
+        chunk = await stream.read(CODEX_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+
+        start = 0
+        while start < len(chunk):
+            newline = chunk.find(b"\n", start)
+            end = newline if newline >= 0 else len(chunk)
+            piece = chunk[start:end]
+
+            if omitted_bytes:
+                omitted_bytes += len(piece)
+            else:
+                remaining = CODEX_EVENT_MAX_BYTES - len(buffer)
+                if len(piece) <= remaining:
+                    buffer.extend(piece)
+                else:
+                    buffer.extend(piece[:remaining])
+                    omitted_bytes = len(piece) - remaining
+
+            if newline >= 0:
+                yield bytes(buffer), omitted_bytes
+                buffer.clear()
+                omitted_bytes = 0
+                start = newline + 1
+            else:
+                break
+
+    if buffer or omitted_bytes:
+        yield bytes(buffer), omitted_bytes
 
 
 def extract_session_id(event: dict) -> str | None:
