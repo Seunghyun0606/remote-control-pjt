@@ -7,7 +7,11 @@ import platform
 from pathlib import Path
 
 from remote_control.executables import ExecutableResolutionError, resolve_executable
-from remote_control.process_control import subprocess_group_kwargs, terminate_process_tree
+from remote_control.process_control import (
+    ProcessSafetyError,
+    subprocess_group_kwargs,
+    terminate_process_tree,
+)
 from remote_control.recovery.quota import detect_quota_event, detect_quota_text
 from remote_control.runners.base import AgentRunResult, AgentRunner, RunEventCallback, RunHandle
 
@@ -250,9 +254,10 @@ class CodexRunner(AgentRunner):
                 timeout_seconds=10,
             )
             if not stopped:
-                raise RuntimeError(
+                raise ProcessSafetyError(
                     "Codex initialization failed and the spawned process tree "
-                    f"could not be terminated: pid={process.pid}"
+                    f"could not be terminated: pid={process.pid}",
+                    pid=process.pid,
                 ) from exc
             raise
 
@@ -354,8 +359,10 @@ class CodexRunner(AgentRunner):
                     timeout_seconds=10,
                 )
                 if not stopped:
-                    raise RuntimeError(
-                        f"failed to terminate Codex process tree after reader failure pid={process.pid}"
+                    raise ProcessSafetyError(
+                        "failed to terminate Codex process tree after reader failure "
+                        f"pid={process.pid}",
+                        pid=process.pid,
                     ) from exc
             if not stderr_task.done():
                 stderr_task.cancel()
