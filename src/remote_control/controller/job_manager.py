@@ -1601,6 +1601,9 @@ class JobManager:
                 }:
                     return None
 
+                fallback_allowed = _resume_failure_allows_fallback(
+                    result.final_message
+                )
                 await self.events.append(
                     "SESSION_RESUME_FAILED",
                     job_id=job_id,
@@ -1610,8 +1613,14 @@ class JobManager:
                         "external_session_id": requested_session_id,
                         "returncode": result.returncode,
                         "error": result.final_message,
+                        "fallback_allowed": fallback_allowed,
                     },
                 )
+                if not fallback_allowed:
+                    raise RuntimeError(
+                        "Codex session resume failed without safe fallback: "
+                        + (result.final_message or f"returncode={result.returncode}")
+                    )
             except ConnectionError as exc:
                 await self._enter_host_wait(
                     job_id,
@@ -1633,6 +1642,7 @@ class JobManager:
                 if quota is not None:
                     await self._enter_quota_wait(job_id, quota, resume_instruction=instruction)
                     return None
+                fallback_allowed = _resume_failure_allows_fallback(str(exc))
                 await self.events.append(
                     "SESSION_RESUME_FAILED",
                     job_id=job_id,
@@ -1641,8 +1651,14 @@ class JobManager:
                     payload={
                         "external_session_id": requested_session_id,
                         "error": str(exc),
+                        "fallback_allowed": fallback_allowed,
                     },
                 )
+                if not fallback_allowed:
+                    raise RuntimeError(
+                        "Codex session resume failed without safe fallback: "
+                        + str(exc)
+                    ) from exc
 
         current = await self.require(job_id)
         if JobState(current.state) != JobState.RUNNING:
@@ -2424,6 +2440,34 @@ def _small_event(event: dict) -> dict:
             clean_item["options"] = item_options[:8]
         allowed["item"] = clean_item
     return allowed
+
+
+def _resume_failure_allows_fallback(message: str | None) -> bool:
+    if not message:
+        return False
+    normalized = " ".join(message.lower().split())
+    if "session_identity_mismatch" in normalized:
+        return True
+    explicit_absence_markers = (
+        "no saved session",
+        "no session found",
+        "session not found",
+        "thread not found",
+        "no saved thread",
+        "rollout not found",
+        "no rollout found",
+        "could not find session",
+        "couldn't find session",
+        "failed to find session",
+        "could not find thread",
+        "failed to find thread",
+    )
+    if any(marker in normalized for marker in explicit_absence_markers):
+        return True
+    return (
+        ("session " in normalized or "thread " in normalized or "rollout " in normalized)
+        and " not found" in normalized
+    )
 
 
 def _optional_detail(message: str | None) -> str:
