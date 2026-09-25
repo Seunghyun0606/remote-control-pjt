@@ -148,6 +148,24 @@ async def test_remote_cancel_disconnect_is_not_treated_as_ack():
 
 
 @pytest.mark.asyncio
+async def test_cancel_after_disconnect_does_not_claim_process_stopped():
+    gateway = RunnerGateway()
+    websocket = FakeWebSocket()
+    await gateway.attach("desktop-main", websocket)
+
+    handle = await gateway.start_remote(
+        host_id="desktop-main",
+        project_id="demo",
+        instruction="continue",
+        working_directory=Path("C:/dev/demo"),
+    )
+    assert await gateway.detach("desktop-main", websocket) is True
+
+    with pytest.raises(ConnectionError, match="runner disconnected"):
+        await handle.cancel()
+
+
+@pytest.mark.asyncio
 async def test_stale_runner_detach_does_not_fail_new_connection_pending_jobs():
     gateway = RunnerGateway()
     old_websocket = FakeWebSocket()
