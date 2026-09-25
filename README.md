@@ -2,7 +2,7 @@
 
 Telegram/Slack에서 **현재 머신의 Codex**를 실행하고, 진행 상태·추가 지시·Human Gate·사용량 제한 복구·Project OS 연동까지 관리하는 Runtime Control Plane입니다.
 
-현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.10.1**입니다.
+현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.11.0**입니다.
 
 ## 전체 개요
 
@@ -82,7 +82,7 @@ Codex thread
 Job 1 → Job 2 → Job 3
 ```
 
-같은 사용자와 같은 Project에서 Job이 완료된 뒤 다음 일반 메시지나 `/run`으로 새 Job을 만들면, 기존 Project Session의 `external_session_id`를 새 Job에 연결하고 `codex exec resume <thread-id>`를 사용합니다. 실행 중인 Job이 있는 동안에는 같은 Project Session을 다른 Job이 병렬로 점유할 수 없습니다.
+같은 사용자와 같은 Project에서 Job이 완료된 뒤 다음 일반 메시지나 `/run`으로 새 Job을 만들면, 기존 Project Session의 `external_session_id`를 새 Job에 연결하고 `codex exec resume <thread-id>`를 사용합니다. Project Session은 사용자별 context를 관리하고, 실제 repository 동시 실행은 별도의 **working-tree execution lease**가 제어합니다. 따라서 Telegram/Slack/API 사용자 ID가 달라도 같은 Host의 같은 working directory에는 동시에 두 개의 write-capable Codex Job이 실행되지 않습니다.
 
 Project Topic에서 사용할 수 있는 명령:
 
@@ -1194,9 +1194,14 @@ Remote Runner가 필요한 경우에만:
 REMOTE_RUNNER_CONTROLLER_WS=wss://YOUR-CONTROLLER/ws/runner
 REMOTE_RUNNER_TOKEN=<controller token>
 REMOTE_RUNNER_HOST_ID=desktop-main
+# 선택: 기본 ~/.remote-control/<host-id>-executions.json
+REMOTE_RUNNER_STATE_PATH=
 ```
 
 을 설정하고:
+
+> Remote Control 0.11.0부터 Remote Runner는 **Protocol v2**를 사용합니다. Controller와 Runner를 반드시 같은 버전으로 함께 업데이트하세요. Runner는 실행 중/완료 execution을 durable journal에 기록하며, 재시작 시 이전 process 상태를 확인하기 전에는 새 실행을 받지 않습니다.
+
 
 ```powershell
 .\.venv\Scripts\remote-runner.exe start
@@ -1223,6 +1228,10 @@ REMOTE_RUNNER_HOST_ID=desktop-main
 - Web UI는 read-only
 - non-loopback Control API bind는 `CONTROLLER_API_TOKEN` 필수
 - Runner WebSocket secret과 Control API secret은 분리
+- 같은 Host + working directory는 DB-backed execution lease로 단일 writer 보장
+- Codex 종료 시 wrapper PID가 아니라 process tree 종료 확인
+- Runner execution 결과는 Controller의 durable `JOB_RESULT_ACK` 전까지 journal에 유지
+- Protocol v2로 구 Controller/Runner 혼용 차단
 
 ---
 
@@ -1252,6 +1261,7 @@ GET /jobs/{job_id}/project-work
 - [Cancellation and Runner Reconnect Safety](docs/CANCELLATION_AND_RECONNECT.md)
 - [Runtime Hardening — P0/P1 Closure](docs/RUNTIME_HARDENING_P0_P1.md)
 - [Runtime Hardening — P2](docs/RUNTIME_HARDENING_P2.md)
+- [Process Safety P0 Closure](docs/PROCESS_SAFETY_P0.md)
 - [Sessions and Feedback](docs/SESSIONS_AND_FEEDBACK.md)
 - [Human Gate](docs/HUMAN_GATE.md)
 - [Messaging](docs/MESSAGING.md)
@@ -1280,5 +1290,6 @@ Manual smoke test:
 - [x] Production hardening — quota signal/retry visibility + independent local-node guide
 - [x] Telegram Project Topics — command menu / topic scope / reply-to-job / multi-job selection
 - [x] Runtime hardening v0.9 — Windows npm Codex wrappers / doctor / FAILED retry / session history / stable runtime home / Windows CI
+- [x] Process safety v0.11 — Runner execution journal / process-tree containment / working-tree lease / durable result ACK / Protocol v2
 
-Package version: **0.9.0**
+Package version: **0.11.0**

@@ -11,6 +11,10 @@ from uuid import uuid4
 from remote_control.approvals.registry import ApprovalPrompt, ApprovalRegistry
 from remote_control.controller.states import JobState, TERMINAL_STATES, validate_transition
 from remote_control.event_payloads import sanitize_agent_event
+from remote_control.execution_leases import (
+    ExecutionLeaseBusyError,
+    ExecutionLeaseRegistry,
+)
 from remote_control.feedback import FeedbackPolicy, FeedbackThrottler
 from remote_control.hosts.registry import HostRegistry
 from remote_control.hosts.router import HostRouter, HostUnavailable
@@ -19,6 +23,11 @@ from remote_control.human_gate import (
     extract_human_gate,
     extract_human_gate_from_text,
     human_gate_protocol_instruction,
+)
+from remote_control.process_control import (
+    ProcessSafetyError,
+    canonical_working_directory,
+    terminate_persisted_codex_process,
 )
 from remote_control.projects.adapters import NoProjectWork, ProjectAdapterRegistry
 from remote_control.projects.registry import ProjectRegistry
@@ -91,6 +100,7 @@ class JobManager:
         recovery: RecoveryRepository | None = None,
         project_adapters: ProjectAdapterRegistry | None = None,
         project_work: ProjectWorkRepository | None = None,
+        execution_leases: ExecutionLeaseRegistry | None = None,
         progress_interval_seconds: int = 300,
         quota_retry_initial_seconds: int = 1800,
         quota_retry_max_seconds: int = 7200,
@@ -109,6 +119,7 @@ class JobManager:
         self.recovery = recovery
         self.project_adapters = project_adapters
         self.project_work = project_work
+        self.execution_leases = execution_leases
         self.host_router = HostRouter(hosts) if hosts is not None else None
         self.feedback_policy = FeedbackPolicy()
         self.feedback_throttler = FeedbackThrottler(progress_interval_seconds)
@@ -230,6 +241,20 @@ class JobManager:
             )
             return await self.require(job.id)
 
+        try:
+            await self._acquire_execution_lease(job.id, assigned_host)
+        except ExecutionLeaseBusyError as exc:
+            await self.jobs.update(job.id, error=str(exc))
+            await self._transition(job.id, JobState.FAILED)
+            await self.events.append(
+                "EXECUTION_LEASE_BLOCKED",
+                job_id=job.id,
+                project_id=job.project_id,
+                host_id=assigned_host,
+                payload={"error": str(exc)},
+            )
+            return await self.require(job.id)
+
         await self._transition(job.id, JobState.ASSIGNED, assigned_host=assigned_host)
         self._start_task(job.id, self._execute_new(job.id))
         return await self.require(job.id)
@@ -314,9 +339,23 @@ class JobManager:
                 ),
                 resume_instruction=(
                     RETRY_RESUME_INSTRUCTION
-                    if mode == RecoveryMode.RESUME
+                    if mode in {RecoveryMode.RESUME, RecoveryMode.ADOPT}
                     else None
                 ),
+            )
+            return await self.require(retry.id)
+
+        try:
+            await self._acquire_execution_lease(retry.id, assigned_host)
+        except ExecutionLeaseBusyError as exc:
+            await self.jobs.update(retry.id, error=str(exc))
+            await self._transition(retry.id, JobState.FAILED)
+            await self.events.append(
+                "EXECUTION_LEASE_BLOCKED",
+                job_id=retry.id,
+                project_id=retry.project_id,
+                host_id=assigned_host,
+                payload={"error": str(exc)},
             )
             return await self.require(retry.id)
 
@@ -418,6 +457,7 @@ class JobManager:
         handle = self._handles.get(job_id)
         if handle is not None:
             await handle.cancel()
+            await self.jobs.update(job_id, pid=None)
         return await self.require(job_id)
 
     async def resume(
@@ -429,6 +469,15 @@ class JobManager:
         job = await self.require(job_id)
         if JobState(job.state) != JobState.PAUSED:
             raise ValueError(f"job {job_id} is not PAUSED")
+        if (
+            job.pid is not None
+            and job.pid > 0
+            and (job.error or "").startswith("PROCESS_SAFETY_HOLD:")
+        ):
+            raise ValueError(
+                "job is in a process safety hold; restart the Controller "
+                "to reconcile the persisted Codex process before resuming"
+            )
 
         previous_task = self._tasks.get(job_id)
         if previous_task is not None and not previous_task.done():
@@ -480,6 +529,34 @@ class JobManager:
             if state in TERMINAL_STATES:
                 return job
 
+            if (
+                job.assigned_host == self.local_host_id
+                and job.pid is not None
+                and job.pid > 0
+                and (job.error or "").startswith("PROCESS_SAFETY_HOLD:")
+            ):
+                project = self.projects.get(job.project_id)
+                stopped = await terminate_persisted_codex_process(
+                    job.pid,
+                    working_directory=project.path_for(self.local_host_id),
+                    timeout_seconds=10,
+                )
+                if not stopped:
+                    raise RuntimeError(
+                        "cannot cancel process safety hold because Codex process "
+                        f"termination is still unconfirmed: job={job.id} pid={job.pid}"
+                    )
+                await self.jobs.update(
+                    job_id,
+                    pid=None,
+                    error=(
+                        "PROCESS_SAFETY_RECONCILED: persisted Codex process tree "
+                        "was terminated before cancellation"
+                    ),
+                )
+                job = await self.require(job_id)
+                state = JobState(job.state)
+
             if state != JobState.CANCELLING:
                 await self._transition(job_id, JobState.CANCELLING)
                 if self.sessions is not None:
@@ -496,6 +573,7 @@ class JobManager:
                     await self._record_cancel_pending(job_id, handle, exc)
                     return await self.require(job_id)
                 await self._finalize_cancellation(job_id)
+                await self._ack_result_handle(job_id, handle)
                 return await self.require(job_id)
 
             task = self._tasks.get(job_id)
@@ -720,9 +798,11 @@ class JobManager:
         return candidates[0]
 
     async def reconcile_startup(self, *, now: datetime | None = None) -> int:
+        await self._terminate_stale_local_processes()
+        lease_repairs = await self._reconcile_execution_leases()
         stale_locks = await self._reconcile_stale_project_session_locks()
         if self.recovery is None:
-            return stale_locks
+            return stale_locks + lease_repairs
         current = now or datetime.now(timezone.utc)
 
         cancelling = await self.jobs.list_states({JobState.CANCELLING.value})
@@ -776,17 +856,20 @@ class JobManager:
                 JobState.RUNNING.value,
             }
         )
-        count = stale_locks
+        count = stale_locks + lease_repairs
         for job in recoverable:
             existing = await self.recovery.get(job.id)
             session_id = await self._external_session_id(job)
-            mode = RecoveryMode.RESUME if session_id else RecoveryMode.START
-            execution_id = existing.execution_id if existing is not None else None
-            delay = (
-                self.restart_grace_seconds
-                if job.assigned_host and job.assigned_host != self.local_host_id
-                else 0
+            remote_uncertain = bool(
+                job.assigned_host
+                and job.assigned_host != self.local_host_id
             )
+            mode = (
+                RecoveryMode.ADOPT
+                if remote_uncertain
+                else (RecoveryMode.RESUME if session_id else RecoveryMode.START)
+            )
+            execution_id = existing.execution_id if existing is not None else None
             if self.sessions is not None:
                 await self.sessions.mark(job.id, SessionStatus.WAITING_HOST)
             await self._transition(job.id, JobState.WAITING_HOST)
@@ -795,9 +878,13 @@ class JobManager:
                 kind=RecoveryKind.RESTART.value,
                 mode=mode.value,
                 attempt_count=existing.attempt_count if existing else 0,
-                next_retry_at=current + timedelta(seconds=delay),
+                next_retry_at=None if mode == RecoveryMode.ADOPT else current,
                 execution_id=execution_id,
-                resume_instruction=RESTART_RESUME_INSTRUCTION if mode == RecoveryMode.RESUME else None,
+                resume_instruction=(
+                    RESTART_RESUME_INSTRUCTION
+                    if mode in {RecoveryMode.RESUME, RecoveryMode.ADOPT}
+                    else None
+                ),
                 last_error="controller restarted while job was active",
             )
             await self.events.append(
@@ -881,31 +968,42 @@ class JobManager:
         for job in preexisting_waiting_host:
             existing = await self.recovery.get(job.id)
             if existing is None:
+                remote_uncertain = bool(
+                    job.assigned_host
+                    and job.assigned_host != self.local_host_id
+                )
+                session_id = await self._external_session_id(job)
+                recovered_mode = (
+                    RecoveryMode.ADOPT
+                    if remote_uncertain
+                    else (RecoveryMode.RESUME if session_id else RecoveryMode.START)
+                )
                 await self.recovery.upsert(
                     job.id,
                     kind=RecoveryKind.HOST.value,
-                    mode=(
-                        RecoveryMode.RESUME.value
-                        if await self._external_session_id(job)
-                        else RecoveryMode.START.value
-                    ),
+                    mode=recovered_mode.value,
                     attempt_count=0,
-                    next_retry_at=current,
+                    next_retry_at=(
+                        None if recovered_mode == RecoveryMode.ADOPT else current
+                    ),
                     execution_id=None,
                     resume_instruction=(
                         RESTART_RESUME_INSTRUCTION
-                        if await self._external_session_id(job)
+                        if recovered_mode in {RecoveryMode.RESUME, RecoveryMode.ADOPT}
                         else None
                     ),
                     last_error="recovered WAITING_HOST without recovery metadata",
                 )
             else:
+                existing_mode = RecoveryMode(existing.mode)
                 await self.recovery.upsert(
                     job.id,
                     kind=existing.kind,
                     mode=existing.mode,
                     attempt_count=existing.attempt_count,
-                    next_retry_at=current,
+                    next_retry_at=(
+                        None if existing_mode == RecoveryMode.ADOPT else current
+                    ),
                     execution_id=existing.execution_id,
                     resume_instruction=existing.resume_instruction,
                     last_error=existing.last_error,
@@ -933,6 +1031,7 @@ class JobManager:
         running_jobs: list[dict],
         completed_jobs: list[dict],
         gateway: RunnerGateway,
+        snapshot_complete: bool = True,
     ) -> int:
         if self.recovery is None:
             return 0
@@ -941,7 +1040,7 @@ class JobManager:
             for item in [*running_jobs, *completed_jobs]
             if isinstance(item, dict) and item.get("execution_id")
         }
-        if not reported:
+        if not reported and not snapshot_complete:
             return 0
 
         waiting = await self.jobs.list_states({JobState.WAITING_HOST.value})
@@ -950,9 +1049,43 @@ class JobManager:
             if job.assigned_host != host_id:
                 continue
             record = await self.recovery.get(job.id)
-            if record is None or not record.execution_id:
+            if record is None:
                 continue
-            report = reported.get(record.execution_id)
+            matched_execution = self._match_reported_execution(
+                job,
+                host_id=host_id,
+                reported=reported,
+            )
+            execution_id = (
+                matched_execution
+                if record.mode == RecoveryMode.ADOPT.value and matched_execution
+                else (
+                    record.execution_id
+                    if record.execution_id in reported
+                    else matched_execution
+                )
+            )
+            if execution_id is None:
+                continue
+            if record.execution_id != execution_id:
+                await self.recovery.upsert(
+                    job.id,
+                    kind=record.kind,
+                    mode=record.mode,
+                    attempt_count=record.attempt_count,
+                    next_retry_at=record.next_retry_at,
+                    execution_id=execution_id,
+                    resume_instruction=record.resume_instruction,
+                    last_error=record.last_error,
+                )
+                await self.events.append(
+                    "RUNNER_EXECUTION_REBOUND",
+                    job_id=job.id,
+                    project_id=job.project_id,
+                    host_id=host_id,
+                    payload={"execution_id": execution_id},
+                )
+            report = reported.get(execution_id)
             if report is None:
                 continue
             session_id = (
@@ -962,12 +1095,13 @@ class JobManager:
             )
             handle = gateway.adopt_remote(
                 host_id=host_id,
-                execution_id=record.execution_id,
+                execution_id=execution_id,
                 session_id=session_id,
                 on_event=self._event_callback(job.id),
             )
             await self._transition(job.id, JobState.ASSIGNED, assigned_host=host_id)
             await self._transition(job.id, JobState.STARTING)
+            self._handles[job.id] = handle
             await self._set_handle(job.id, handle)
             await self._transition(job.id, JobState.RUNNING)
             if self.sessions is not None:
@@ -979,24 +1113,93 @@ class JobManager:
                 project_id=job.project_id,
                 host_id=host_id,
                 payload={
-                    "execution_id": record.execution_id,
+                    "execution_id": execution_id,
                     "session_id": session_id,
                 },
             )
             adopted += 1
+
+        if snapshot_complete:
+            for job in waiting:
+                current_job = await self.require(job.id)
+                if JobState(current_job.state) != JobState.WAITING_HOST:
+                    continue
+                record = await self.recovery.get(job.id)
+                if record is None or record.mode != RecoveryMode.ADOPT.value:
+                    continue
+
+                known_execution = self._match_reported_execution(
+                    job,
+                    host_id=host_id,
+                    reported=reported,
+                ) or (
+                    record.execution_id
+                    if record.execution_id in reported
+                    else None
+                )
+                if known_execution is not None:
+                    continue
+
+                session_id = await self._external_session_id(job)
+                safe_mode = (
+                    RecoveryMode.RESUME
+                    if session_id
+                    else RecoveryMode.START
+                )
+                await self.recovery.upsert(
+                    job.id,
+                    kind=record.kind,
+                    mode=safe_mode.value,
+                    attempt_count=record.attempt_count,
+                    next_retry_at=datetime.now(timezone.utc),
+                    execution_id=None,
+                    resume_instruction=(
+                        RESTART_RESUME_INSTRUCTION
+                        if safe_mode == RecoveryMode.RESUME
+                        else None
+                    ),
+                    last_error=(
+                        "Runner Protocol v2 full snapshot confirmed that the "
+                        "previous execution is absent"
+                    ),
+                )
+                await self.events.append(
+                    "RUNNER_EXECUTION_ABSENT_CONFIRMED",
+                    job_id=job.id,
+                    project_id=job.project_id,
+                    host_id=host_id,
+                    payload={"next_mode": safe_mode.value},
+                )
 
         cancelling = await self.jobs.list_states({JobState.CANCELLING.value})
         for job in cancelling:
             if job.assigned_host != host_id:
                 continue
             record = await self.recovery.get(job.id)
-            if (
-                record is None
-                or record.mode != RecoveryMode.CANCEL.value
-                or not record.execution_id
-            ):
+            if record is None or record.mode != RecoveryMode.CANCEL.value:
                 continue
-            report = reported.get(record.execution_id)
+            matched_execution = self._match_reported_execution(
+                job,
+                host_id=host_id,
+                reported=reported,
+            )
+            execution_id = matched_execution or (
+                record.execution_id if record.execution_id in reported else None
+            )
+            if execution_id is None:
+                continue
+            if record.execution_id != execution_id:
+                await self.recovery.upsert(
+                    job.id,
+                    kind=record.kind,
+                    mode=record.mode,
+                    attempt_count=record.attempt_count,
+                    next_retry_at=record.next_retry_at,
+                    execution_id=execution_id,
+                    resume_instruction=record.resume_instruction,
+                    last_error=record.last_error,
+                )
+            report = reported.get(execution_id)
             if report is None:
                 continue
             session_id = (
@@ -1006,10 +1209,11 @@ class JobManager:
             )
             handle = gateway.adopt_remote(
                 host_id=host_id,
-                execution_id=record.execution_id,
+                execution_id=execution_id,
                 session_id=session_id,
                 on_event=self._event_callback(job.id),
             )
+            self._handles[job.id] = handle
             await self._set_handle(job.id, handle)
             self._start_task(job.id, self._execute_cancel_adopted(job.id, handle))
             await self.events.append(
@@ -1018,12 +1222,128 @@ class JobManager:
                 project_id=job.project_id,
                 host_id=host_id,
                 payload={
-                    "execution_id": record.execution_id,
+                    "execution_id": execution_id,
                     "session_id": session_id,
                 },
             )
             adopted += 1
         return adopted
+
+    def _match_reported_execution(
+        self,
+        job: JobRecord,
+        *,
+        host_id: str,
+        reported: dict[str, dict],
+    ) -> str | None:
+        project = self.projects.get(job.project_id)
+        target = canonical_working_directory(project.path_for(host_id))
+        matches: list[tuple[str, str]] = []
+        for execution_id, report in reported.items():
+            working_directory = report.get("working_directory")
+            if not isinstance(working_directory, str):
+                continue
+            if canonical_working_directory(working_directory) != target:
+                continue
+            started_at = report.get("started_at")
+            matches.append(
+                (
+                    str(started_at) if isinstance(started_at, str) else "",
+                    execution_id,
+                )
+            )
+        if not matches:
+            return None
+        matches.sort()
+        if len(matches) > 1 and matches[-1][0] == matches[-2][0]:
+            return None
+        return matches[-1][1]
+
+    async def _terminate_stale_local_processes(self) -> None:
+        active_states = {state.value for state in JobState if state not in TERMINAL_STATES}
+        for job in await self.jobs.list_states(active_states):
+            if job.assigned_host != self.local_host_id:
+                continue
+            state = JobState(job.state)
+            if job.pid is None or job.pid <= 0:
+                if state in {
+                    JobState.STARTING,
+                    JobState.RUNNING,
+                    JobState.CANCELLING,
+                }:
+                    raise RuntimeError(
+                        "refusing Controller startup because local execution state "
+                        "is active but its PID was not durably recorded: "
+                        f"job={job.id} state={state.value}"
+                    )
+                continue
+            project = self.projects.get(job.project_id)
+            stopped = await terminate_persisted_codex_process(
+                job.pid,
+                working_directory=project.path_for(self.local_host_id),
+                timeout_seconds=10,
+            )
+            if not stopped:
+                raise RuntimeError(
+                    "refusing Controller startup because a previous local Codex "
+                    f"process tree could not be terminated: job={job.id} pid={job.pid}"
+                )
+            changes: dict[str, object] = {"pid": None}
+            if (job.error or "").startswith("PROCESS_SAFETY_HOLD:"):
+                changes["error"] = (
+                    "PROCESS_SAFETY_RECONCILED: previous Codex process tree "
+                    "was terminated during Controller startup"
+                )
+            await self.jobs.update(job.id, **changes)
+            await self.events.append(
+                "LOCAL_ORPHAN_TERMINATED_ON_STARTUP",
+                job_id=job.id,
+                project_id=job.project_id,
+                host_id=job.assigned_host,
+                payload={"pid": job.pid},
+            )
+
+    async def _reconcile_execution_leases(self) -> int:
+        if self.execution_leases is None:
+            return 0
+        repaired = 0
+        for lease in await self.execution_leases.list():
+            job = await self.jobs.get(lease.job_id)
+            if job is None or JobState(job.state) in TERMINAL_STATES:
+                await self.execution_leases.release_for_job(lease.job_id)
+                repaired += 1
+
+        active_states = {state.value for state in JobState if state not in TERMINAL_STATES}
+        for job in await self.jobs.list_states(active_states):
+            if not job.assigned_host:
+                continue
+            try:
+                await self._acquire_execution_lease(job.id, job.assigned_host)
+            except ExecutionLeaseBusyError as exc:
+                raise RuntimeError(
+                    "conflicting active Jobs target the same working tree; "
+                    f"refusing startup: job={job.id}: {exc}"
+                ) from exc
+        return repaired
+
+    async def _acquire_execution_lease(
+        self,
+        job_id: str,
+        host_id: str,
+    ) -> None:
+        if self.execution_leases is None:
+            return
+        job = await self.require(job_id)
+        project = self.projects.get(job.project_id)
+        working_directory: str | Path = project.path_for(host_id)
+        if host_id == self.local_host_id:
+            working_directory = Path(working_directory).expanduser().resolve()
+        await self.execution_leases.acquire(
+            job_id=job.id,
+            project_id=job.project_id,
+            host_id=host_id,
+            working_directory=working_directory,
+        )
 
     async def _reconcile_stale_project_session_locks(self) -> int:
         if self.project_sessions is None:
@@ -1049,6 +1369,67 @@ class JobManager:
             if updated is not None and updated.locked_by_job_id is None:
                 released += 1
         return released
+
+    async def shutdown(self) -> None:
+        handles = list(self._handles.items())
+        for job_id, handle in handles:
+            job = await self.require(job_id)
+            state = JobState(job.state)
+            if state in TERMINAL_STATES:
+                continue
+
+            if state == JobState.CANCELLING:
+                if job.assigned_host == self.local_host_id:
+                    await handle.cancel()
+                    await self.jobs.update(job_id, pid=None)
+                    await self._finalize_cancellation(job_id)
+                else:
+                    await self._persist_cancel_intent(job_id, handle)
+                continue
+
+            if job.assigned_host == self.local_host_id:
+                mode = (
+                    RecoveryMode.RESUME
+                    if await self._external_session_id(job)
+                    else RecoveryMode.START
+                )
+                await self._enter_host_wait(
+                    job_id,
+                    mode=mode,
+                    error="controller shutdown stopped local Codex execution",
+                    assigned_host=job.assigned_host,
+                    resume_instruction=(
+                        RESTART_RESUME_INSTRUCTION
+                        if mode == RecoveryMode.RESUME
+                        else None
+                    ),
+                )
+                await handle.cancel()
+                await self.jobs.update(job_id, pid=None)
+                await self.events.append(
+                    "LOCAL_EXECUTION_STOPPED_FOR_SHUTDOWN",
+                    job_id=job_id,
+                    project_id=job.project_id,
+                    host_id=job.assigned_host,
+                )
+            else:
+                await self._enter_host_wait(
+                    job_id,
+                    mode=RecoveryMode.ADOPT,
+                    error="controller shutdown while remote execution remained active",
+                    assigned_host=job.assigned_host,
+                    resume_instruction=RESTART_RESUME_INSTRUCTION,
+                )
+
+        tasks = [
+            task
+            for task in self._tasks.values()
+            if not task.done() and task is not asyncio.current_task()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def expire_approvals(self, *, now: datetime | None = None) -> int:
         if self.approvals is None:
@@ -1126,6 +1507,10 @@ class JobManager:
         return True
 
     async def _retry_host(self, job: JobRecord, record: RecoveryRecord) -> bool:
+        mode = RecoveryMode(record.mode)
+        if mode == RecoveryMode.ADOPT:
+            return False
+
         work = await self.project_work_for(job.id)
         requested_host = (
             work.host_id
@@ -1141,8 +1526,12 @@ class JobManager:
         except HostUnavailable:
             return False
 
+        try:
+            await self._acquire_execution_lease(job.id, host_id)
+        except ExecutionLeaseBusyError:
+            return False
+
         await self._transition(job.id, JobState.ASSIGNED, assigned_host=host_id)
-        mode = RecoveryMode(record.mode)
         if mode == RecoveryMode.START:
             await self.recovery.upsert(
                 job.id,
@@ -1283,6 +1672,7 @@ class JobManager:
                 return
 
             handle = await self._start_new_turn(job, instruction)
+            self._handles[job_id] = handle
             await self._set_handle(job_id, handle)
             current = await self.require(job_id)
             if JobState(current.state) != JobState.STARTING:
@@ -1295,6 +1685,8 @@ class JobManager:
             await self._finish_or_continue(job_id, result)
         except asyncio.CancelledError:
             await self._handle_cancelled_task(job_id)
+        except ProcessSafetyError as exc:
+            await self._hold_process_safety(job_id, exc)
         except Exception as exc:
             await self._fail(job_id, exc)
         finally:
@@ -1315,6 +1707,8 @@ class JobManager:
             await self._finish_or_continue(job_id, result)
         except asyncio.CancelledError:
             await self._handle_cancelled_task(job_id)
+        except ProcessSafetyError as exc:
+            await self._hold_process_safety(job_id, exc)
         except Exception as exc:
             await self._fail(job_id, exc)
         finally:
@@ -1328,6 +1722,8 @@ class JobManager:
             await self._finish_or_continue(job_id, result)
         except asyncio.CancelledError:
             await self._handle_cancelled_task(job_id)
+        except ProcessSafetyError as exc:
+            await self._hold_process_safety(job_id, exc)
         except Exception as exc:
             await self._fail(job_id, exc)
         finally:
@@ -1340,6 +1736,8 @@ class JobManager:
                 await self._finish_or_continue(job_id, result)
         except asyncio.CancelledError:
             await self._handle_cancelled_task(job_id)
+        except ProcessSafetyError as exc:
+            await self._hold_process_safety(job_id, exc)
         except Exception as exc:
             await self._fail(job_id, exc)
         finally:
@@ -1353,6 +1751,7 @@ class JobManager:
         try:
             await handle.cancel()
             await self._finalize_cancellation(job_id)
+            await self._ack_result_handle(job_id, handle)
         except (ConnectionError, TimeoutError) as exc:
             await self._record_cancel_pending(job_id, handle, exc)
         except asyncio.CancelledError:
@@ -1446,12 +1845,15 @@ class JobManager:
     ) -> None:
         current_result = result
         while True:
+            result_handle = self._handles.get(job_id)
             current = await self.require(job_id)
             if JobState(current.state) in {
                 JobState.WAITING_HUMAN,
                 JobState.WAITING_HOST,
                 JobState.WAITING_QUOTA,
             }:
+                if JobState(current.state) != JobState.WAITING_HOST:
+                    await self._ack_result_handle(job_id, result_handle)
                 return
 
             if current_result.returncode != 0:
@@ -1462,6 +1864,7 @@ class JobManager:
                 )
                 if quota is not None:
                     await self._enter_quota_wait(job_id, quota)
+                    await self._ack_result_handle(job_id, result_handle)
                     return
                 if current_result.retry_kind == "host":
                     await self._enter_host_wait(
@@ -1479,6 +1882,7 @@ class JobManager:
                 await self._transition(job_id, JobState.FAILED)
                 if self.recovery is not None:
                     await self.recovery.delete(job_id)
+                await self._ack_result_handle(job_id, result_handle)
                 await self._notify(
                     job_id,
                     "❌ Agent 실행이 실패했습니다."
@@ -1535,6 +1939,7 @@ class JobManager:
                     )
 
             if finalize_project_os:
+                await self._ack_result_handle(job_id, result_handle)
                 await self._finalize_project_adapter(
                     job_id,
                     current_result.final_message,
@@ -1542,6 +1947,7 @@ class JobManager:
                 return
 
             if completed:
+                await self._ack_result_handle(job_id, result_handle)
                 await self._notify(
                     job_id,
                     "✅ 작업이 완료되었습니다."
@@ -1550,6 +1956,7 @@ class JobManager:
                 return
 
             assert steering is not None
+            await self._ack_result_handle(job_id, result_handle)
             await self._notify(job_id, "↪ 추가 지시를 기존 Codex session에 전달합니다.")
             next_result = await self._resume_or_fallback(
                 job_id,
@@ -1592,6 +1999,7 @@ class JobManager:
                     host_id=job.assigned_host,
                     on_event=self._event_callback(job_id),
                 )
+                self._handles[job_id] = handle
                 await self._set_handle(job_id, handle)
                 current = await self.require(job_id)
                 if JobState(current.state) != JobState.RUNNING:
@@ -1648,6 +2056,8 @@ class JobManager:
                         "Codex session resume failed without safe fallback: "
                         + (result.final_message or f"returncode={result.returncode}")
                     )
+            except ProcessSafetyError:
+                raise
             except ConnectionError as exc:
                 await self._enter_host_wait(
                     job_id,
@@ -1703,6 +2113,8 @@ class JobManager:
             host_id=job.assigned_host,
             payload={"had_session": bool(requested_session_id)},
         )
+        previous_handle = self._handles.get(job_id)
+        await self._ack_result_handle(job_id, previous_handle)
         try:
             handle = await self._start_new_turn(job, fallback_instruction)
         except ConnectionError as exc:
@@ -1714,6 +2126,7 @@ class JobManager:
                 resume_instruction=instruction,
             )
             return None
+        self._handles[job_id] = handle
         await self._set_handle(job_id, handle)
         current = await self.require(job_id)
         if JobState(current.state) != JobState.RUNNING:
@@ -1772,6 +2185,9 @@ class JobManager:
             }:
                 return None
             raise
+        except ProcessSafetyError as exc:
+            await self._hold_process_safety(job_id, exc)
+            return None
         except ConnectionError as exc:
             current = await self.require(job_id)
             if JobState(current.state) == JobState.CANCELLING:
@@ -1789,13 +2205,17 @@ class JobManager:
         current = await self.require(job_id)
         current_state = JobState(current.state)
         if current_state == JobState.CANCELLING:
-            if result.retry_kind != "host":
+            if result.retry_kind not in {"host", "cancel_unconfirmed"}:
                 await self._finalize_cancellation(job_id, result=result)
+                await self._ack_result_handle(job_id, handle)
             else:
                 await self._record_cancel_pending(
                     job_id,
                     handle,
-                    ConnectionError(result.final_message or "runner disconnected"),
+                    ConnectionError(
+                        result.final_message
+                        or "runner could not confirm execution termination"
+                    ),
                 )
             return None
         if current_state in {
@@ -1806,6 +2226,8 @@ class JobManager:
             JobState.WAITING_HOST,
             JobState.WAITING_QUOTA,
         }:
+            if current_state != JobState.WAITING_HOST:
+                await self._ack_result_handle(job_id, handle)
             return None
 
         identity_mismatch = bool(
@@ -1835,6 +2257,7 @@ class JobManager:
         )
         if quota is not None:
             await self._enter_quota_wait(job_id, quota)
+            await self._ack_result_handle(job_id, handle)
             return None
         if result.retry_kind == "host":
             await self._enter_host_wait(
@@ -1853,6 +2276,7 @@ class JobManager:
             and (gate := extract_human_gate_from_text(result.final_message)) is not None
         ):
             await self._enter_human_gate(job_id, gate)
+            await self._ack_result_handle(job_id, handle)
             return None
 
         return result
@@ -2075,6 +2499,7 @@ class JobManager:
             handle = self._handles.get(job_id)
             if handle is not None:
                 await handle.cancel()
+                await self.jobs.update(job_id, pid=None)
                 return
             await asyncio.sleep(0)
 
@@ -2126,6 +2551,30 @@ class JobManager:
             f"{index}. {message}" for index, message in enumerate(messages, start=1)
         )
         return f"Apply these user steering instructions together:\n{joined}"
+
+    async def _ack_result_handle(
+        self,
+        job_id: str,
+        handle: RunHandle | None,
+    ) -> None:
+        if handle is None:
+            return
+        try:
+            await handle.acknowledge_result()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            job = await self.require(job_id)
+            await self.events.append(
+                "RESULT_ACK_PENDING",
+                job_id=job_id,
+                project_id=job.project_id,
+                host_id=job.assigned_host,
+                payload={
+                    "execution_id": getattr(handle, "execution_id", None),
+                    "error": str(exc),
+                },
+            )
 
     async def _persist_cancel_intent(
         self,
@@ -2215,6 +2664,42 @@ class JobManager:
                 },
             )
 
+    async def _hold_process_safety(
+        self,
+        job_id: str,
+        exc: ProcessSafetyError,
+    ) -> None:
+        job = await self.require(job_id)
+        state = JobState(job.state)
+        if state in TERMINAL_STATES:
+            raise RuntimeError(
+                "process safety hold reached a terminal Job unexpectedly: "
+                f"job={job_id} state={state.value}"
+            ) from exc
+
+        await self.jobs.update(
+            job_id,
+            pid=exc.pid,
+            error=f"PROCESS_SAFETY_HOLD: {exc}",
+        )
+        if state in {JobState.STARTING, JobState.RUNNING}:
+            await self._transition(job_id, JobState.PAUSED)
+        if self.sessions is not None:
+            await self.sessions.mark(job_id, SessionStatus.PAUSED)
+        await self.events.append(
+            "PROCESS_SAFETY_HOLD",
+            job_id=job_id,
+            project_id=job.project_id,
+            host_id=job.assigned_host,
+            payload={"pid": exc.pid, "error": str(exc)},
+        )
+        await self._notify(
+            job_id,
+            "⛔ Codex process 종료 여부를 확인할 수 없어 안전 정지했습니다. "
+            "working-tree lock을 유지합니다. Controller를 재시작해 process를 "
+            "정리한 뒤 /resume 하세요.",
+        )
+
     async def _handle_cancelled_task(self, job_id: str) -> None:
         current = await self.require(job_id)
         state = JobState(current.state)
@@ -2225,12 +2710,48 @@ class JobManager:
             JobState.WAITING_HUMAN,
             JobState.WAITING_HOST,
             JobState.WAITING_QUOTA,
-        }:
+        } or state in TERMINAL_STATES:
             return
-        if state not in TERMINAL_STATES:
-            await self._transition(job_id, JobState.CANCELLED)
-            if self.recovery is not None:
-                await self.recovery.delete(job_id)
+
+        # Task cancellation is not proof that the OS process stopped. Keep the
+        # Job and its execution lease non-terminal until recovery can reconcile
+        # local process state or a remote Runner snapshot.
+        if self.recovery is not None:
+            mode = (
+                RecoveryMode.ADOPT
+                if (
+                    current.assigned_host
+                    and current.assigned_host != self.local_host_id
+                )
+                else (
+                    RecoveryMode.RESUME
+                    if await self._external_session_id(current)
+                    else RecoveryMode.START
+                )
+            )
+            await self._enter_host_wait(
+                job_id,
+                mode=mode,
+                error="execution task was cancelled before process termination was proven",
+                assigned_host=current.assigned_host,
+                resume_instruction=(
+                    RESTART_RESUME_INSTRUCTION
+                    if mode == RecoveryMode.RESUME
+                    else None
+                ),
+            )
+            return
+
+        await self.jobs.update(
+            job_id,
+            error="execution task cancelled; process termination is unconfirmed",
+        )
+        await self.events.append(
+            "TASK_CANCEL_UNCONFIRMED",
+            job_id=job_id,
+            project_id=current.project_id,
+            host_id=current.assigned_host,
+        )
 
     async def _fail(self, job_id: str, exc: Exception) -> None:
         current = await self.require(job_id)
@@ -2262,6 +2783,7 @@ class JobManager:
         await self._transition(job_id, JobState.FAILED)
         if self.recovery is not None:
             await self.recovery.delete(job_id)
+        await self._ack_result_handle(job_id, self._handles.get(job_id))
         await self._notify(job_id, f"❌ 작업 실패: {exc}")
 
     async def _transition(
@@ -2281,12 +2803,15 @@ class JobManager:
             host_id=updated.assigned_host,
             payload={"from": current.value, "to": target.value},
         )
-        if target in TERMINAL_STATES and self.project_sessions is not None:
-            await self.project_sessions.release_for_job(
-                project_id=job.project_id,
-                owner_user_id=job.requested_by_user,
-                job_id=job.id,
-            )
+        if target in TERMINAL_STATES:
+            if self.project_sessions is not None:
+                await self.project_sessions.release_for_job(
+                    project_id=job.project_id,
+                    owner_user_id=job.requested_by_user,
+                    job_id=job.id,
+                )
+            if self.execution_leases is not None:
+                await self.execution_leases.release_for_job(job.id)
         return updated
 
     async def _notify(self, job_id: str, message: str) -> None:

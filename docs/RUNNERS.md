@@ -28,7 +28,7 @@ The event ledger records `SESSION_RESUME_FAILED.fallback_allowed` before any fal
 
 The Remote Runner is a long-lived supervisor. Heartbeat and receive loops are supervised as one connection generation: failure of either tears down that generation and reconnects. Unexpected protocol/handler exceptions are logged and reconnect rather than terminating `run_forever`.
 
-Background Job-finalizer task exceptions are also consumed and logged so they do not become unobserved asyncio task failures.
+Background Job-finalizer task exceptions are also consumed and logged so they do not become unobserved asyncio task failures. A process-safety exception is different: if the Runner cannot prove a spawned Codex process was terminated, it preserves the durable journal entry, closes the active connection and refuses automatic reconnect instead of reporting a terminal Job result.
 
 ## ProjectOperationExecutor
 
@@ -80,3 +80,16 @@ R5 Project Operations are short requests. A connection loss fails the request; J
 ## Credentials
 
 Codex credentials remain local to each execution Host. Project Operation payloads do not carry Codex auth.
+
+
+## Durable execution journal
+
+Remote Runner 0.11.0 persists execution lifecycle state in a host-scoped journal. The default is `~/.remote-control/<host-id>-executions.json`; override it with `REMOTE_RUNNER_STATE_PATH`.
+
+The journal records `STARTING → RUNNING → COMPLETED`. On restart, a previously RUNNING Codex process tree is verified against its expected `--cd` working directory and terminated before the Runner reconnects. COMPLETED results are retransmitted until the Controller sends `JOB_RESULT_ACK`.
+
+A STARTING record or an unverifiable live PID is fail-closed: the Runner refuses automatic reconnect because it cannot prove repository safety.
+
+Codex is launched in an isolated process group/session so cancellation and restart recovery terminate the process tree rather than only the immediate wrapper process.
+
+These rules require Runner Protocol v2. See [Process Safety P0 Closure](PROCESS_SAFETY_P0.md).

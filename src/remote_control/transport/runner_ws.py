@@ -37,15 +37,27 @@ class RemoteRunHandle(RunHandle):
     async def cancel(self) -> None:
         if self._result_future.done():
             result = self._result_future.result()
-            if result.retry_kind == "host":
+            if result.retry_kind in {"host", "cancel_unconfirmed"}:
                 raise ConnectionError(
-                    result.final_message or f"runner {self.host_id!r} disconnected"
+                    result.final_message
+                    or f"runner {self.host_id!r} could not confirm execution state"
                 )
             return
         await self.gateway.cancel_remote(
             host_id=self.host_id,
             execution_id=self.execution_id,
             session_id=self.session_id,
+        )
+
+    async def acknowledge_result(self) -> None:
+        if not self._result_future.done():
+            return
+        result = self._result_future.result()
+        if result.retry_kind in {"host", "cancel_unconfirmed"}:
+            return
+        await self.gateway.ack_remote_result(
+            host_id=self.host_id,
+            execution_id=self.execution_id,
         )
 
 
@@ -181,10 +193,22 @@ class RunnerGateway:
                 f"for execution {execution_id!r}"
             ) from exc
 
-        if result.retry_kind == "host":
+        if result.retry_kind in {"host", "cancel_unconfirmed"}:
             raise ConnectionError(
-                result.final_message or f"runner {host_id!r} disconnected during cancellation"
+                result.final_message
+                or f"runner {host_id!r} could not confirm cancellation"
             )
+
+    async def ack_remote_result(
+        self,
+        *,
+        host_id: str,
+        execution_id: str,
+    ) -> None:
+        await self.send(
+            host_id,
+            message("JOB_RESULT_ACK", execution_id=execution_id),
+        )
 
     async def start_remote(
         self,
@@ -337,6 +361,9 @@ class RunnerGateway:
         execution_id = str(payload.get("execution_id") or "")
         pending = self._pending.get(execution_id)
         if pending is None or pending.host_id != host_id:
+            # Do not ACK an unknown durable result. Without a pending/adopted
+            # execution the Controller cannot prove that the result is no longer
+            # needed for recovery.
             return
 
         if envelope.type == "JOB_ACCEPTED":

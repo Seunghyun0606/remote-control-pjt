@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from remote_control.process_control import ProcessSafetyError
 from remote_control.runners.codex import (
     CODEX_READ_CHUNK_BYTES,
     CodexRunner,
@@ -104,6 +105,7 @@ class _FakeProcess:
         self.stderr = _AsyncBytes()
         self.returncode = None
         self.terminated = False
+        self.pid = 12345
 
     def terminate(self):
         self.terminated = True
@@ -116,9 +118,19 @@ class _FakeProcess:
 
 
 @pytest.mark.asyncio
-async def test_resume_rejects_rebound_thread_identity():
+async def test_resume_rejects_rebound_thread_identity(monkeypatch):
     from remote_control.runners.codex import CodexRunner
 
+    async def terminate(pid, *, process, timeout_seconds):
+        assert pid == 12345
+        assert timeout_seconds == 10
+        process.terminate()
+        return True
+
+    monkeypatch.setattr(
+        "remote_control.runners.codex.terminate_process_tree",
+        terminate,
+    )
     runner = CodexRunner()
     process = _FakeProcess(
         [{"type": "thread.started", "thread_id": "thread-new"}]
@@ -168,6 +180,55 @@ class _SpawnedProcess:
 
     def kill(self):
         self.returncode = -9
+
+
+@pytest.mark.asyncio
+async def test_post_spawn_initialization_failure_fails_closed_when_cleanup_unproven(
+    monkeypatch,
+    tmp_path,
+):
+    process = _SpawnedProcess()
+    process.returncode = None
+
+    class _FailingStdin(_CaptureStdin):
+        async def drain(self):
+            raise RuntimeError("stdin drain failed")
+
+    process.stdin = _FailingStdin()
+
+    class _Resolution:
+        resolved = "codex"
+
+        def build_command(self, args):
+            return ["codex", *args]
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return process
+
+    async def cannot_terminate(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(
+        "remote_control.runners.codex.resolve_executable",
+        lambda executable: _Resolution(),
+    )
+    monkeypatch.setattr(
+        "remote_control.runners.codex.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    monkeypatch.setattr(
+        "remote_control.runners.codex.terminate_process_tree",
+        cannot_terminate,
+    )
+
+    with pytest.raises(ProcessSafetyError, match="could not be terminated") as exc:
+        await CodexRunner().start(
+            project_id="demo",
+            instruction="test",
+            working_directory=tmp_path,
+        )
+
+    assert exc.value.pid == 999
 
 
 @pytest.mark.asyncio
@@ -255,3 +316,32 @@ async def test_read_result_survives_oversized_jsonl_event(monkeypatch):
     assert events
     assert events[0]["type"] == "raw_output_truncated"
     assert events[0]["omitted_bytes"] > 0
+
+
+
+@pytest.mark.asyncio
+async def test_reader_callback_failure_terminates_codex_process_tree(monkeypatch):
+    process = _FakeProcess([{"type": "fake.progress", "message": "boom"}])
+    terminated = []
+
+    async def terminate(pid, *, process, timeout_seconds):
+        terminated.append((pid, timeout_seconds))
+        process.terminate()
+        return True
+
+    async def fail_callback(_event):
+        raise RuntimeError("event callback failed")
+
+    monkeypatch.setattr(
+        "remote_control.runners.codex.terminate_process_tree",
+        terminate,
+    )
+
+    with pytest.raises(RuntimeError, match="event callback failed"):
+        await CodexRunner()._read_result(
+            process,
+            on_event=fail_callback,
+        )
+
+    assert terminated == [(12345, 10)]
+    assert process.terminated is True

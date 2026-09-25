@@ -215,3 +215,14 @@ Remote Control preserves the original FAILED Job and creates a new Job. If the o
 Project OS Jobs are intentionally excluded from direct retry cloning. Use `/run` so the adapter can re-read canonical Project OS task state.
 
 `WAITING_HOST` and `WAITING_QUOTA` remain automatic recovery states. Their recovery `last_error` is included in `/status` and `/job` diagnostics.
+
+
+## Working-tree execution lease
+
+Recovery keeps a DB-backed execution lease for every non-terminal Job that has an assigned host. The lease key is derived from `host_id + canonical working directory`, not from messaging user identity.
+
+This means WAITING_HOST, WAITING_QUOTA, WAITING_HUMAN, PAUSED and CANCELLING Jobs continue to reserve their checkout. Another Telegram/Slack/API identity cannot start a concurrent writer on the same host/path.
+
+On startup stale leases for missing/terminal Jobs are removed and leases for non-terminal Jobs are reconstructed. If persisted active Jobs conflict on the same working tree, Controller startup fails instead of choosing one implicitly.
+
+For local jobs, startup also verifies and terminates a persisted Codex process tree before normal recovery. See [Process Safety P0 Closure](PROCESS_SAFETY_P0.md).

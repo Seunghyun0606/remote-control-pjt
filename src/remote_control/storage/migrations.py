@@ -6,10 +6,10 @@ from datetime import datetime, timezone
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from remote_control.storage.models import Base
+from remote_control.storage.models import Base, ExecutionLeaseRecord
 
 Migration = Callable[[AsyncConnection], Awaitable[None]]
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 
 async def _baseline_schema(connection: AsyncConnection) -> None:
@@ -32,8 +32,18 @@ async def _baseline_schema(connection: AsyncConnection) -> None:
     await connection.run_sync(create_and_validate)
 
 
+async def _execution_leases(connection: AsyncConnection) -> None:
+    await connection.run_sync(
+        lambda sync_connection: ExecutionLeaseRecord.__table__.create(
+            sync_connection,
+            checkfirst=True,
+        )
+    )
+
+
 MIGRATIONS: dict[int, Migration] = {
     1: _baseline_schema,
+    2: _execution_leases,
 }
 
 

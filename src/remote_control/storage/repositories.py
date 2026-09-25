@@ -7,12 +7,13 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from remote_control.storage.db import Database
 from remote_control.storage.models import (
     ApprovalRecord,
     EventRecord,
+    ExecutionLeaseRecord,
     HostRecord,
     JobRecord,
     ProjectSessionRecord,
@@ -192,6 +193,56 @@ class HostRepository:
             await session.commit()
             await session.refresh(record)
             return record
+
+
+class ExecutionLeaseRepository:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def add(self, record: ExecutionLeaseRecord) -> ExecutionLeaseRecord:
+        async with self.db.sessions() as session:
+            session.add(record)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                raise
+            await session.refresh(record)
+            return record
+
+    async def get(self, lease_key: str) -> ExecutionLeaseRecord | None:
+        async with self.db.sessions() as session:
+            return await session.get(ExecutionLeaseRecord, lease_key)
+
+    async def get_for_job(self, job_id: str) -> ExecutionLeaseRecord | None:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(ExecutionLeaseRecord)
+                .where(ExecutionLeaseRecord.job_id == job_id)
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
+
+    async def list(self) -> list[ExecutionLeaseRecord]:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(ExecutionLeaseRecord)
+                .order_by(ExecutionLeaseRecord.acquired_at)
+            )
+            return list(result.scalars())
+
+    async def delete_for_job(self, job_id: str) -> None:
+        async with self.db.sessions() as session:
+            record = await session.execute(
+                select(ExecutionLeaseRecord)
+                .where(ExecutionLeaseRecord.job_id == job_id)
+                .limit(1)
+            )
+            target = record.scalar_one_or_none()
+            if target is None:
+                return
+            await session.delete(target)
+            await session.commit()
 
 
 class ProjectSessionRepository:

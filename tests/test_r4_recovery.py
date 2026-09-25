@@ -492,7 +492,19 @@ async def test_heartbeat_expiry_persists_offline(database):
 
 
 @pytest.mark.asyncio
-async def test_controller_restart_recovers_local_session(project_registry, database):
+async def test_controller_restart_recovers_local_session(
+    monkeypatch,
+    project_registry,
+    database,
+):
+    async def terminate(pid, *, working_directory, timeout_seconds):
+        del pid, working_directory, timeout_seconds
+        return True
+
+    monkeypatch.setattr(
+        "remote_control.controller.job_manager.terminate_persisted_codex_process",
+        terminate,
+    )
     runner = FakeAgentRunner()
     manager, _, sessions, _, recovery = await build_runtime(
         database=database,
@@ -510,6 +522,7 @@ async def test_controller_restart_recovers_local_session(project_registry, datab
         instruction="unfinished work",
         state="RUNNING",
         external_session_id="thread-old",
+        pid=4242,
     )
     await manager.jobs.add(job)
     await sessions.record(

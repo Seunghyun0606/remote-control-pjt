@@ -100,6 +100,14 @@ The R6 `/ui` surface renders runtime state only. It does not expose run, steer, 
 
 `/dashboard` and the existing HTTP API still contain operational information. The Controller remains loopback-bound by default. If `CONTROLLER_API_TOKEN` is configured, `/ui` and `/dashboard` are protected by the same HTTP authentication boundary. For browser-facing remote access, prefer an authenticated reverse proxy/private network rather than exposing the Controller directly.
 
+## Process and working-tree boundary
+
+A Project Session controls conversational context; it is not the repository concurrency lock. Remote Control 0.11.0 uses a separate DB-backed execution lease keyed by execution host and canonical working directory, so different users or messaging channels cannot write the same checkout concurrently.
+
+Persisted PIDs are not trusted by number alone. Crash recovery verifies the process command contains the expected Codex working-directory argument before terminating the process tree. If identity cannot be proven, startup fails closed.
+
+Runner Protocol v2 prevents older peers from silently bypassing durable result acknowledgement and execution-journal safety.
+
 ## Telegram selection token boundary
 
 When a Telegram Project has multiple steerable Jobs, the temporary `jobselect` token is owned by the user who created it. Ownership is checked before the token is consumed.

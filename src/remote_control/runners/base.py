@@ -31,6 +31,10 @@ class RunHandle(ABC):
     async def cancel(self) -> None:
         raise NotImplementedError
 
+    async def acknowledge_result(self) -> None:
+        """Acknowledge a durably processed result when the transport requires it."""
+        return None
+
 
 class AgentRunner(ABC):
     @abstractmethod

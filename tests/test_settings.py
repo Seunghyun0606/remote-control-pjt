@@ -1,4 +1,4 @@
-from remote_control.settings import Settings
+from remote_control.settings import RunnerSettings, Settings
 
 
 def test_allowed_user_ids_parse_from_comma_string():
@@ -64,3 +64,19 @@ def test_telegram_selection_ttl_defaults_and_override():
         REMOTE_CONTROL_TELEGRAM_SELECTION_TTL_SECONDS=120,
     )
     assert overridden.telegram_selection_ttl_seconds == 120
+
+
+
+def test_runner_state_path_is_scoped_by_host(tmp_path):
+    settings = RunnerSettings(
+        _env_file=None,
+        REMOTE_RUNNER_HOST_ID="desktop-main",
+        REMOTE_RUNNER_STATE_PATH=str(tmp_path / "state.json"),
+    )
+    assert settings.resolved_state_path == (tmp_path / "state.json").resolve()
+
+    default = RunnerSettings(
+        _env_file=None,
+        REMOTE_RUNNER_HOST_ID="desktop-main",
+    )
+    assert default.resolved_state_path.name == "desktop-main-executions.json"

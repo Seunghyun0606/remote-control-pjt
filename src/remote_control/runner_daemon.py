@@ -4,13 +4,19 @@ import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
 from remote_control.event_payloads import sanitize_agent_event
 from remote_control.human_gate import extract_human_gate
+from remote_control.process_control import (
+    ProcessSafetyError,
+    terminate_persisted_codex_process,
+)
 from remote_control.projects.operations import LocalProjectOperationExecutor
+from remote_control.runner_journal import RunnerExecutionJournal
 from remote_control.runners.base import AgentRunResult, RunHandle
 from remote_control.runners.codex import CodexRunner, extract_session_id
 from remote_control.settings import RunnerSettings
@@ -19,9 +25,21 @@ from remote_control.transport.protocol import Envelope, message
 logger = logging.getLogger(__name__)
 
 
+class RunnerSafetyError(RuntimeError):
+    """A Runner invariant failed and automatic reconnect is unsafe."""
+
+
 class RunnerDaemon:
-    def __init__(self, settings: RunnerSettings) -> None:
+    def __init__(
+        self,
+        settings: RunnerSettings,
+        *,
+        journal: RunnerExecutionJournal | None = None,
+    ) -> None:
         self.settings = settings
+        self.boot_id = uuid4().hex
+        self.journal = journal or RunnerExecutionJournal(settings.resolved_state_path)
+        self._journal_recovered = False
         self.runner = CodexRunner(
             executable=settings.codex_executable,
             sandbox=settings.codex_sandbox,
@@ -35,21 +53,33 @@ class RunnerDaemon:
         )
         self.running: dict[str, RunHandle] = {}
         self.running_sessions: dict[str, str | None] = {}
+        self.running_working_directories: dict[str, str] = {}
         self.completed: dict[str, AgentRunResult] = {}
         self._send_lock = asyncio.Lock()
         self._websocket: ClientConnection | None = None
         self._background_tasks: set[asyncio.Task[None]] = set()
+        self._fatal_error: RunnerSafetyError | None = None
 
     async def run_forever(self) -> None:
+        await self._recover_persisted_executions()
         while True:
+            if self._fatal_error is not None:
+                raise self._fatal_error
             try:
                 await self._run_connection()
             except asyncio.CancelledError:
+                raise
+            except RunnerSafetyError:
+                logger.exception(
+                    "runner safety invariant failed; refusing automatic reconnect"
+                )
                 raise
             except (OSError, ConnectionClosed) as exc:
                 logger.warning("runner connection lost: %s", exc)
             except Exception:
                 logger.exception("runner connection loop failed; reconnecting")
+            if self._fatal_error is not None:
+                raise self._fatal_error
             await asyncio.sleep(self.settings.reconnect_seconds)
 
     async def _run_connection(self) -> None:
@@ -68,6 +98,7 @@ class RunnerDaemon:
                     name=self.settings.name,
                     os=self.settings.os_name,
                     capabilities=sorted(self.settings.capabilities),
+                    runner_boot_id=self.boot_id,
                 ),
             )
             await self._send(
@@ -125,22 +156,34 @@ class RunnerDaemon:
             )
 
     def _running_snapshot(self) -> list[dict]:
-        return [
-            {
-                "execution_id": execution_id,
-                "session_id": self.running_sessions.get(execution_id),
-            }
-            for execution_id in sorted(self.running)
-        ]
+        snapshot: list[dict] = []
+        for execution_id in sorted(self.running):
+            entry = self.journal.get(execution_id)
+            snapshot.append(
+                {
+                    "execution_id": execution_id,
+                    "session_id": self.running_sessions.get(execution_id),
+                    "working_directory": self.running_working_directories.get(execution_id),
+                    "started_at": entry.started_at if entry is not None else None,
+                }
+            )
+        return snapshot
 
     def _completed_snapshot(self) -> list[dict]:
-        return [
-            {
-                "execution_id": execution_id,
-                "session_id": result.session_id,
-            }
-            for execution_id, result in sorted(self.completed.items())
-        ]
+        snapshot: list[dict] = []
+        for execution_id, result in sorted(self.completed.items()):
+            entry = self.journal.get(execution_id)
+            snapshot.append(
+                {
+                    "execution_id": execution_id,
+                    "session_id": result.session_id,
+                    "working_directory": (
+                        entry.working_directory if entry is not None else None
+                    ),
+                    "started_at": entry.started_at if entry is not None else None,
+                }
+            )
+        return snapshot
 
     async def _handle(self, websocket: ClientConnection, envelope: Envelope) -> None:
         if envelope.type == "JOB_START":
@@ -152,6 +195,25 @@ class RunnerDaemon:
             handle = self.running.get(execution_id)
             if handle is not None:
                 await handle.cancel()
+            elif execution_id in self.completed:
+                await self._send(
+                    websocket,
+                    _result_message(execution_id, self.completed[execution_id]),
+                )
+            else:
+                await self._send(
+                    websocket,
+                    message(
+                        "JOB_ERROR",
+                        execution_id=execution_id,
+                        error="execution not found on runner; termination is unconfirmed",
+                        retry_kind="cancel_unconfirmed",
+                    ),
+                )
+        elif envelope.type == "JOB_RESULT_ACK":
+            execution_id = str(envelope.payload.get("execution_id") or "")
+            self.completed.pop(execution_id, None)
+            self.journal.remove(execution_id)
         elif envelope.type == "PROJECT_OPERATION_REQUEST":
             await self._project_operation(websocket, envelope)
 
@@ -238,6 +300,26 @@ class RunnerDaemon:
 
         seen_session: str | None = session_id or None
         self.running_sessions[execution_id] = seen_session
+        self.running_working_directories[execution_id] = working_directory_text
+        try:
+            self.journal.reserve(
+                execution_id=execution_id,
+                working_directory=working_directory_text,
+                boot_id=self.boot_id,
+                session_id=seen_session,
+            )
+        except Exception as exc:
+            self.running_sessions.pop(execution_id, None)
+            self.running_working_directories.pop(execution_id, None)
+            await self._send(
+                websocket,
+                message(
+                    "JOB_ERROR",
+                    execution_id=execution_id,
+                    error=f"failed to reserve runner execution journal: {exc}",
+                ),
+            )
+            return
 
         async def on_event(event: dict) -> None:
             nonlocal seen_session
@@ -245,6 +327,7 @@ class RunnerDaemon:
             if current_session and current_session != seen_session:
                 seen_session = current_session
                 self.running_sessions[execution_id] = current_session
+                self.journal.update_session(execution_id, current_session)
                 await self._send_current(
                     message(
                         "SESSION_STARTED",
@@ -280,11 +363,72 @@ class RunnerDaemon:
                     host_id=self.settings.host_id,
                     on_event=on_event,
                 )
+        except ProcessSafetyError as exc:
+            try:
+                self.journal.attach_pid(execution_id, exc.pid)
+            except Exception:
+                # Keep the STARTING reservation when PID persistence also fails.
+                # Startup will fail closed rather than guessing that no process exists.
+                pass
+            raise RunnerSafetyError(
+                "Codex start failed and process termination is unconfirmed: "
+                f"execution={execution_id} pid={exc.pid}"
+            ) from exc
         except Exception as exc:
             self.running_sessions.pop(execution_id, None)
+            self.running_working_directories.pop(execution_id, None)
+            self.journal.remove(execution_id)
             await self._send(
                 websocket,
                 message("JOB_ERROR", execution_id=execution_id, error=str(exc)),
+            )
+            return
+
+        if handle.pid is None:
+            await handle.cancel()
+            self.running_sessions.pop(execution_id, None)
+            self.running_working_directories.pop(execution_id, None)
+            self.journal.remove(execution_id)
+            await self._send(
+                websocket,
+                message(
+                    "JOB_ERROR",
+                    execution_id=execution_id,
+                    error="runner started Codex without a process id",
+                ),
+            )
+            return
+        try:
+            self.journal.attach_pid(execution_id, handle.pid)
+            if seen_session or handle.session_id:
+                self.journal.update_session(
+                    execution_id,
+                    seen_session or handle.session_id or "",
+                )
+        except Exception as exc:
+            try:
+                await handle.cancel()
+            except Exception as cancel_exc:
+                raise RunnerSafetyError(
+                    "runner could not terminate Codex after PID persistence "
+                    f"failure: execution={execution_id}: {cancel_exc}"
+                ) from exc
+            self.running_sessions.pop(execution_id, None)
+            self.running_working_directories.pop(execution_id, None)
+            try:
+                self.journal.remove(execution_id)
+            except Exception as cleanup_exc:
+                raise RunnerSafetyError(
+                    "runner execution journal could not be made safe after "
+                    f"PID persistence failure: {cleanup_exc}"
+                ) from exc
+            await self._send(
+                websocket,
+                message(
+                    "JOB_ERROR",
+                    execution_id=execution_id,
+                    error=f"failed to persist runner execution PID: {exc}",
+                ),
             )
             return
 
@@ -324,6 +468,14 @@ class RunnerDaemon:
                     done_task.get_name(),
                     exc_info=(type(exc), exc, exc.__traceback__),
                 )
+                if isinstance(exc, RunnerSafetyError):
+                    self._fatal_error = exc
+                    websocket = self._websocket
+                    if websocket is not None:
+                        asyncio.create_task(
+                            websocket.close(code=1011),
+                            name="runner-safety-close",
+                        )
 
         task.add_done_callback(cleanup)
         return task
@@ -341,6 +493,11 @@ class RunnerDaemon:
                 session_id=self.running_sessions.get(execution_id) or handle.session_id,
                 final_message="cancelled",
             )
+        except ProcessSafetyError as exc:
+            raise RunnerSafetyError(
+                "Codex process termination is unconfirmed; keeping durable "
+                f"execution state: execution={execution_id} pid={exc.pid}"
+            ) from exc
         except Exception as exc:
             result = AgentRunResult(
                 returncode=1,
@@ -352,6 +509,8 @@ class RunnerDaemon:
             result.session_id = self.running_sessions.get(execution_id)
         self.running.pop(execution_id, None)
         self.running_sessions.pop(execution_id, None)
+        self.running_working_directories.pop(execution_id, None)
+        self.journal.complete(execution_id, result)
         self.completed[execution_id] = result
         await self._flush_completed()
 
@@ -365,7 +524,45 @@ class RunnerDaemon:
             except (OSError, ConnectionClosed):
                 return
             else:
-                self.completed.pop(execution_id, None)
+                # Keep the completed result until the Controller sends JOB_RESULT_ACK.
+                # This makes completion delivery durable across Runner reconnect/restart.
+                continue
+
+    async def _recover_persisted_executions(self) -> None:
+        if self._journal_recovered:
+            return
+        for entry in self.journal.list():
+            if entry.state == "STARTING":
+                raise RuntimeError(
+                    "refusing to start Runner because a previous execution may "
+                    "have spawned before its PID was durably recorded: "
+                    f"execution={entry.execution_id}"
+                )
+            if entry.state == "COMPLETED":
+                self.completed[entry.execution_id] = entry.to_result()
+                continue
+
+            stopped = await terminate_persisted_codex_process(
+                entry.pid,
+                working_directory=entry.working_directory,
+                timeout_seconds=10,
+            )
+            if not stopped:
+                raise RuntimeError(
+                    "refusing to start Runner because an orphan Codex process "
+                    f"could not be terminated: execution={entry.execution_id} pid={entry.pid}"
+                )
+            result = AgentRunResult(
+                returncode=130,
+                session_id=entry.session_id,
+                final_message=(
+                    "Runner restarted while this execution was active; "
+                    "the persisted Codex process tree was terminated before reconnect."
+                ),
+            )
+            self.journal.complete(entry.execution_id, result)
+            self.completed[entry.execution_id] = result
+        self._journal_recovered = True
 
     async def _send_current(self, envelope: Envelope) -> bool:
         websocket = self._websocket

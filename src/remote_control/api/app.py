@@ -40,7 +40,7 @@ def create_app(
     api_token: str = "",
     web_ui_enabled: bool = True,
 ) -> FastAPI:
-    app = FastAPI(title="Remote Agent Control", version="0.10.0")
+    app = FastAPI(title="Remote Agent Control", version="0.11.0")
     dashboard = DashboardService(controller)
 
     if api_token:
@@ -312,6 +312,7 @@ def create_app(
                             running_jobs=_dict_list(envelope.payload.get("running_jobs")),
                             completed_jobs=[],
                             gateway=runner_gateway,
+                            snapshot_complete=False,
                         )
                     elif envelope.type == "RUNNING_JOBS":
                         await controller.hosts.heartbeat(host_id)
@@ -320,6 +321,7 @@ def create_app(
                             running_jobs=_dict_list(envelope.payload.get("running_jobs")),
                             completed_jobs=_dict_list(envelope.payload.get("completed_jobs")),
                             gateway=runner_gateway,
+                            snapshot_complete=True,
                         )
                     else:
                         await runner_gateway.handle(host_id, envelope)
