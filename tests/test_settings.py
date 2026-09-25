@@ -25,3 +25,16 @@ def test_runtime_home_stabilizes_relative_paths(tmp_path):
 def test_codex_home_is_loaded_for_child_runtime():
     settings = Settings(_env_file=None, CODEX_HOME="C:/Users/test/.codex")
     assert settings.codex_home == "C:/Users/test/.codex"
+
+
+def test_quota_reset_grace_defaults_to_ten_minutes():
+    settings = Settings(_env_file=None)
+    assert settings.quota_reset_grace_seconds == 600
+
+
+def test_quota_reset_grace_can_be_overridden():
+    settings = Settings(
+        _env_file=None,
+        REMOTE_CONTROL_QUOTA_RESET_GRACE_SECONDS=900,
+    )
+    assert settings.quota_reset_grace_seconds == 900
