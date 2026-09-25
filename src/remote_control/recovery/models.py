@@ -14,3 +14,4 @@ class RecoveryMode(StrEnum):
     RESUME = "RESUME"
     ADOPT = "ADOPT"
     FINALIZE = "FINALIZE"
+    CANCEL = "CANCEL"
