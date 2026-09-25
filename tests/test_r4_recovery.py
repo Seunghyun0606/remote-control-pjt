@@ -30,7 +30,7 @@ from remote_control.storage.repositories import (
     RecoveryRepository,
     SessionRepository,
 )
-from remote_control.transport.protocol import message
+from remote_control.transport.protocol import Envelope, message
 from remote_control.transport.runner_ws import RunnerGateway
 
 
@@ -86,6 +86,10 @@ class QuotaTwiceRunner(AgentRunner):
                 final_message="completed after quota recovery",
             )
         )
+
+
+def message_from_text(text: str) -> Envelope:
+    return Envelope.model_validate_json(text)
 
 
 class FakeWebSocket:
@@ -609,6 +613,93 @@ async def test_remote_running_job_is_adopted_after_controller_restart(tmp_path, 
     await wait_for_state(manager, job.id, "COMPLETED")
     assert not runner.started
     assert not runner.resumed
+
+
+@pytest.mark.asyncio
+async def test_pending_remote_cancel_is_readopted_and_confirmed_after_reconnect(
+    tmp_path,
+    database,
+):
+    project_path = tmp_path / "cancel-reconnect-project"
+    project_path.mkdir()
+    projects = remote_project(project_path)
+    manager, hosts, sessions, _, recovery = await build_runtime(
+        database=database,
+        projects=projects,
+        runner=FakeAgentRunner(),
+    )
+    await hosts.register(
+        host_id="desktop-main",
+        name="Desktop",
+        os_name="windows",
+        capabilities={"codex", "git"},
+    )
+
+    job = JobRecord(
+        id="JOB-CANCEL-RECONNECT",
+        project_id="demo",
+        requested_by_channel="test",
+        requested_by_user="u1",
+        requested_host="desktop-main",
+        assigned_host="desktop-main",
+        instruction="cancel me safely",
+        state="CANCELLING",
+        external_session_id="thread-cancel",
+    )
+    await manager.jobs.add(job)
+    await sessions.record(
+        job_id=job.id,
+        project_id="demo",
+        host_id="desktop-main",
+        external_session_id="thread-cancel",
+    )
+    await recovery.upsert(
+        job.id,
+        kind=RecoveryKind.HOST.value,
+        mode=RecoveryMode.CANCEL.value,
+        attempt_count=0,
+        next_retry_at=None,
+        execution_id="exec-cancel",
+        resume_instruction=None,
+        last_error="runner disconnected during cancellation",
+    )
+
+    gateway = RunnerGateway(cancel_ack_timeout_seconds=1)
+    websocket = FakeWebSocket()
+    await gateway.attach("desktop-main", websocket)
+
+    adopted = await manager.reconcile_runner(
+        host_id="desktop-main",
+        running_jobs=[
+            {"execution_id": "exec-cancel", "session_id": "thread-cancel"}
+        ],
+        completed_jobs=[],
+        gateway=gateway,
+    )
+    assert adopted == 1
+
+    for _ in range(50):
+        if websocket.sent:
+            cancel_message = message_from_text(websocket.sent[-1])
+            if cancel_message.type == "JOB_CANCEL":
+                break
+        await asyncio.sleep(0)
+    assert cancel_message.type == "JOB_CANCEL"
+    assert cancel_message.payload["execution_id"] == "exec-cancel"
+    assert (await manager.require(job.id)).state == "CANCELLING"
+
+    await gateway.handle(
+        "desktop-main",
+        message(
+            "JOB_RESULT",
+            execution_id="exec-cancel",
+            returncode=130,
+            session_id="thread-cancel",
+            final_message="cancelled",
+        ),
+    )
+    await wait_for_state(manager, job.id, "CANCELLED")
+    assert await recovery.get(job.id) is None
 
 
 @pytest.mark.asyncio
