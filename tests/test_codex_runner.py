@@ -4,7 +4,6 @@ from pathlib import Path
 import pytest
 
 from remote_control.runners.codex import (
-    CODEX_EVENT_MAX_BYTES,
     CODEX_READ_CHUNK_BYTES,
     CodexRunner,
     build_codex_command,
