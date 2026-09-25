@@ -58,6 +58,7 @@ async def test_remote_runner_gateway_result_flow():
     assert result.returncode == 0
     assert result.session_id == "thread-1"
     assert result.final_message == "done"
+    await handle.acknowledge_result()
     ack = Envelope.model_validate_json(websocket.sent[-1])
     assert ack.type == "JOB_RESULT_ACK"
     assert ack.payload["execution_id"] == handle.execution_id
