@@ -49,6 +49,17 @@ class RemoteRunHandle(RunHandle):
             session_id=self.session_id,
         )
 
+    async def acknowledge_result(self) -> None:
+        if not self._result_future.done():
+            return
+        result = self._result_future.result()
+        if result.retry_kind in {"host", "cancel_unconfirmed"}:
+            return
+        await self.gateway.ack_remote_result(
+            host_id=self.host_id,
+            execution_id=self.execution_id,
+        )
+
 
 @dataclass(slots=True)
 class _PendingRun:
@@ -187,6 +198,17 @@ class RunnerGateway:
                 result.final_message
                 or f"runner {host_id!r} could not confirm cancellation"
             )
+
+    async def ack_remote_result(
+        self,
+        *,
+        host_id: str,
+        execution_id: str,
+    ) -> None:
+        await self.send(
+            host_id,
+            message("JOB_RESULT_ACK", execution_id=execution_id),
+        )
 
     async def start_remote(
         self,
@@ -376,13 +398,6 @@ class RunnerGateway:
                     )
                 )
             self._pending.pop(execution_id, None)
-            try:
-                await self.send(
-                    host_id,
-                    message("JOB_RESULT_ACK", execution_id=execution_id),
-                )
-            except ConnectionError:
-                pass
             return
 
         if envelope.type == "JOB_ERROR":
