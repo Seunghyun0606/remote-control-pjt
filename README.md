@@ -621,6 +621,7 @@ Project Topic 안에서는 `/run <project-id>` 대신 `/run`만 사용할 수 �
 | `WAITING_QUOTA` | Codex usage/quota reset 대기 | O | 보통 대기만 하면 됨 |
 | `WAITING_HUMAN` | Human Gate 응답 대기 | X | Telegram 버튼/선택지로 결정 |
 | `PAUSED` | 사용자가 일시정지 | X | `/resume` |
+| `CANCELLING` | 중지 요청 후 실제 Codex 종료 확인 대기 | Runner reconnect 시 cancel 재확인 | 새 Job을 시작하지 말고 종료 확인 대기 |
 | `FAILED` | 복구 불가 오류로 종료 | X | 원인 수정 후 `/retry <job-id>` 또는 새 `/run` |
 | `COMPLETED` | 정상 종료 | X | 필요하면 새 Job 시작 |
 | `CANCELLED` | 중지됨 | X | 필요하면 새 Job 시작 |
@@ -634,6 +635,8 @@ Project Topic 안에서는 `/run <project-id>` 대신 `/run`만 사용할 수 �
 은 `PAUSED` Job 전용입니다. `FAILED` Job은 자동으로 재실행되지 않으며 `/retry`를 사용해야 합니다.
 
 `WAITING_HOST`와 `WAITING_QUOTA`는 recovery scheduler가 자동으로 다시 확인합니다.
+
+`/stop`은 원격 Runner에 요청을 보낸 즉시 `CANCELLED`로 바꾸지 않습니다. 원격 Codex 프로세스의 terminal `JOB_RESULT`를 확인할 때까지 `CANCELLING`과 Project Session lock을 유지합니다. Runner 연결이 교체되는 경우에도 이전 WebSocket의 cleanup은 새 연결을 OFFLINE 처리하지 않습니다.
 
 ---
 
@@ -1242,6 +1245,7 @@ GET /jobs/{job_id}/project-work
 - [Architecture](docs/ARCHITECTURE.md)
 - [Project Adapters](docs/PROJECT_ADAPTERS.md)
 - [Recovery & Scheduler](docs/RECOVERY.md)
+- [Cancellation and Runner Reconnect Safety](docs/CANCELLATION_AND_RECONNECT.md)
 - [Sessions and Feedback](docs/SESSIONS_AND_FEEDBACK.md)
 - [Human Gate](docs/HUMAN_GATE.md)
 - [Messaging](docs/MESSAGING.md)
