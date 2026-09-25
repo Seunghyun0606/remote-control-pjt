@@ -22,7 +22,7 @@ class JobState(StrEnum):
 TERMINAL_STATES = {JobState.FAILED, JobState.CANCELLED, JobState.COMPLETED}
 
 _ALLOWED_TRANSITIONS: dict[JobState, set[JobState]] = {
-    JobState.QUEUED: {JobState.ASSIGNED, JobState.CANCELLING, JobState.CANCELLED, JobState.WAITING_HOST},
+    JobState.QUEUED: {JobState.ASSIGNED, JobState.CANCELLING, JobState.CANCELLED, JobState.WAITING_HOST, JobState.FAILED},
     JobState.ASSIGNED: {JobState.STARTING, JobState.CANCELLING, JobState.CANCELLED, JobState.WAITING_HOST},
     JobState.STARTING: {
         JobState.RUNNING,
