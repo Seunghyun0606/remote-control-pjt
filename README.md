@@ -2,7 +2,7 @@
 
 Telegram/Slack에서 **현재 머신의 Codex**를 실행하고, 진행 상태·추가 지시·Human Gate·사용량 제한 복구·Project OS 연동까지 관리하는 Runtime Control Plane입니다.
 
-현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.11.0**입니다.
+현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.11.1**입니다.
 
 ## 전체 개요
 
@@ -1293,4 +1293,4 @@ Manual smoke test:
 - [x] Runtime hardening v0.9 — Windows npm Codex wrappers / doctor / FAILED retry / session history / stable runtime home / Windows CI
 - [x] Process safety v0.11 — Runner execution journal / process-tree containment / working-tree lease / durable result ACK / Protocol v2
 
-Package version: **0.11.0**
+Package version: **0.11.1**
