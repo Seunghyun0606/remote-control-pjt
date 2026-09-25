@@ -30,12 +30,17 @@ async def terminate_persisted_codex_process(
     normalized_directory = canonical_working_directory(working_directory)
     if os.name == "nt":
         normalized_command = normalized_command.casefold()
-    cd_patterns = (
-        f'--cd {normalized_directory}',
+    plain = f"--cd {normalized_directory}"
+    quoted = (
         f'--cd "{normalized_directory}"',
         f"--cd '{normalized_directory}'",
     )
-    if not any(pattern in normalized_command for pattern in cd_patterns):
+    plain_match = (
+        normalized_command.endswith(plain)
+        or f"{plain} " in normalized_command
+    )
+    quoted_match = any(pattern in normalized_command for pattern in quoted)
+    if not plain_match and not quoted_match:
         return False
     return await terminate_process_tree(
         pid,
