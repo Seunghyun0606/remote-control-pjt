@@ -66,6 +66,18 @@ On the next Controller startup, the Job may safely resume from the existing repo
 
 After an unclean Controller crash, a non-terminal local Job with a persisted PID is checked before recovery. Remote Control verifies the live process command contains the expected working-directory argument and terminates the entire process tree before allowing recovery.
 
+If Codex was spawned but Remote Control cannot prove that cleanup succeeded, the Job enters a fail-closed process safety hold:
+
+```text
+STARTING/RUNNING
+→ PAUSED
+→ persist PROCESS_SAFETY_HOLD + PID
+→ keep Project Session + working-tree lease
+→ block /resume while PID is unresolved
+```
+
+A `/stop` request from this hold is allowed to become terminal only after the persisted PID is verified and the process tree is confirmed stopped. Controller restart performs the same reconciliation; after successful startup cleanup the PID is cleared and the Job can be resumed manually.
+
 If a Job is persisted as `STARTING`, `RUNNING`, or `CANCELLING` but no PID was durably recorded, the Controller refuses startup because it cannot prove that a Codex process was not created.
 
 ## Remote Runner execution journal
