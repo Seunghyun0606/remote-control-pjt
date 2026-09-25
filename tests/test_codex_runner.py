@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from remote_control.process_control import ProcessSafetyError
 from remote_control.runners.codex import (
     CODEX_READ_CHUNK_BYTES,
     CodexRunner,
@@ -179,6 +180,55 @@ class _SpawnedProcess:
 
     def kill(self):
         self.returncode = -9
+
+
+@pytest.mark.asyncio
+async def test_post_spawn_initialization_failure_fails_closed_when_cleanup_unproven(
+    monkeypatch,
+    tmp_path,
+):
+    process = _SpawnedProcess()
+    process.returncode = None
+
+    class _FailingStdin(_CaptureStdin):
+        async def drain(self):
+            raise RuntimeError("stdin drain failed")
+
+    process.stdin = _FailingStdin()
+
+    class _Resolution:
+        resolved = "codex"
+
+        def build_command(self, args):
+            return ["codex", *args]
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return process
+
+    async def cannot_terminate(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(
+        "remote_control.runners.codex.resolve_executable",
+        lambda executable: _Resolution(),
+    )
+    monkeypatch.setattr(
+        "remote_control.runners.codex.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    monkeypatch.setattr(
+        "remote_control.runners.codex.terminate_process_tree",
+        cannot_terminate,
+    )
+
+    with pytest.raises(ProcessSafetyError, match="could not be terminated") as exc:
+        await CodexRunner().start(
+            project_id="demo",
+            instruction="test",
+            working_directory=tmp_path,
+        )
+
+    assert exc.value.pid == 999
 
 
 @pytest.mark.asyncio
