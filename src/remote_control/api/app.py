@@ -4,7 +4,7 @@ import secrets
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from remote_control.api.dashboard import DashboardService, render_dashboard_html
 from remote_control.controller.service import ControllerService
@@ -13,8 +13,9 @@ from remote_control.transport.runner_ws import RunnerGateway
 
 
 class RunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     host: str = "auto"
-    requested_by: str = "api"
 
 
 class ResumeRequest(BaseModel):
@@ -26,7 +27,8 @@ class SteerRequest(BaseModel):
 
 
 class ApprovalResponseRequest(BaseModel):
-    user_id: str
+    model_config = ConfigDict(extra="forbid")
+
     option: str | None = None
     reject: bool = False
     response_text: str | None = None
@@ -38,9 +40,16 @@ def create_app(
     runner_gateway: RunnerGateway | None = None,
     runner_token: str = "",
     api_token: str = "",
+    api_principal: str = "api:local",
     web_ui_enabled: bool = True,
 ) -> FastAPI:
-    app = FastAPI(title="Remote Agent Control", version="0.11.1")
+    api_principal = api_principal.strip()
+    if not api_principal.startswith("api:") or any(
+        character.isspace() for character in api_principal
+    ):
+        raise ValueError("api_principal must be an api:... identifier without whitespace")
+
+    app = FastAPI(title="Remote Agent Control", version="0.11.2")
     dashboard = DashboardService(controller)
 
     if api_token:
@@ -195,7 +204,7 @@ def create_app(
         try:
             record = await controller.jobs.respond_approval(
                 approval_id,
-                user_id=request.user_id,
+                user_id=api_principal,
                 option_key=request.option,
                 rejected=request.reject,
                 response_text=request.response_text,
@@ -229,7 +238,7 @@ def create_app(
                     "Inspect repository state, make a coherent change, run tests, and summarize."
                 ),
                 requested_by_channel="api",
-                requested_by_user=request.requested_by,
+                requested_by_user=api_principal,
                 requested_host=request.host,
             )
         except (KeyError, ValueError) as exc:

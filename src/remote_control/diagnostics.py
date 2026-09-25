@@ -129,6 +129,17 @@ def validate_controller_configuration(
             "is not loopback"
         )
 
+    api_principal = settings.api_principal.strip()
+    if (
+        not api_principal
+        or not api_principal.startswith("api:")
+        or any(character.isspace() for character in api_principal)
+    ):
+        failures.append(
+            "CONTROLLER_API_PRINCIPAL must be a non-empty api:... identifier "
+            "without whitespace"
+        )
+
     if not no_telegram:
         if not settings.telegram_bot_token:
             failures.append(

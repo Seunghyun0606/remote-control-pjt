@@ -21,7 +21,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: python -m pip install --upgrade pip
-      - run: pip install -c constraints/dev.txt -e ".[dev]"
+      - run: pip install -c constraints/lock.txt -e ".[dev]"
       - run: ruff check .
       - run: pytest -q
 
@@ -34,7 +34,7 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: python -m pip install --upgrade pip
-      - run: pip install -c constraints/dev.txt -e ".[dev]"
+      - run: pip install -c constraints/lock.txt -e ".[dev]"
       - run: ruff check .
       - run: >-
           pytest -q
@@ -48,3 +48,4 @@ jobs:
           tests/test_p0_process_safety.py
           tests/test_p2_integrity.py
           tests/test_startup_preflight.py
+          tests/test_dependency_lock.py

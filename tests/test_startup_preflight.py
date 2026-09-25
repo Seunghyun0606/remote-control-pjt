@@ -48,6 +48,17 @@ def test_controller_configuration_preflight_aggregates_static_failures():
     assert "SLACK_ALLOWED_USER_IDS is required" in message
 
 
+def test_controller_configuration_preflight_rejects_invalid_api_principal():
+    settings = Settings(
+        _env_file=None,
+        CONTROLLER_RUNNER_TOKEN="runner-secret",
+        CONTROLLER_API_PRINCIPAL="telegram user",
+    )
+
+    with pytest.raises(RuntimeError, match="CONTROLLER_API_PRINCIPAL"):
+        validate_controller_configuration(settings, no_telegram=True)
+
+
 def test_controller_configuration_preflight_rejects_invalid_telegram_allowlist():
     settings = Settings(
         _env_file=None,

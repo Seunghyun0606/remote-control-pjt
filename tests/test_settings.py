@@ -80,3 +80,9 @@ def test_runner_state_path_is_scoped_by_host(tmp_path):
         REMOTE_RUNNER_HOST_ID="desktop-main",
     )
     assert default.resolved_state_path.name == "desktop-main-executions.json"
+
+
+
+def test_control_api_principal_defaults_to_server_namespace():
+    settings = Settings(_env_file=None)
+    assert settings.api_principal == "api:controller"

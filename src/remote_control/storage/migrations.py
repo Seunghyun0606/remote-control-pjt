@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
-from sqlalchemy import inspect, text
+from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, inspect, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from remote_control.storage.models import Base, ExecutionLeaseRecord
@@ -13,23 +13,7 @@ CURRENT_SCHEMA_VERSION = 2
 
 
 async def _baseline_schema(connection: AsyncConnection) -> None:
-    def create_and_validate(sync_connection) -> None:
-        Base.metadata.create_all(sync_connection)
-        inspector = inspect(sync_connection)
-        for table in Base.metadata.sorted_tables:
-            actual = {
-                column["name"]
-                for column in inspector.get_columns(table.name)
-            }
-            expected = {column.name for column in table.columns}
-            missing = sorted(expected - actual)
-            if missing:
-                raise RuntimeError(
-                    "database baseline schema is missing columns: "
-                    f"table={table.name} missing={','.join(missing)}"
-                )
-
-    await connection.run_sync(create_and_validate)
+    await connection.run_sync(Base.metadata.create_all)
 
 
 async def _execution_leases(connection: AsyncConnection) -> None:
@@ -45,6 +29,133 @@ MIGRATIONS: dict[int, Migration] = {
     1: _baseline_schema,
     2: _execution_leases,
 }
+
+
+def _type_signature(column_type) -> tuple[str, int | None]:
+    if isinstance(column_type, Text):
+        return ("TEXT", None)
+    if isinstance(column_type, String):
+        return ("STRING", column_type.length)
+    if isinstance(column_type, Integer):
+        return ("INTEGER", None)
+    if isinstance(column_type, DateTime):
+        return ("DATETIME", None)
+    return (column_type.__class__.__name__.upper(), None)
+
+
+def _expected_indexes(table) -> set[tuple[tuple[str, ...], bool]]:
+    return {
+        (tuple(column.name for column in index.columns), bool(index.unique))
+        for index in table.indexes
+    }
+
+
+def _actual_indexes(inspector, table_name: str) -> set[tuple[tuple[str, ...], bool]]:
+    return {
+        (
+            tuple(index.get("column_names") or ()),
+            bool(index.get("unique")),
+        )
+        for index in inspector.get_indexes(table_name)
+    }
+
+
+def _expected_unique_constraints(table) -> set[tuple[str, ...]]:
+    return {
+        tuple(column.name for column in constraint.columns)
+        for constraint in table.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+
+
+def _actual_unique_constraints(inspector, table_name: str) -> set[tuple[str, ...]]:
+    return {
+        tuple(constraint.get("column_names") or ())
+        for constraint in inspector.get_unique_constraints(table_name)
+    }
+
+
+def _validate_schema_sync(sync_connection) -> None:
+    inspector = inspect(sync_connection)
+    expected_tables = {table.name for table in Base.metadata.sorted_tables}
+    actual_tables = set(inspector.get_table_names()) - {"schema_migrations"}
+
+    missing_tables = sorted(expected_tables - actual_tables)
+    unexpected_tables = sorted(actual_tables - expected_tables)
+    if missing_tables or unexpected_tables:
+        raise RuntimeError(
+            "database schema drift detected: "
+            f"missing_tables={missing_tables} unexpected_tables={unexpected_tables}"
+        )
+
+    for table in Base.metadata.sorted_tables:
+        actual_columns = {
+            column["name"]: column
+            for column in inspector.get_columns(table.name)
+        }
+        expected_columns = {column.name: column for column in table.columns}
+
+        missing_columns = sorted(set(expected_columns) - set(actual_columns))
+        unexpected_columns = sorted(set(actual_columns) - set(expected_columns))
+        if missing_columns or unexpected_columns:
+            raise RuntimeError(
+                "database schema drift detected: "
+                f"table={table.name} missing_columns={missing_columns} "
+                f"unexpected_columns={unexpected_columns}"
+            )
+
+        primary_key_columns = tuple(
+            inspector.get_pk_constraint(table.name).get("constrained_columns") or ()
+        )
+        expected_primary_key = tuple(column.name for column in table.primary_key.columns)
+        if primary_key_columns != expected_primary_key:
+            raise RuntimeError(
+                "database schema drift detected: "
+                f"table={table.name} primary_key={primary_key_columns} "
+                f"expected={expected_primary_key}"
+            )
+
+        for name, expected in expected_columns.items():
+            actual = actual_columns[name]
+            actual_type = _type_signature(actual["type"])
+            expected_type = _type_signature(expected.type)
+            if actual_type != expected_type:
+                raise RuntimeError(
+                    "database schema drift detected: "
+                    f"table={table.name} column={name} type={actual_type} "
+                    f"expected={expected_type}"
+                )
+
+            if not expected.primary_key:
+                actual_nullable = bool(actual.get("nullable", True))
+                if actual_nullable != bool(expected.nullable):
+                    raise RuntimeError(
+                        "database schema drift detected: "
+                        f"table={table.name} column={name} "
+                        f"nullable={actual_nullable} expected={bool(expected.nullable)}"
+                    )
+
+        actual_indexes = _actual_indexes(inspector, table.name)
+        expected_indexes = _expected_indexes(table)
+        if actual_indexes != expected_indexes:
+            raise RuntimeError(
+                "database schema drift detected: "
+                f"table={table.name} indexes={sorted(actual_indexes)} "
+                f"expected={sorted(expected_indexes)}"
+            )
+
+        actual_uniques = _actual_unique_constraints(inspector, table.name)
+        expected_uniques = _expected_unique_constraints(table)
+        if actual_uniques != expected_uniques:
+            raise RuntimeError(
+                "database schema drift detected: "
+                f"table={table.name} unique_constraints={sorted(actual_uniques)} "
+                f"expected={sorted(expected_uniques)}"
+            )
+
+
+async def validate_schema(connection: AsyncConnection) -> None:
+    await connection.run_sync(_validate_schema_sync)
 
 
 async def apply_migrations(connection: AsyncConnection) -> int:
@@ -85,6 +196,7 @@ async def apply_migrations(connection: AsyncConnection) -> int:
             },
         )
 
+    await validate_schema(connection)
     return CURRENT_SCHEMA_VERSION
 
 

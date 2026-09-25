@@ -2,7 +2,7 @@
 
 Telegram/Slack에서 **현재 머신의 Codex**를 실행하고, 진행 상태·추가 지시·Human Gate·사용량 제한 복구·Project OS 연동까지 관리하는 Runtime Control Plane입니다.
 
-현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.11.1**입니다.
+현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.11.2**입니다.
 
 ## 전체 개요
 
@@ -243,7 +243,7 @@ cd remote-control-pjt
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
-pip install -c constraints/dev.txt -e ".[dev]"
+pip install -c constraints/lock.txt -e ".[dev]"
 Copy-Item .env.example .env
 ```
 
@@ -291,6 +291,8 @@ TELEGRAM_ALLOWED_USER_IDS=<YOUR_NUMERIC_TELEGRAM_USER_ID>
 CONTROLLER_RUNNER_TOKEN=<GENERATED_RANDOM_SECRET>
 # 127.0.0.1 외 주소에 bind할 때 필수
 CONTROLLER_API_TOKEN=
+# API-created Job/Approval ownership은 request body가 아니라 서버 principal로 고정됩니다.
+CONTROLLER_API_PRINCIPAL=api:controller
 
 CODEX_EXECUTABLE=codex
 # Desktop Codex와 같은 thread store를 공유하려면 동일한 home을 사용합니다.
@@ -1164,7 +1166,7 @@ Controller는 기본적으로:
 
 에 bind합니다.
 
-외부 bind가 필요하면 `CONTROLLER_API_TOKEN`을 반드시 설정해야 Controller가 시작됩니다. 토큰이 설정된 경우 `/health`를 제외한 REST/UI HTTP 요청은 Bearer 또는 `X-Remote-Control-Token` 인증이 필요합니다. 브라우저 공개는 여전히 인증 reverse proxy/private network를 권장합니다.
+외부 bind가 필요하면 `CONTROLLER_API_TOKEN`을 반드시 설정해야 Controller가 시작됩니다. 토큰이 설정된 경우 `/health`를 제외한 REST/UI HTTP 요청은 Bearer 또는 `X-Remote-Control-Token` 인증이 필요합니다. API-created Job과 Human Gate ownership은 client body의 `requested_by`/`user_id`를 받지 않고 서버 설정 `CONTROLLER_API_PRINCIPAL`을 사용합니다. 브라우저 공개는 여전히 인증 reverse proxy/private network를 권장합니다.
 
 상세:
 
@@ -1228,6 +1230,7 @@ REMOTE_RUNNER_STATE_PATH=
 - Web UI는 read-only
 - non-loopback Control API bind는 `CONTROLLER_API_TOKEN` 필수
 - Runner WebSocket secret과 Control API secret은 분리
+- Control API ownership identity는 서버측 `CONTROLLER_API_PRINCIPAL`로 고정
 - 같은 Host + working directory는 DB-backed execution lease로 단일 writer 보장
 - Codex 종료 시 wrapper PID가 아니라 process tree 종료 확인
 - Runner execution 결과는 Controller의 durable `JOB_RESULT_ACK` 전까지 journal에 유지
@@ -1293,4 +1296,4 @@ Manual smoke test:
 - [x] Runtime hardening v0.9 — Windows npm Codex wrappers / doctor / FAILED retry / session history / stable runtime home / Windows CI
 - [x] Process safety v0.11 — Runner execution journal / process-tree containment / working-tree lease / durable result ACK / Protocol v2
 
-Package version: **0.11.1**
+Package version: **0.11.2**

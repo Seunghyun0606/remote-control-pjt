@@ -11,7 +11,7 @@ from remote_control.controller.job_manager import JobManager
 from remote_control.controller.service import ControllerService
 from remote_control.hosts.registry import HostRegistry
 from remote_control.runners.fake import FakeAgentRunner
-from remote_control.storage.models import JobRecord, ProjectWorkRecord
+from remote_control.storage.models import ApprovalRecord, JobRecord, ProjectWorkRecord
 from remote_control.storage.repositories import (
     ApprovalRepository,
     EventRepository,
@@ -147,3 +147,150 @@ async def test_control_api_auth_protects_dashboard_and_rest(project_registry, da
     assert wrong.status_code == 401
     assert bearer.status_code == 200
     assert custom_header.status_code == 200
+
+
+
+@pytest.mark.asyncio
+async def test_control_api_uses_server_principal_and_rejects_identity_spoof(
+    project_registry,
+    database,
+):
+    controller, _ = await build_controller(project_registry, database)
+    app = create_app(
+        controller,
+        api_token="control-secret",
+        api_principal="api:ops",
+    )
+    headers = {"Authorization": "Bearer control-secret"}
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+    ) as client:
+        spoofed = await client.post(
+            "/projects/demo/run",
+            json={"requested_by": "123456789"},
+            headers=headers,
+        )
+        created = await client.post(
+            "/projects/demo/run",
+            json={"host": "auto"},
+            headers=headers,
+        )
+
+    assert spoofed.status_code == 422
+    assert created.status_code == 202
+    job = await controller.jobs.require(created.json()["id"])
+    assert job.requested_by_channel == "api"
+    assert job.requested_by_user == "api:ops"
+
+
+@pytest.mark.asyncio
+async def test_control_api_approval_uses_server_principal(
+    project_registry,
+    database,
+):
+    controller, _ = await build_controller(project_registry, database)
+    job = JobRecord(
+        id="JOB-API-APPROVAL",
+        project_id="demo",
+        requested_by_channel="api",
+        requested_by_user="api:ops",
+        requested_host="lightsail-main",
+        assigned_host="lightsail-main",
+        instruction="approval test",
+        state="WAITING_HUMAN",
+        external_session_id="fake-session",
+    )
+    await controller.jobs.jobs.add(job)
+    assert controller.jobs.approvals is not None
+    await controller.jobs.approvals.approvals.add(
+        ApprovalRecord(
+            id="APPROVAL-API",
+            job_id=job.id,
+            requested_by_user="api:ops",
+            approval_type="choice",
+            question="Proceed?",
+            options_json='[{"key":"yes","label":"Yes"}]',
+            status="PENDING",
+        )
+    )
+
+    app = create_app(
+        controller,
+        api_token="control-secret",
+        api_principal="api:ops",
+    )
+    headers = {"Authorization": "Bearer control-secret"}
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+    ) as client:
+        spoofed = await client.post(
+            "/approvals/APPROVAL-API/respond",
+            json={"user_id": "123456789", "option": "yes"},
+            headers=headers,
+        )
+        resolved = await client.post(
+            "/approvals/APPROVAL-API/respond",
+            json={"option": "yes"},
+            headers=headers,
+        )
+
+    assert spoofed.status_code == 422
+    assert resolved.status_code == 202
+    assert resolved.json()["status"] == "RESOLVED"
+    await controller.jobs.wait_until_idle(job.id)
+
+
+@pytest.mark.asyncio
+async def test_control_api_cannot_impersonate_cross_channel_approval(
+    project_registry,
+    database,
+):
+    controller, _ = await build_controller(project_registry, database)
+    job = JobRecord(
+        id="JOB-TG-APPROVAL",
+        project_id="demo",
+        requested_by_channel="telegram",
+        requested_by_user="100",
+        requested_host="lightsail-main",
+        assigned_host="lightsail-main",
+        instruction="approval test",
+        state="WAITING_HUMAN",
+        external_session_id="fake-session",
+    )
+    await controller.jobs.jobs.add(job)
+    assert controller.jobs.approvals is not None
+    await controller.jobs.approvals.approvals.add(
+        ApprovalRecord(
+            id="APPROVAL-TG",
+            job_id=job.id,
+            requested_by_user="100",
+            approval_type="choice",
+            question="Proceed?",
+            options_json='[{"key":"yes","label":"Yes"}]',
+            status="PENDING",
+        )
+    )
+
+    app = create_app(
+        controller,
+        api_token="control-secret",
+        api_principal="api:ops",
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/approvals/APPROVAL-TG/respond",
+            json={"option": "yes"},
+            headers={"Authorization": "Bearer control-secret"},
+        )
+
+    assert response.status_code == 400
+    assert "another user" in response.json()["detail"]
