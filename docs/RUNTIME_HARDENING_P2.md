@@ -134,3 +134,8 @@ After pulling this change:
 3. no manual DB migration command is required for this baseline;
 4. use the constraint files for reproducible installs where desired;
 5. existing active Project Session locks are preserved unless they are provably stale.
+
+
+## P0 process-safety follow-up
+
+A later end-to-end lifecycle review identified process-restart and cross-channel working-tree concurrency gaps not covered by P2. They are closed in Remote Control 0.11.0; see [Process Safety P0 Closure](PROCESS_SAFETY_P0.md).
