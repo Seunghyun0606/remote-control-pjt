@@ -11,6 +11,10 @@ from uuid import uuid4
 from remote_control.approvals.registry import ApprovalPrompt, ApprovalRegistry
 from remote_control.controller.states import JobState, TERMINAL_STATES, validate_transition
 from remote_control.event_payloads import sanitize_agent_event
+from remote_control.execution_leases import (
+    ExecutionLeaseBusyError,
+    ExecutionLeaseRegistry,
+)
 from remote_control.feedback import FeedbackPolicy, FeedbackThrottler
 from remote_control.hosts.registry import HostRegistry
 from remote_control.hosts.router import HostRouter, HostUnavailable
@@ -20,6 +24,7 @@ from remote_control.human_gate import (
     extract_human_gate_from_text,
     human_gate_protocol_instruction,
 )
+from remote_control.process_control import terminate_process_tree
 from remote_control.projects.adapters import NoProjectWork, ProjectAdapterRegistry
 from remote_control.projects.registry import ProjectRegistry
 from remote_control.recovery.models import RecoveryKind, RecoveryMode
@@ -91,6 +96,7 @@ class JobManager:
         recovery: RecoveryRepository | None = None,
         project_adapters: ProjectAdapterRegistry | None = None,
         project_work: ProjectWorkRepository | None = None,
+        execution_leases: ExecutionLeaseRegistry | None = None,
         progress_interval_seconds: int = 300,
         quota_retry_initial_seconds: int = 1800,
         quota_retry_max_seconds: int = 7200,
@@ -109,6 +115,7 @@ class JobManager:
         self.recovery = recovery
         self.project_adapters = project_adapters
         self.project_work = project_work
+        self.execution_leases = execution_leases
         self.host_router = HostRouter(hosts) if hosts is not None else None
         self.feedback_policy = FeedbackPolicy()
         self.feedback_throttler = FeedbackThrottler(progress_interval_seconds)
@@ -230,6 +237,20 @@ class JobManager:
             )
             return await self.require(job.id)
 
+        try:
+            await self._acquire_execution_lease(job.id, assigned_host)
+        except ExecutionLeaseBusyError as exc:
+            await self.jobs.update(job.id, error=str(exc))
+            await self._transition(job.id, JobState.FAILED)
+            await self.events.append(
+                "EXECUTION_LEASE_BLOCKED",
+                job_id=job.id,
+                project_id=job.project_id,
+                host_id=assigned_host,
+                payload={"error": str(exc)},
+            )
+            return await self.require(job.id)
+
         await self._transition(job.id, JobState.ASSIGNED, assigned_host=assigned_host)
         self._start_task(job.id, self._execute_new(job.id))
         return await self.require(job.id)
@@ -317,6 +338,20 @@ class JobManager:
                     if mode == RecoveryMode.RESUME
                     else None
                 ),
+            )
+            return await self.require(retry.id)
+
+        try:
+            await self._acquire_execution_lease(retry.id, assigned_host)
+        except ExecutionLeaseBusyError as exc:
+            await self.jobs.update(retry.id, error=str(exc))
+            await self._transition(retry.id, JobState.FAILED)
+            await self.events.append(
+                "EXECUTION_LEASE_BLOCKED",
+                job_id=retry.id,
+                project_id=retry.project_id,
+                host_id=assigned_host,
+                payload={"error": str(exc)},
             )
             return await self.require(retry.id)
 
@@ -720,9 +755,11 @@ class JobManager:
         return candidates[0]
 
     async def reconcile_startup(self, *, now: datetime | None = None) -> int:
+        await self._terminate_stale_local_processes()
+        lease_repairs = await self._reconcile_execution_leases()
         stale_locks = await self._reconcile_stale_project_session_locks()
         if self.recovery is None:
-            return stale_locks
+            return stale_locks + lease_repairs
         current = now or datetime.now(timezone.utc)
 
         cancelling = await self.jobs.list_states({JobState.CANCELLING.value})
@@ -776,7 +813,7 @@ class JobManager:
                 JobState.RUNNING.value,
             }
         )
-        count = stale_locks
+        count = stale_locks + lease_repairs
         for job in recoverable:
             existing = await self.recovery.get(job.id)
             session_id = await self._external_session_id(job)
@@ -1025,6 +1062,69 @@ class JobManager:
             adopted += 1
         return adopted
 
+    async def _terminate_stale_local_processes(self) -> None:
+        active_states = {state.value for state in JobState if state not in TERMINAL_STATES}
+        for job in await self.jobs.list_states(active_states):
+            if (
+                job.assigned_host != self.local_host_id
+                or job.pid is None
+                or job.pid <= 0
+            ):
+                continue
+            stopped = await terminate_process_tree(job.pid, timeout_seconds=10)
+            if not stopped:
+                raise RuntimeError(
+                    "refusing Controller startup because a previous local Codex "
+                    f"process tree could not be terminated: job={job.id} pid={job.pid}"
+                )
+            await self.jobs.update(job.id, pid=None)
+            await self.events.append(
+                "LOCAL_ORPHAN_TERMINATED_ON_STARTUP",
+                job_id=job.id,
+                project_id=job.project_id,
+                host_id=job.assigned_host,
+                payload={"pid": job.pid},
+            )
+
+    async def _reconcile_execution_leases(self) -> int:
+        if self.execution_leases is None:
+            return 0
+        repaired = 0
+        for lease in await self.execution_leases.list():
+            job = await self.jobs.get(lease.job_id)
+            if job is None or JobState(job.state) in TERMINAL_STATES:
+                await self.execution_leases.release_for_job(lease.job_id)
+                repaired += 1
+
+        active_states = {state.value for state in JobState if state not in TERMINAL_STATES}
+        for job in await self.jobs.list_states(active_states):
+            if not job.assigned_host:
+                continue
+            try:
+                await self._acquire_execution_lease(job.id, job.assigned_host)
+            except ExecutionLeaseBusyError as exc:
+                raise RuntimeError(
+                    "conflicting active Jobs target the same working tree; "
+                    f"refusing startup: job={job.id}: {exc}"
+                ) from exc
+        return repaired
+
+    async def _acquire_execution_lease(
+        self,
+        job_id: str,
+        host_id: str,
+    ) -> None:
+        if self.execution_leases is None:
+            return
+        job = await self.require(job_id)
+        project = self.projects.get(job.project_id)
+        await self.execution_leases.acquire(
+            job_id=job.id,
+            project_id=job.project_id,
+            host_id=host_id,
+            working_directory=project.path_for(host_id),
+        )
+
     async def _reconcile_stale_project_session_locks(self) -> int:
         if self.project_sessions is None:
             return 0
@@ -1049,6 +1149,58 @@ class JobManager:
             if updated is not None and updated.locked_by_job_id is None:
                 released += 1
         return released
+
+    async def shutdown(self) -> None:
+        handles = list(self._handles.items())
+        for job_id, handle in handles:
+            job = await self.require(job_id)
+            state = JobState(job.state)
+            if state in TERMINAL_STATES:
+                continue
+
+            if job.assigned_host == self.local_host_id:
+                mode = (
+                    RecoveryMode.RESUME
+                    if await self._external_session_id(job)
+                    else RecoveryMode.START
+                )
+                await self._enter_host_wait(
+                    job_id,
+                    mode=mode,
+                    error="controller shutdown stopped local Codex execution",
+                    assigned_host=job.assigned_host,
+                    resume_instruction=(
+                        RESTART_RESUME_INSTRUCTION
+                        if mode == RecoveryMode.RESUME
+                        else None
+                    ),
+                )
+                await handle.cancel()
+                await self.jobs.update(job_id, pid=None)
+                await self.events.append(
+                    "LOCAL_EXECUTION_STOPPED_FOR_SHUTDOWN",
+                    job_id=job_id,
+                    project_id=job.project_id,
+                    host_id=job.assigned_host,
+                )
+            else:
+                await self._enter_host_wait(
+                    job_id,
+                    mode=RecoveryMode.ADOPT,
+                    error="controller shutdown while remote execution remained active",
+                    assigned_host=job.assigned_host,
+                    resume_instruction=RESTART_RESUME_INSTRUCTION,
+                )
+
+        tasks = [
+            task
+            for task in self._tasks.values()
+            if not task.done() and task is not asyncio.current_task()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def expire_approvals(self, *, now: datetime | None = None) -> int:
         if self.approvals is None:
@@ -1139,6 +1291,11 @@ class JobManager:
         try:
             host_id = await self._resolve_host(job.project_id, requested_host)
         except HostUnavailable:
+            return False
+
+        try:
+            await self._acquire_execution_lease(job.id, host_id)
+        except ExecutionLeaseBusyError:
             return False
 
         await self._transition(job.id, JobState.ASSIGNED, assigned_host=host_id)
@@ -2281,12 +2438,15 @@ class JobManager:
             host_id=updated.assigned_host,
             payload={"from": current.value, "to": target.value},
         )
-        if target in TERMINAL_STATES and self.project_sessions is not None:
-            await self.project_sessions.release_for_job(
-                project_id=job.project_id,
-                owner_user_id=job.requested_by_user,
-                job_id=job.id,
-            )
+        if target in TERMINAL_STATES:
+            if self.project_sessions is not None:
+                await self.project_sessions.release_for_job(
+                    project_id=job.project_id,
+                    owner_user_id=job.requested_by_user,
+                    job_id=job.id,
+                )
+            if self.execution_leases is not None:
+                await self.execution_leases.release_for_job(job.id)
         return updated
 
     async def _notify(self, job_id: str, message: str) -> None:
