@@ -84,6 +84,10 @@ class Settings(_BaseSettings):
     )
     runner_token: str = Field(default="", validation_alias="CONTROLLER_RUNNER_TOKEN")
     api_token: str = Field(default="", validation_alias="CONTROLLER_API_TOKEN")
+    api_principal: str = Field(
+        default="api:controller",
+        validation_alias="CONTROLLER_API_PRINCIPAL",
+    )
 
     telegram_bot_token: str | None = Field(
         default=None,
