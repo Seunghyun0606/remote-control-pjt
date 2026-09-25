@@ -67,6 +67,43 @@ class ProjectSessionRegistry:
             limit=limit,
         )
 
+    async def list_locked(self, *, limit: int = 1000) -> list[ProjectSessionRecord]:
+        return await self.sessions.list_locked(limit=limit)
+
+    async def release_stale_lock(
+        self,
+        *,
+        session_id: str,
+        expected_job_id: str,
+        reason: str,
+    ) -> ProjectSessionRecord | None:
+        current = await self.sessions.get(session_id)
+        if current is None:
+            return None
+        key = (current.project_id, current.owner_user_id)
+        async with self._locks[key]:
+            current = await self.sessions.get(session_id)
+            if current is None or current.locked_by_job_id != expected_job_id:
+                return current
+            updated = await self.sessions.update(
+                session_id,
+                status=ProjectSessionStatus.IDLE.value,
+                locked_by_job_id=None,
+                last_active_at=datetime.now(timezone.utc),
+            )
+            await self.events.append(
+                "PROJECT_SESSION_STALE_LOCK_RELEASED",
+                job_id=expected_job_id,
+                project_id=updated.project_id,
+                host_id=updated.host_id,
+                payload={
+                    "project_session_id": updated.id,
+                    "owner_user_id": updated.owner_user_id,
+                    "reason": reason,
+                },
+            )
+            return updated
+
     async def acquire(
         self,
         *,
