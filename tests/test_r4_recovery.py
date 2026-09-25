@@ -218,6 +218,35 @@ def test_quota_retry_backoff_and_structured_reset():
     ) == now + timedelta(hours=2)
 
     reset = now + timedelta(minutes=47)
+    assert retry_at(
+        attempt_count=1,
+        initial_seconds=1800,
+        max_seconds=7200,
+        reset_at=reset,
+        reset_grace_seconds=600,
+        now=now,
+    ) == reset + timedelta(minutes=10)
+
+    just_after_reset = reset + timedelta(minutes=2)
+    assert retry_at(
+        attempt_count=2,
+        initial_seconds=1800,
+        max_seconds=7200,
+        reset_at=reset,
+        reset_grace_seconds=600,
+        now=just_after_reset,
+    ) == reset + timedelta(minutes=10)
+
+    after_grace = reset + timedelta(minutes=11)
+    assert retry_at(
+        attempt_count=2,
+        initial_seconds=1800,
+        max_seconds=7200,
+        reset_at=reset,
+        reset_grace_seconds=600,
+        now=after_grace,
+    ) == after_grace + timedelta(hours=1)
+
     signal = detect_quota_event(
         {
             "type": "error",
