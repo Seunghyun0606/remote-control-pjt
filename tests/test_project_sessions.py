@@ -4,6 +4,7 @@ import pytest
 
 from remote_control.controller.job_manager import JobManager
 from remote_control.controller.service import ControllerService
+from remote_control.runners.base import AgentRunResult, AgentRunner, RunHandle
 from remote_control.runners.fake import FakeAgentRunner
 from remote_control.sessions.project_sessions import (
     ProjectSessionBusyError,
@@ -322,3 +323,104 @@ async def test_old_project_session_can_be_reactivated_and_resumed(project_regist
 
     assert runner.resumed[-1]["session_id"] == "fake-session"
     assert "return to old context" in runner.resumed[-1]["instruction"]
+
+
+class _AckCancelHandle(RunHandle):
+    def __init__(self) -> None:
+        self.pid = 4242
+        self.session_id = "thread-cancel-ack"
+        self.execution_id = None
+        self.cancel_requested = asyncio.Event()
+        self.cancel_ack = asyncio.Event()
+        self.finished = asyncio.Event()
+
+    async def wait(self) -> AgentRunResult:
+        await self.finished.wait()
+        return AgentRunResult(
+            returncode=130,
+            session_id=self.session_id,
+            final_message="cancelled after ack",
+        )
+
+    async def cancel(self) -> None:
+        self.cancel_requested.set()
+        await self.cancel_ack.wait()
+        self.finished.set()
+
+
+class _AckCancelRunner(AgentRunner):
+    def __init__(self) -> None:
+        self.handle = _AckCancelHandle()
+
+    async def start(
+        self,
+        *,
+        project_id,
+        instruction,
+        working_directory,
+        host_id=None,
+        on_event=None,
+    ) -> RunHandle:
+        del project_id, instruction, working_directory, host_id
+        if on_event is not None:
+            await on_event(
+                {"type": "thread.started", "thread_id": self.handle.session_id}
+            )
+        return self.handle
+
+
+@pytest.mark.asyncio
+async def test_project_session_stays_locked_until_cancel_is_confirmed(
+    project_registry,
+    database,
+):
+    events, sessions, project_sessions = _registries(database)
+    runner = _AckCancelRunner()
+    manager = JobManager(
+        projects=project_registry,
+        jobs=JobRepository(database),
+        events=events,
+        runner=runner,
+        local_host_id="lightsail-main",
+        sessions=sessions,
+        project_sessions=project_sessions,
+    )
+
+    job = await manager.create(
+        project_id="demo",
+        instruction="long running work",
+        requested_by_channel="telegram",
+        requested_by_user="100",
+    )
+
+    for _ in range(50):
+        current = await manager.require(job.id)
+        if current.state == "RUNNING":
+            break
+        await asyncio.sleep(0)
+    assert current.state == "RUNNING"
+
+    cancel_task = asyncio.create_task(manager.cancel(job.id))
+    await runner.handle.cancel_requested.wait()
+
+    cancelling = await manager.require(job.id)
+    assert cancelling.state == "CANCELLING"
+    persistent = await project_sessions.active_for("demo", "100")
+    assert persistent is not None
+    assert persistent.locked_by_job_id == job.id
+
+    with pytest.raises(ProjectSessionBusyError):
+        await manager.create(
+            project_id="demo",
+            instruction="must not overlap",
+            requested_by_channel="telegram",
+            requested_by_user="100",
+        )
+
+    runner.handle.cancel_ack.set()
+    cancelled = await cancel_task
+    assert cancelled.state == "CANCELLED"
+
+    persistent = await project_sessions.active_for("demo", "100")
+    assert persistent is not None
+    assert persistent.locked_by_job_id is None

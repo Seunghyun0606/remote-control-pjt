@@ -56,6 +56,10 @@ The Runner continues active Codex execution if only the Controller WebSocket is 
 
 R4 active execution adoption is unchanged.
 
+A reconnect that replaces an existing WebSocket is connection-generation safe: cleanup from the old socket is ignored once a newer socket for the same `host_id` is active. The stale socket therefore cannot fail pending Jobs or mark the replacement Host connection offline.
+
+Remote cancellation is acknowledgement-based. `JOB_CANCEL` only requests termination; the Controller keeps the Job in `CANCELLING` and retains the Project Session lock until the Runner returns a terminal `JOB_RESULT`. See [Cancellation and Runner Reconnect Safety](CANCELLATION_AND_RECONNECT.md).
+
 R5 Project Operations are short requests. A connection loss fails the request; JobManager recovery decides whether to wait for the pinned Host and retry.
 
 ## Credentials
