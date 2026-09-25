@@ -97,13 +97,15 @@ def retry_at(
     initial_seconds: int,
     max_seconds: int,
     reset_at: datetime | None,
+    reset_grace_seconds: int = 600,
     now: datetime | None = None,
 ) -> datetime:
     current = now or datetime.now(timezone.utc)
     if reset_at is not None:
         normalized = _aware(reset_at)
         if normalized > current:
-            return normalized
+            grace = max(int(reset_grace_seconds), 0)
+            return normalized + timedelta(seconds=grace)
 
     initial = max(int(initial_seconds), 1)
     maximum = max(int(max_seconds), initial)
