@@ -1012,14 +1012,23 @@ class JobManager:
             record = await self.recovery.get(job.id)
             if record is None:
                 continue
-            execution_id = record.execution_id or self._match_reported_execution(
+            matched_execution = self._match_reported_execution(
                 job,
                 host_id=host_id,
                 reported=reported,
             )
+            execution_id = (
+                matched_execution
+                if record.mode == RecoveryMode.ADOPT.value and matched_execution
+                else (
+                    record.execution_id
+                    if record.execution_id in reported
+                    else matched_execution
+                )
+            )
             if execution_id is None:
                 continue
-            if record.execution_id is None:
+            if record.execution_id != execution_id:
                 await self.recovery.upsert(
                     job.id,
                     kind=record.kind,
@@ -1080,14 +1089,14 @@ class JobManager:
                 if record is None or record.mode != RecoveryMode.ADOPT.value:
                     continue
 
-                known_execution = (
+                known_execution = self._match_reported_execution(
+                    job,
+                    host_id=host_id,
+                    reported=reported,
+                ) or (
                     record.execution_id
                     if record.execution_id in reported
-                    else self._match_reported_execution(
-                        job,
-                        host_id=host_id,
-                        reported=reported,
-                    )
+                    else None
                 )
                 if known_execution is not None:
                     continue
@@ -1130,14 +1139,17 @@ class JobManager:
             record = await self.recovery.get(job.id)
             if record is None or record.mode != RecoveryMode.CANCEL.value:
                 continue
-            execution_id = record.execution_id or self._match_reported_execution(
+            matched_execution = self._match_reported_execution(
                 job,
                 host_id=host_id,
                 reported=reported,
             )
+            execution_id = matched_execution or (
+                record.execution_id if record.execution_id in reported else None
+            )
             if execution_id is None:
                 continue
-            if record.execution_id is None:
+            if record.execution_id != execution_id:
                 await self.recovery.upsert(
                     job.id,
                     kind=record.kind,
