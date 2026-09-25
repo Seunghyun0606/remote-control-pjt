@@ -358,6 +358,8 @@ class RunnerDaemon:
 
         if handle.pid is None:
             await handle.cancel()
+            self.running_sessions.pop(execution_id, None)
+            self.running_working_directories.pop(execution_id, None)
             self.journal.remove(execution_id)
             await self._send(
                 websocket,
@@ -375,9 +377,26 @@ class RunnerDaemon:
                     execution_id,
                     seen_session or handle.session_id or "",
                 )
-        except Exception:
+        except Exception as exc:
             await handle.cancel()
-            raise
+            self.running_sessions.pop(execution_id, None)
+            self.running_working_directories.pop(execution_id, None)
+            try:
+                self.journal.remove(execution_id)
+            except Exception as cleanup_exc:
+                raise RuntimeError(
+                    "runner execution journal could not be made safe after "
+                    f"PID persistence failure: {cleanup_exc}"
+                ) from exc
+            await self._send(
+                websocket,
+                message(
+                    "JOB_ERROR",
+                    execution_id=execution_id,
+                    error=f"failed to persist runner execution PID: {exc}",
+                ),
+            )
+            return
 
         self.running[execution_id] = handle
         await self._send(
