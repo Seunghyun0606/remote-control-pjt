@@ -47,3 +47,4 @@ jobs:
           tests/test_runtime_hardening.py
           tests/test_p0_process_safety.py
           tests/test_p2_integrity.py
+          tests/test_startup_preflight.py
