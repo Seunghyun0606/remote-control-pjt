@@ -52,3 +52,15 @@ def test_control_api_token_and_loopback_detection():
         CONTROLLER_API_TOKEN="secret",
     )
     assert exposed.api_is_loopback is False
+
+
+
+def test_telegram_selection_ttl_defaults_and_override():
+    default = Settings(_env_file=None)
+    assert default.telegram_selection_ttl_seconds == 300
+
+    overridden = Settings(
+        _env_file=None,
+        REMOTE_CONTROL_TELEGRAM_SELECTION_TTL_SECONDS=120,
+    )
+    assert overridden.telegram_selection_ttl_seconds == 120
