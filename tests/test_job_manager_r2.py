@@ -161,6 +161,7 @@ async def test_session_identity_mismatch_allows_new_session_fallback(
     runner = FakeAgentRunner(
         delay=0.05,
         resume_returncode=65,
+        resume_session_id="other-thread",
         resume_final_message=(
             "SESSION_IDENTITY_MISMATCH expected=fake-session actual=other-thread"
         ),
@@ -181,6 +182,8 @@ async def test_session_identity_mismatch_allows_new_session_fallback(
 
     assert len(runner.resumed) == 1
     assert len(runner.started) == 2
+    current = await manager.require(job.id)
+    assert current.external_session_id == "fake-session"
 
 
 @pytest.mark.asyncio
