@@ -76,28 +76,29 @@ Remote Control now maintains:
 schema_migrations(version, applied_at)
 ```
 
-Schema version 1 is the current baseline. Existing installations are safely brought under version tracking because baseline table creation is idempotent.
+Schema migration tracking remains versioned and the current schema version is 2. Existing installations are brought under version tracking through idempotent migrations.
 
 Future schema changes must add a numbered migration to `storage/migrations.py` rather than depending on SQLAlchemy `create_all()` to alter existing tables.
 
-A database whose recorded schema version is newer than the running binary is rejected instead of being opened with an older schema contract.
+A version number alone is no longer considered sufficient proof of schema compatibility. After migrations, every startup validates mapped tables, columns, primary keys, type signatures, nullable flags, indexes, and unique constraints. Missing or unexpected objects are treated as schema drift and startup fails closed.
+
+A database whose recorded schema version is newer than the running binary is also rejected instead of being opened with an older schema contract.
 
 ## P2-5 — dependency constraints
 
-Direct runtime and development dependencies used by CI are pinned in:
+Direct dependency intent remains documented in `constraints/runtime.txt` and `constraints/dev.txt`, while the complete transitive CI snapshot is pinned in:
 
 ```text
-constraints/runtime.txt
-constraints/dev.txt
+constraints/lock.txt
 ```
 
-CI installs with:
+Linux Python 3.11/3.12 and Windows smoke all install with:
 
 ```bash
-pip install -c constraints/dev.txt -e ".[dev]"
+pip install -c constraints/lock.txt -e ".[dev]"
 ```
 
-The project metadata keeps compatible version ranges for packaging, while CI/deployment can opt into repeatable direct dependency versions through constraints.
+The lock contains exact pins for every resolved direct and transitive package. Platform-only dependencies such as `colorama` are constrained but are installed only when selected by the platform resolver. Tests also verify that every declared direct dependency is present in the lock.
 
 ## P2-6 — broader Windows CI
 
@@ -129,7 +130,7 @@ Expired tokens are purged when new choices are created and rejected when selecte
 
 After pulling this change:
 
-1. restart the Controller so schema migration v1 is recorded;
+1. restart the Controller so schema migrations and structural drift validation run;
 2. restart Remote Runners so chunk-framed Codex stdout handling is active;
 3. no manual DB migration command is required for this baseline;
 4. use the constraint files for reproducible installs where desired;
@@ -139,3 +140,28 @@ After pulling this change:
 ## P0 process-safety follow-up
 
 A later end-to-end lifecycle review identified process-restart and cross-channel working-tree concurrency gaps not covered by P2. They are closed in Remote Control 0.11.0; see [Process Safety P0 Closure](PROCESS_SAFETY_P0.md).
+
+
+## P2 security and integrity follow-up — 0.11.2
+
+The final review left three P2 gaps after the earlier runtime-hardening work.
+
+### Server-owned Control API identity
+
+`RunRequest.requested_by` and `ApprovalResponseRequest.user_id` are removed. Those extra fields are rejected with validation errors.
+
+API ownership is derived only from:
+
+```dotenv
+CONTROLLER_API_PRINCIPAL=api:controller
+```
+
+This principal must use the `api:` namespace and contain no whitespace.
+
+### Structural schema drift validation
+
+The migration version is checked first, then the live schema is compared with SQLAlchemy metadata. A database can no longer claim the expected migration version while silently missing an index, carrying an unexpected column, or differing in key/nullability/type structure.
+
+### Full dependency lock
+
+`constraints/lock.txt` is the reproducible CI/deployment constraint set. The older runtime/dev files remain useful as direct-dependency intent, not as a complete lock.
