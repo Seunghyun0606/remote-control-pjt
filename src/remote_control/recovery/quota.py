@@ -103,9 +103,10 @@ def retry_at(
     current = now or datetime.now(timezone.utc)
     if reset_at is not None:
         normalized = _aware(reset_at)
-        if normalized > current:
-            grace = max(int(reset_grace_seconds), 0)
-            return normalized + timedelta(seconds=grace)
+        grace = max(int(reset_grace_seconds), 0)
+        reset_deadline = normalized + timedelta(seconds=grace)
+        if reset_deadline > current:
+            return reset_deadline
 
     initial = max(int(initial_seconds), 1)
     maximum = max(int(max_seconds), initial)
