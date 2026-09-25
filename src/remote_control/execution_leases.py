@@ -37,6 +37,15 @@ class ExecutionLeaseRegistry:
 
         current = await self.leases.get_for_job(job_id)
         if current is not None:
+            if (
+                current.host_id != host_id
+                or current.working_directory != normalized
+            ):
+                raise ExecutionLeaseBusyError(
+                    "job already owns a different working tree lease: "
+                    f"job={job_id} current={current.host_id}:{current.working_directory} "
+                    f"requested={host_id}:{normalized}"
+                )
             return current
 
         record = ExecutionLeaseRecord(
