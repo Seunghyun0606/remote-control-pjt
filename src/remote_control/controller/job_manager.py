@@ -1781,11 +1781,19 @@ class JobManager:
         }:
             return None
 
-        if result.session_id:
+        identity_mismatch = bool(
+            result.final_message
+            and "SESSION_IDENTITY_MISMATCH" in result.final_message
+        )
+        if result.session_id and not identity_mismatch:
             await self._record_session(job_id, result.session_id)
         await self.jobs.update(
             job_id,
-            external_session_id=result.session_id or current.external_session_id,
+            external_session_id=(
+                current.external_session_id
+                if identity_mismatch
+                else result.session_id or current.external_session_id
+            ),
             result=result.final_message,
         )
 
@@ -1858,16 +1866,23 @@ class JobManager:
                 feedback is not None
                 and self.feedback_throttler.allow(job_id, feedback)
             ):
-                await self.events.append(
-                    "FEEDBACK_SENT",
-                    job_id=job_id,
-                    project_id=job.project_id,
-                    host_id=job.assigned_host,
-                    payload={
-                        "level": feedback.level.value,
-                        "text": feedback.text,
-                    },
-                )
+                try:
+                    await self.events.append(
+                        "FEEDBACK_SENT",
+                        job_id=job_id,
+                        project_id=job.project_id,
+                        host_id=job.assigned_host,
+                        payload={
+                            "level": feedback.level.value,
+                            "text": feedback.text,
+                        },
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to persist FEEDBACK_SENT; continuing agent execution "
+                        "job_id=%s",
+                        job_id,
+                    )
                 await self._notify(job_id, f"⏳ 진행\n\n{feedback.text}")
 
         return on_event
