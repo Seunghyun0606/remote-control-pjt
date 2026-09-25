@@ -528,6 +528,34 @@ class JobManager:
             if state in TERMINAL_STATES:
                 return job
 
+            if (
+                job.assigned_host == self.local_host_id
+                and job.pid is not None
+                and job.pid > 0
+                and (job.error or "").startswith("PROCESS_SAFETY_HOLD:")
+            ):
+                project = self.projects.get(job.project_id)
+                stopped = await terminate_persisted_codex_process(
+                    job.pid,
+                    working_directory=project.path_for(self.local_host_id),
+                    timeout_seconds=10,
+                )
+                if not stopped:
+                    raise RuntimeError(
+                        "cannot cancel process safety hold because Codex process "
+                        f"termination is still unconfirmed: job={job.id} pid={job.pid}"
+                    )
+                await self.jobs.update(
+                    job_id,
+                    pid=None,
+                    error=(
+                        "PROCESS_SAFETY_RECONCILED: persisted Codex process tree "
+                        "was terminated before cancellation"
+                    ),
+                )
+                job = await self.require(job_id)
+                state = JobState(job.state)
+
             if state != JobState.CANCELLING:
                 await self._transition(job_id, JobState.CANCELLING)
                 if self.sessions is not None:
