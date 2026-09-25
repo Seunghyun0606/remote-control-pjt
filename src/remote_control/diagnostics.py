@@ -113,6 +113,52 @@ def collect_diagnostics(
     return items
 
 
+def validate_controller_configuration(
+    settings: Settings,
+    *,
+    no_telegram: bool,
+) -> None:
+    failures: list[str] = []
+
+    if not settings.runner_token:
+        failures.append("CONTROLLER_RUNNER_TOKEN is required")
+
+    if not settings.api_is_loopback and not settings.api_token:
+        failures.append(
+            "CONTROLLER_API_TOKEN is required when REMOTE_CONTROL_API_HOST "
+            "is not loopback"
+        )
+
+    if not no_telegram:
+        if not settings.telegram_bot_token:
+            failures.append(
+                "TELEGRAM_BOT_TOKEN is required unless --no-telegram is used"
+            )
+        try:
+            telegram_users = settings.telegram_allowed_user_ids
+        except ValueError as exc:
+            failures.append(str(exc))
+        else:
+            if not telegram_users:
+                failures.append(
+                    "TELEGRAM_ALLOWED_USER_IDS is required unless --no-telegram is used"
+                )
+
+    if settings.slack_enabled:
+        if not settings.slack_bot_token or not settings.slack_app_token:
+            failures.append(
+                "SLACK_BOT_TOKEN and SLACK_APP_TOKEN are required when Slack is enabled"
+            )
+        if not settings.slack_allowed_user_ids:
+            failures.append(
+                "SLACK_ALLOWED_USER_IDS is required when Slack is enabled"
+            )
+
+    if failures:
+        joined = "\n- ".join(failures)
+        raise RuntimeError(f"controller configuration preflight failed:\n- {joined}")
+
+
 def validate_startup(settings: Settings, projects: ProjectRegistry) -> None:
     failures: list[str] = []
     required_names = {
