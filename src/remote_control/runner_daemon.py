@@ -22,6 +22,10 @@ from remote_control.transport.protocol import Envelope, message
 logger = logging.getLogger(__name__)
 
 
+class RunnerSafetyError(RuntimeError):
+    """A Runner invariant failed and automatic reconnect is unsafe."""
+
+
 class RunnerDaemon:
     def __init__(
         self,
@@ -58,6 +62,11 @@ class RunnerDaemon:
             try:
                 await self._run_connection()
             except asyncio.CancelledError:
+                raise
+            except RunnerSafetyError:
+                logger.exception(
+                    "runner safety invariant failed; refusing automatic reconnect"
+                )
                 raise
             except (OSError, ConnectionClosed) as exc:
                 logger.warning("runner connection lost: %s", exc)
@@ -384,7 +393,7 @@ class RunnerDaemon:
             try:
                 self.journal.remove(execution_id)
             except Exception as cleanup_exc:
-                raise RuntimeError(
+                raise RunnerSafetyError(
                     "runner execution journal could not be made safe after "
                     f"PID persistence failure: {cleanup_exc}"
                 ) from exc
