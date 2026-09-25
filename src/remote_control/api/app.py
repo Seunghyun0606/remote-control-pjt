@@ -310,8 +310,9 @@ def create_app(
                 pass
             finally:
                 if host_id is not None:
-                    await runner_gateway.detach(host_id, websocket)
-                    await controller.hosts.disconnect(host_id)
+                    detached = await runner_gateway.detach(host_id, websocket)
+                    if detached:
+                        await controller.hosts.disconnect(host_id)
 
     return app
 
