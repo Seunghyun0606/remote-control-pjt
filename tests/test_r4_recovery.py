@@ -678,12 +678,14 @@ async def test_pending_remote_cancel_is_readopted_and_confirmed_after_reconnect(
     )
     assert adopted == 1
 
+    cancel_message = None
     for _ in range(50):
         if websocket.sent:
             cancel_message = message_from_text(websocket.sent[-1])
             if cancel_message.type == "JOB_CANCEL":
                 break
         await asyncio.sleep(0)
+    assert cancel_message is not None
     assert cancel_message.type == "JOB_CANCEL"
     assert cancel_message.payload["execution_id"] == "exec-cancel"
     assert (await manager.require(job.id)).state == "CANCELLING"
