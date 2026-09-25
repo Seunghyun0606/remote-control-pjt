@@ -24,7 +24,7 @@ from remote_control.human_gate import (
     extract_human_gate_from_text,
     human_gate_protocol_instruction,
 )
-from remote_control.process_control import terminate_process_tree
+from remote_control.process_control import terminate_persisted_codex_process
 from remote_control.projects.adapters import NoProjectWork, ProjectAdapterRegistry
 from remote_control.projects.registry import ProjectRegistry
 from remote_control.recovery.models import RecoveryKind, RecoveryMode
@@ -1071,7 +1071,12 @@ class JobManager:
                 or job.pid <= 0
             ):
                 continue
-            stopped = await terminate_process_tree(job.pid, timeout_seconds=10)
+            project = self.projects.get(job.project_id)
+            stopped = await terminate_persisted_codex_process(
+                job.pid,
+                working_directory=project.path_for(self.local_host_id),
+                timeout_seconds=10,
+            )
             if not stopped:
                 raise RuntimeError(
                     "refusing Controller startup because a previous local Codex "
