@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
-
 import pytest
 
 from remote_control.controller.job_manager import JobManager
@@ -235,13 +233,13 @@ async def test_runner_restart_terminates_journaled_execution_and_keeps_result_un
 
     path = tmp_path / "runner-journal.json"
     journal = RunnerExecutionJournal(path)
-    journal.start(
+    journal.reserve(
         execution_id="exec-1",
-        pid=4242,
         working_directory="C:/dev/demo",
         boot_id="old-boot",
         session_id="thread-1",
     )
+    journal.attach_pid("exec-1", 4242)
     settings = RunnerSettings(
         _env_file=None,
         REMOTE_RUNNER_HOST_ID="desktop-main",
@@ -278,9 +276,31 @@ async def test_runner_refuses_startup_when_orphan_identity_cannot_be_proven(
     )
     path = tmp_path / "runner-journal.json"
     journal = RunnerExecutionJournal(path)
-    journal.start(
+    journal.reserve(
         execution_id="exec-unsafe",
-        pid=9999,
+        working_directory="C:/dev/demo",
+        boot_id="old-boot",
+        session_id=None,
+    )
+    journal.attach_pid("exec-unsafe", 9999)
+    settings = RunnerSettings(
+        _env_file=None,
+        REMOTE_RUNNER_HOST_ID="desktop-main",
+        REMOTE_RUNNER_STATE_PATH=str(path),
+    )
+    daemon = RunnerDaemon(settings, journal=journal)
+
+    with pytest.raises(RuntimeError, match="refusing to start Runner"):
+        await daemon._recover_persisted_executions()
+
+
+
+@pytest.mark.asyncio
+async def test_runner_refuses_uncertain_starting_reservation(tmp_path):
+    path = tmp_path / "runner-journal.json"
+    journal = RunnerExecutionJournal(path)
+    journal.reserve(
+        execution_id="exec-starting",
         working_directory="C:/dev/demo",
         boot_id="old-boot",
         session_id=None,
@@ -292,5 +312,38 @@ async def test_runner_refuses_startup_when_orphan_identity_cannot_be_proven(
     )
     daemon = RunnerDaemon(settings, journal=journal)
 
-    with pytest.raises(RuntimeError, match="refusing to start Runner"):
+    with pytest.raises(RuntimeError, match="may have spawned before its PID"):
         await daemon._recover_persisted_executions()
+
+
+@pytest.mark.asyncio
+async def test_controller_refuses_active_local_job_without_durable_pid(
+    project_registry,
+    database,
+):
+    jobs = JobRepository(database)
+    await jobs.add(
+        JobRecord(
+            id="JOB-UNCERTAIN-LOCAL",
+            project_id="demo",
+            requested_by_channel="test",
+            requested_by_user="100",
+            requested_host="lightsail-main",
+            assigned_host="lightsail-main",
+            instruction="uncertain",
+            state="RUNNING",
+            external_session_id="thread-local",
+            pid=None,
+        )
+    )
+    manager = JobManager(
+        projects=project_registry,
+        jobs=jobs,
+        events=EventRepository(database),
+        runner=FakeAgentRunner(),
+        local_host_id="lightsail-main",
+        recovery=RecoveryRepository(database),
+    )
+
+    with pytest.raises(RuntimeError, match="PID was not durably recorded"):
+        await manager.reconcile_startup()
