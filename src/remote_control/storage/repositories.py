@@ -10,8 +10,6 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
 from remote_control.storage.db import Database
-logger = logging.getLogger(__name__)
-
 from remote_control.storage.models import (
     ApprovalRecord,
     EventRecord,
@@ -24,6 +22,8 @@ from remote_control.storage.models import (
     TelegramMessageBindingRecord,
     TelegramProjectTopicRecord,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class JobRepository:
