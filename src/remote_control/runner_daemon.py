@@ -8,9 +8,9 @@ from pathlib import Path
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
+from remote_control.event_payloads import sanitize_agent_event
 from remote_control.human_gate import extract_human_gate
 from remote_control.projects.operations import LocalProjectOperationExecutor
-from remote_control.recovery.quota import detect_quota_event
 from remote_control.runners.base import AgentRunResult, RunHandle
 from remote_control.runners.codex import CodexRunner, extract_session_id
 from remote_control.settings import RunnerSettings
@@ -395,80 +395,4 @@ def _result_message(execution_id: str, result: AgentRunResult) -> Envelope:
 
 
 def _sanitize_event(event: dict, *, now: datetime | None = None) -> dict:
-    result: dict = {"type": str(event.get("type") or "agent_event")}
-    session_id = extract_session_id(event)
-    if session_id:
-        result["thread_id"] = session_id
-
-    for key in ("message", "text", "error"):
-        value = event.get(key)
-        if isinstance(value, str):
-            result[key] = _truncate(value, 1200)
-
-    for key in (
-        "question",
-        "prompt",
-        "details",
-        "description",
-        "header",
-        "approval_type",
-    ):
-        value = event.get(key)
-        if isinstance(value, str):
-            result[key] = _truncate(value, 2000)
-
-    for key in (
-        "resets_at",
-        "reset_at",
-        "retry_at",
-        "retry_after",
-        "retry_after_seconds",
-    ):
-        value = event.get(key)
-        if isinstance(value, (str, int, float)):
-            result[key] = value
-
-    # Text-only Codex reset hints do not carry a timezone. Parse them on the
-    # Runner where Codex produced the message, then send an explicit UTC ISO
-    # timestamp so a Controller in another timezone cannot reinterpret it.
-    quota = detect_quota_event(event, now=now)
-    if quota is not None and quota.reset_at is not None:
-        result["reset_at"] = quota.reset_at.isoformat()
-
-    options = event.get("options")
-    if isinstance(options, list):
-        result["options"] = options[:8]
-
-    item = event.get("item")
-    if isinstance(item, dict):
-        clean_item: dict = {"type": str(item.get("type") or "")}
-        for key in (
-            "text",
-            "content",
-            "command",
-            "status",
-            "question",
-            "prompt",
-            "details",
-            "description",
-            "header",
-            "approval_type",
-        ):
-            value = item.get(key)
-            if isinstance(value, str):
-                clean_item[key] = _truncate(value, 1200 if key != "command" else 400)
-        item_options = item.get("options")
-        if isinstance(item_options, list):
-            clean_item["options"] = item_options[:8]
-        exit_code = item.get("exit_code")
-        if isinstance(exit_code, int):
-            clean_item["exit_code"] = exit_code
-        result["item"] = clean_item
-
-    return result
-
-
-def _truncate(value: str, limit: int) -> str:
-    if len(value) <= limit:
-        return value
-    return value[: limit - 1] + "…"
+    return sanitize_agent_event(event, now=now)
