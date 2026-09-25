@@ -240,8 +240,9 @@ async def test_control_api_approval_uses_server_principal(
         )
 
     assert spoofed.status_code == 422
-    assert resolved.status_code == 200
+    assert resolved.status_code == 202
     assert resolved.json()["status"] == "RESOLVED"
+    await controller.jobs.wait_until_idle(job.id)
 
 
 @pytest.mark.asyncio
