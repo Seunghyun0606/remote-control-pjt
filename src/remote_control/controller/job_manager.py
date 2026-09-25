@@ -1780,13 +1780,21 @@ class JobManager:
                     "attempt": attempt,
                     "next_retry_at": next_retry.isoformat(),
                     "reset_at": signal.reset_at.isoformat() if signal.reset_at else None,
+                    "reset_grace_seconds": (
+                        self.quota_reset_grace_seconds if signal.reset_at else 0
+                    ),
                 },
             )
 
+        grace_text = (
+            f" (Codex reset + {self.quota_reset_grace_seconds // 60}분 grace)"
+            if signal.reset_at and self.quota_reset_grace_seconds
+            else ""
+        )
         await self._notify(
             job_id,
             "⏸ Codex 사용량 제한으로 대기합니다. "
-            f"시도 {attempt}, 자동 재시도: {next_retry.isoformat()}",
+            f"시도 {attempt}, 자동 재시도: {next_retry.isoformat()}{grace_text}",
         )
         asyncio.create_task(self._stop_active_turn(job_id), name=f"quota-stop:{job_id}")
         return record
