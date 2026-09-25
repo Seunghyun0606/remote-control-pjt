@@ -473,27 +473,41 @@ class JobManager:
             return job
 
     async def cancel(self, job_id: str) -> JobRecord:
-        job = await self.require(job_id)
-        current = JobState(job.state)
-        if current in TERMINAL_STATES:
-            return job
+        async with self._job_locks[f"cancel-request:{job_id}"]:
+            job = await self.require(job_id)
+            state = JobState(job.state)
+            if state in TERMINAL_STATES:
+                return job
 
-        await self._transition(job_id, JobState.CANCELLED)
-        if self.sessions is not None:
-            await self.sessions.mark(job_id, SessionStatus.CANCELLED)
-        if self.approvals is not None:
-            await self.approvals.cancel_for_job(job_id)
-        if self.recovery is not None:
-            await self.recovery.delete(job_id)
+            if state != JobState.CANCELLING:
+                await self._transition(job_id, JobState.CANCELLING)
+                if self.sessions is not None:
+                    await self.sessions.mark(job_id, SessionStatus.CANCELLING)
+                if self.approvals is not None:
+                    await self.approvals.cancel_for_job(job_id)
 
-        handle = self._handles.get(job_id)
-        if handle is not None:
-            await handle.cancel()
-        else:
+            handle = self._handles.get(job_id)
+            if handle is not None:
+                await self._persist_cancel_intent(job_id, handle)
+                try:
+                    await handle.cancel()
+                except (ConnectionError, TimeoutError) as exc:
+                    await self._record_cancel_pending(job_id, handle, exc)
+                    return await self.require(job_id)
+                await self._finalize_cancellation(job_id)
+                return await self.require(job_id)
+
             task = self._tasks.get(job_id)
-            if task is not None and not task.done():
-                task.cancel()
-        return await self.require(job_id)
+            if task is not None and not task.done() and task is not asyncio.current_task():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    pass
+
+            current = await self.require(job_id)
+            if JobState(current.state) == JobState.CANCELLING:
+                await self._finalize_cancellation(job_id)
+            return await self.require(job_id)
 
     async def require(self, job_id: str) -> JobRecord:
         job = await self.jobs.get(job_id)
@@ -680,6 +694,48 @@ class JobManager:
         if self.recovery is None:
             return 0
         current = now or datetime.now(timezone.utc)
+
+        cancelling = await self.jobs.list_states({JobState.CANCELLING.value})
+        for job in cancelling:
+            if not job.assigned_host or job.assigned_host == self.local_host_id:
+                if self.sessions is not None:
+                    await self.sessions.mark(job.id, SessionStatus.CANCELLED)
+                await self._transition(job.id, JobState.CANCELLED)
+                if self.recovery is not None:
+                    await self.recovery.delete(job.id)
+                await self.events.append(
+                    "CANCEL_RECONCILED_LOCAL",
+                    job_id=job.id,
+                    project_id=job.project_id,
+                    host_id=job.assigned_host,
+                )
+                continue
+
+            existing_cancel = await self.recovery.get(job.id)
+            await self.recovery.upsert(
+                job.id,
+                kind=existing_cancel.kind if existing_cancel else RecoveryKind.RESTART.value,
+                mode=RecoveryMode.CANCEL.value,
+                attempt_count=existing_cancel.attempt_count if existing_cancel else 0,
+                next_retry_at=None,
+                execution_id=existing_cancel.execution_id if existing_cancel else None,
+                resume_instruction=None,
+                last_error=(
+                    existing_cancel.last_error
+                    if existing_cancel
+                    else "controller restarted while cancellation was pending"
+                ),
+            )
+            await self.events.append(
+                "CANCEL_RECONCILE_WAIT",
+                job_id=job.id,
+                project_id=job.project_id,
+                host_id=job.assigned_host,
+                payload={
+                    "execution_id": existing_cancel.execution_id if existing_cancel else None
+                },
+            )
+
         preexisting_waiting_host = await self.jobs.list_states(
             {JobState.WAITING_HOST.value}
         )
@@ -889,6 +945,45 @@ class JobManager:
             self._start_task(job.id, self._execute_adopted(job.id, handle))
             await self.events.append(
                 "RUNNER_JOB_ADOPTED",
+                job_id=job.id,
+                project_id=job.project_id,
+                host_id=host_id,
+                payload={
+                    "execution_id": record.execution_id,
+                    "session_id": session_id,
+                },
+            )
+            adopted += 1
+
+        cancelling = await self.jobs.list_states({JobState.CANCELLING.value})
+        for job in cancelling:
+            if job.assigned_host != host_id:
+                continue
+            record = await self.recovery.get(job.id)
+            if (
+                record is None
+                or record.mode != RecoveryMode.CANCEL.value
+                or not record.execution_id
+            ):
+                continue
+            report = reported.get(record.execution_id)
+            if report is None:
+                continue
+            session_id = (
+                str(report.get("session_id"))
+                if report.get("session_id")
+                else job.external_session_id
+            )
+            handle = gateway.adopt_remote(
+                host_id=host_id,
+                execution_id=record.execution_id,
+                session_id=session_id,
+                on_event=self._event_callback(job.id),
+            )
+            await self._set_handle(job.id, handle)
+            self._start_task(job.id, self._execute_cancel_adopted(job.id, handle))
+            await self.events.append(
+                "RUNNER_CANCEL_ADOPTED",
                 job_id=job.id,
                 project_id=job.project_id,
                 host_id=host_id,
@@ -1194,6 +1289,24 @@ class JobManager:
             await self._fail(job_id, exc)
         finally:
             self._handles.pop(job_id, None)
+
+    async def _execute_cancel_adopted(
+        self,
+        job_id: str,
+        handle: RunHandle,
+    ) -> None:
+        try:
+            await handle.cancel()
+            await self._finalize_cancellation(job_id)
+        except (ConnectionError, TimeoutError) as exc:
+            await self._record_cancel_pending(job_id, handle, exc)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._record_cancel_pending(job_id, handle, exc)
+        finally:
+            if self._handles.get(job_id) is handle:
+                self._handles.pop(job_id, None)
 
     async def _execute_project_finalize(self, job_id: str) -> None:
         try:
@@ -1580,6 +1693,7 @@ class JobManager:
             current = await self.require(job_id)
             if JobState(current.state) in {
                 JobState.PAUSED,
+                JobState.CANCELLING,
                 JobState.CANCELLED,
                 JobState.WAITING_HUMAN,
                 JobState.WAITING_HOST,
@@ -1589,6 +1703,9 @@ class JobManager:
             raise
         except ConnectionError as exc:
             current = await self.require(job_id)
+            if JobState(current.state) == JobState.CANCELLING:
+                await self._record_cancel_pending(job_id, handle, exc)
+                return None
             await self._enter_host_wait(
                 job_id,
                 mode=RecoveryMode.RESUME,
@@ -1599,8 +1716,20 @@ class JobManager:
             return None
 
         current = await self.require(job_id)
-        if JobState(current.state) in {
+        current_state = JobState(current.state)
+        if current_state == JobState.CANCELLING:
+            if result.retry_kind != "host":
+                await self._finalize_cancellation(job_id, result=result)
+            else:
+                await self._record_cancel_pending(
+                    job_id,
+                    handle,
+                    ConnectionError(result.final_message or "runner disconnected"),
+                )
+            return None
+        if current_state in {
             JobState.PAUSED,
+            JobState.CANCELLING,
             JobState.CANCELLED,
             JobState.WAITING_HUMAN,
             JobState.WAITING_HOST,
@@ -1870,6 +1999,7 @@ class JobManager:
                 JobState.WAITING_HOST: SessionStatus.WAITING_HOST,
                 JobState.WAITING_QUOTA: SessionStatus.WAITING_QUOTA,
                 JobState.PAUSED: SessionStatus.PAUSED,
+                JobState.CANCELLING: SessionStatus.CANCELLING,
             }
             await self.sessions.record(
                 job_id=job_id,
@@ -1905,6 +2035,94 @@ class JobManager:
         )
         return f"Apply these user steering instructions together:\n{joined}"
 
+    async def _persist_cancel_intent(
+        self,
+        job_id: str,
+        handle: RunHandle,
+    ) -> None:
+        execution_id = getattr(handle, "execution_id", None)
+        if self.recovery is None or not execution_id:
+            return
+        existing = await self.recovery.get(job_id)
+        await self.recovery.upsert(
+            job_id,
+            kind=existing.kind if existing else RecoveryKind.HOST.value,
+            mode=RecoveryMode.CANCEL.value,
+            attempt_count=existing.attempt_count if existing else 0,
+            next_retry_at=None,
+            execution_id=execution_id,
+            resume_instruction=None,
+            last_error=existing.last_error if existing else None,
+        )
+
+    async def _record_cancel_pending(
+        self,
+        job_id: str,
+        handle: RunHandle,
+        exc: Exception,
+    ) -> None:
+        execution_id = getattr(handle, "execution_id", None)
+        if self.recovery is not None and execution_id:
+            existing = await self.recovery.get(job_id)
+            await self.recovery.upsert(
+                job_id,
+                kind=existing.kind if existing else RecoveryKind.HOST.value,
+                mode=RecoveryMode.CANCEL.value,
+                attempt_count=existing.attempt_count if existing else 0,
+                next_retry_at=None,
+                execution_id=execution_id,
+                resume_instruction=None,
+                last_error=str(exc),
+            )
+        job = await self.require(job_id)
+        await self.events.append(
+            "CANCEL_PENDING",
+            job_id=job_id,
+            project_id=job.project_id,
+            host_id=job.assigned_host,
+            payload={
+                "execution_id": execution_id,
+                "error": str(exc),
+            },
+        )
+
+    async def _finalize_cancellation(
+        self,
+        job_id: str,
+        *,
+        result: AgentRunResult | None = None,
+    ) -> None:
+        async with self._job_locks[f"cancel-finalize:{job_id}"]:
+            job = await self.require(job_id)
+            state = JobState(job.state)
+            if state == JobState.CANCELLED:
+                return
+            if state != JobState.CANCELLING:
+                return
+
+            if result is not None:
+                await self.jobs.update(
+                    job_id,
+                    result=result.final_message,
+                    error=None,
+                    external_session_id=result.session_id or job.external_session_id,
+                )
+            if self.sessions is not None:
+                await self.sessions.mark(job_id, SessionStatus.CANCELLED)
+            if self.recovery is not None:
+                await self.recovery.delete(job_id)
+            await self._transition(job_id, JobState.CANCELLED)
+            await self.events.append(
+                "CANCEL_CONFIRMED",
+                job_id=job_id,
+                project_id=job.project_id,
+                host_id=job.assigned_host,
+                payload={
+                    "returncode": result.returncode if result is not None else None,
+                    "execution_id": getattr(self._handles.get(job_id), "execution_id", None),
+                },
+            )
+
     async def _handle_cancelled_task(self, job_id: str) -> None:
         current = await self.require(job_id)
         state = JobState(current.state)
@@ -1926,6 +2144,7 @@ class JobManager:
         state = JobState(current.state)
         if state in TERMINAL_STATES or state in {
             JobState.PAUSED,
+            JobState.CANCELLING,
             JobState.WAITING_HUMAN,
             JobState.WAITING_HOST,
             JobState.WAITING_QUOTA,
