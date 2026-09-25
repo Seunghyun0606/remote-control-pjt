@@ -36,6 +36,11 @@ class RemoteRunHandle(RunHandle):
 
     async def cancel(self) -> None:
         if self._result_future.done():
+            result = self._result_future.result()
+            if result.retry_kind == "host":
+                raise ConnectionError(
+                    result.final_message or f"runner {self.host_id!r} disconnected"
+                )
             return
         await self.gateway.cancel_remote(
             host_id=self.host_id,
