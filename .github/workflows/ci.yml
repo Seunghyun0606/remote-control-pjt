@@ -45,3 +45,5 @@ jobs:
           tests/test_runner_gateway.py
           tests/test_project_sessions.py
           tests/test_runtime_hardening.py
+          tests/test_p0_process_safety.py
+          tests/test_p2_integrity.py
