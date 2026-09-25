@@ -1261,6 +1261,7 @@ GET /jobs/{job_id}/project-work
 - [Cancellation and Runner Reconnect Safety](docs/CANCELLATION_AND_RECONNECT.md)
 - [Runtime Hardening — P0/P1 Closure](docs/RUNTIME_HARDENING_P0_P1.md)
 - [Runtime Hardening — P2](docs/RUNTIME_HARDENING_P2.md)
+- [Startup Preflight — P1 Closure](docs/STARTUP_PREFLIGHT_P1.md)
 - [Process Safety P0 Closure](docs/PROCESS_SAFETY_P0.md)
 - [Sessions and Feedback](docs/SESSIONS_AND_FEEDBACK.md)
 - [Human Gate](docs/HUMAN_GATE.md)
