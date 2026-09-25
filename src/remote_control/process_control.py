@@ -24,8 +24,10 @@ async def terminate_persisted_codex_process(
     command_line = await process_command_line(pid)
     if not command_line:
         return False
-    normalized_command = canonical_working_directory(command_line)
+    normalized_command = command_line.strip().replace("\\", "/")
     normalized_directory = canonical_working_directory(working_directory)
+    if os.name == "nt":
+        normalized_command = normalized_command.casefold()
     if "--cd" not in normalized_command or normalized_directory not in normalized_command:
         return False
     return await terminate_process_tree(
