@@ -28,7 +28,7 @@ The event ledger records `SESSION_RESUME_FAILED.fallback_allowed` before any fal
 
 The Remote Runner is a long-lived supervisor. Heartbeat and receive loops are supervised as one connection generation: failure of either tears down that generation and reconnects. Unexpected protocol/handler exceptions are logged and reconnect rather than terminating `run_forever`.
 
-Background Job-finalizer task exceptions are also consumed and logged so they do not become unobserved asyncio task failures.
+Background Job-finalizer task exceptions are also consumed and logged so they do not become unobserved asyncio task failures. A process-safety exception is different: if the Runner cannot prove a spawned Codex process was terminated, it preserves the durable journal entry, closes the active connection and refuses automatic reconnect instead of reporting a terminal Job result.
 
 ## ProjectOperationExecutor
 
