@@ -456,6 +456,7 @@ class JobManager:
         handle = self._handles.get(job_id)
         if handle is not None:
             await handle.cancel()
+            await self.jobs.update(job_id, pid=None)
         return await self.require(job_id)
 
     async def resume(
@@ -467,6 +468,15 @@ class JobManager:
         job = await self.require(job_id)
         if JobState(job.state) != JobState.PAUSED:
             raise ValueError(f"job {job_id} is not PAUSED")
+        if (
+            job.pid is not None
+            and job.pid > 0
+            and (job.error or "").startswith("PROCESS_SAFETY_HOLD:")
+        ):
+            raise ValueError(
+                "job is in a process safety hold; restart the Controller "
+                "to reconcile the persisted Codex process before resuming"
+            )
 
         previous_task = self._tasks.get(job_id)
         if previous_task is not None and not previous_task.done():
@@ -1249,7 +1259,13 @@ class JobManager:
                     "refusing Controller startup because a previous local Codex "
                     f"process tree could not be terminated: job={job.id} pid={job.pid}"
                 )
-            await self.jobs.update(job.id, pid=None)
+            changes: dict[str, object] = {"pid": None}
+            if (job.error or "").startswith("PROCESS_SAFETY_HOLD:"):
+                changes["error"] = (
+                    "PROCESS_SAFETY_RECONCILED: previous Codex process tree "
+                    "was terminated during Controller startup"
+                )
+            await self.jobs.update(job.id, **changes)
             await self.events.append(
                 "LOCAL_ORPHAN_TERMINATED_ON_STARTUP",
                 job_id=job.id,
@@ -1640,6 +1656,8 @@ class JobManager:
             await self._finish_or_continue(job_id, result)
         except asyncio.CancelledError:
             await self._handle_cancelled_task(job_id)
+        except ProcessSafetyError as exc:
+            await self._hold_process_safety(job_id, exc)
         except Exception as exc:
             await self._fail(job_id, exc)
         finally:
@@ -1660,6 +1678,8 @@ class JobManager:
             await self._finish_or_continue(job_id, result)
         except asyncio.CancelledError:
             await self._handle_cancelled_task(job_id)
+        except ProcessSafetyError as exc:
+            await self._hold_process_safety(job_id, exc)
         except Exception as exc:
             await self._fail(job_id, exc)
         finally:
@@ -1673,6 +1693,8 @@ class JobManager:
             await self._finish_or_continue(job_id, result)
         except asyncio.CancelledError:
             await self._handle_cancelled_task(job_id)
+        except ProcessSafetyError as exc:
+            await self._hold_process_safety(job_id, exc)
         except Exception as exc:
             await self._fail(job_id, exc)
         finally:
@@ -1685,6 +1707,8 @@ class JobManager:
                 await self._finish_or_continue(job_id, result)
         except asyncio.CancelledError:
             await self._handle_cancelled_task(job_id)
+        except ProcessSafetyError as exc:
+            await self._hold_process_safety(job_id, exc)
         except Exception as exc:
             await self._fail(job_id, exc)
         finally:
@@ -2003,6 +2027,8 @@ class JobManager:
                         "Codex session resume failed without safe fallback: "
                         + (result.final_message or f"returncode={result.returncode}")
                     )
+            except ProcessSafetyError:
+                raise
             except ConnectionError as exc:
                 await self._enter_host_wait(
                     job_id,
@@ -2130,6 +2156,9 @@ class JobManager:
             }:
                 return None
             raise
+        except ProcessSafetyError as exc:
+            await self._hold_process_safety(job_id, exc)
+            return None
         except ConnectionError as exc:
             current = await self.require(job_id)
             if JobState(current.state) == JobState.CANCELLING:
@@ -2441,6 +2470,7 @@ class JobManager:
             handle = self._handles.get(job_id)
             if handle is not None:
                 await handle.cancel()
+                await self.jobs.update(job_id, pid=None)
                 return
             await asyncio.sleep(0)
 
@@ -2604,6 +2634,42 @@ class JobManager:
                     "execution_id": getattr(self._handles.get(job_id), "execution_id", None),
                 },
             )
+
+    async def _hold_process_safety(
+        self,
+        job_id: str,
+        exc: ProcessSafetyError,
+    ) -> None:
+        job = await self.require(job_id)
+        state = JobState(job.state)
+        if state in TERMINAL_STATES:
+            raise RuntimeError(
+                "process safety hold reached a terminal Job unexpectedly: "
+                f"job={job_id} state={state.value}"
+            ) from exc
+
+        await self.jobs.update(
+            job_id,
+            pid=exc.pid,
+            error=f"PROCESS_SAFETY_HOLD: {exc}",
+        )
+        if state in {JobState.STARTING, JobState.RUNNING}:
+            await self._transition(job_id, JobState.PAUSED)
+        if self.sessions is not None:
+            await self.sessions.mark(job_id, SessionStatus.PAUSED)
+        await self.events.append(
+            "PROCESS_SAFETY_HOLD",
+            job_id=job_id,
+            project_id=job.project_id,
+            host_id=job.assigned_host,
+            payload={"pid": exc.pid, "error": str(exc)},
+        )
+        await self._notify(
+            job_id,
+            "⛔ Codex process 종료 여부를 확인할 수 없어 안전 정지했습니다. "
+            "working-tree lock을 유지합니다. Controller를 재시작해 process를 "
+            "정리한 뒤 /resume 하세요.",
+        )
 
     async def _handle_cancelled_task(self, job_id: str) -> None:
         current = await self.require(job_id)
