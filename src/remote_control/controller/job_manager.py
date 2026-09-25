@@ -1825,13 +1825,19 @@ class JobManager:
     def _event_callback(self, job_id: str):
         async def on_event(event: dict) -> None:
             job = await self.require(job_id)
-            await self.events.append(
-                "AGENT_EVENT",
-                job_id=job_id,
-                project_id=job.project_id,
-                host_id=job.assigned_host,
-                payload=_small_event(event),
-            )
+            try:
+                await self.events.append(
+                    "AGENT_EVENT",
+                    job_id=job_id,
+                    project_id=job.project_id,
+                    host_id=job.assigned_host,
+                    payload=_small_event(event),
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to persist AGENT_EVENT; continuing agent execution job_id=%s",
+                    job_id,
+                )
 
             session_id = extract_session_id(event)
             if session_id:
