@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import re
+import time
+from dataclasses import dataclass
 from uuid import uuid4
 
 from telegram import (
@@ -43,6 +45,17 @@ _STEERABLE_STATES = {
     JobState.RUNNING,
 }
 
+
+@dataclass(slots=True)
+class _PendingSteer:
+    user_id: str
+    project_id: str
+    instruction: str
+    chat_id: str
+    thread_id: int | None
+    created_at: float
+
+
 BOT_COMMANDS = (
     BotCommand("start", "도움말과 Project Topic 동기화"),
     BotCommand("help", "사용 가능한 명령 보기"),
@@ -72,6 +85,7 @@ class TelegramProvider(MessagingProvider):
         controller: ControllerService,
         topics: TelegramProjectTopicRepository | None = None,
         bindings: TelegramMessageBindingRepository | None = None,
+        selection_ttl_seconds: int = 300,
     ) -> None:
         if not token:
             raise ValueError("Telegram bot token is required")
@@ -81,6 +95,7 @@ class TelegramProvider(MessagingProvider):
         self.controller = controller
         self.topics = topics
         self.bindings = bindings
+        self.selection_ttl_seconds = max(int(selection_ttl_seconds), 1)
         self.application: Application = ApplicationBuilder().token(token).build()
         self.application.add_handler(
             CallbackQueryHandler(self._handle_callback, pattern=r"^approval:")
@@ -95,10 +110,7 @@ class TelegramProvider(MessagingProvider):
         self.controller.jobs.set_notifier(self.send_message)
         self.controller.jobs.set_approval_notifier(self.send_approval)
         self._topics_enabled = False
-        self._pending_steers: dict[
-            str,
-            tuple[str, str, str, str, int | None],
-        ] = {}
+        self._pending_steers: dict[str, _PendingSteer] = {}
 
     async def start(self) -> None:
         await self.application.initialize()
@@ -459,14 +471,23 @@ class TelegramProvider(MessagingProvider):
 
         try:
             token, job_id = parse_job_selection_callback(query.data or "")
-            pending = self._pending_steers.pop(token, None)
+            pending = self._pending_steers.get(token)
             if pending is None:
                 await query.answer("선택 시간이 만료되었습니다.", show_alert=True)
                 return
-            pending_user, project_id, instruction, chat_id, thread_id = pending
-            if pending_user != str(user.id):
+            if pending.user_id != str(user.id):
                 await query.answer("다른 사용자의 선택입니다.", show_alert=True)
                 return
+            if self._pending_steer_expired(pending):
+                self._pending_steers.pop(token, None)
+                await query.answer("선택 시간이 만료되었습니다.", show_alert=True)
+                return
+
+            self._pending_steers.pop(token, None)
+            project_id = pending.project_id
+            instruction = pending.instruction
+            chat_id = pending.chat_id
+            thread_id = pending.thread_id
 
             job = await self.controller.jobs.select_for_user(
                 str(user.id),
@@ -550,13 +571,15 @@ class TelegramProvider(MessagingProvider):
         instruction: str,
         jobs: list,
     ) -> None:
+        self._purge_expired_pending_steers()
         token = uuid4().hex[:10]
-        self._pending_steers[token] = (
-            user_id,
-            project_id,
-            instruction,
-            chat_id,
-            thread_id,
+        self._pending_steers[token] = _PendingSteer(
+            user_id=user_id,
+            project_id=project_id,
+            instruction=instruction,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            created_at=time.monotonic(),
         )
         buttons = [
             [
@@ -576,6 +599,27 @@ class TelegramProvider(MessagingProvider):
             ),
             reply_markup=InlineKeyboardMarkup(buttons),
         )
+
+    def _pending_steer_expired(
+        self,
+        pending: _PendingSteer,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        current = time.monotonic() if now is None else now
+        ttl = getattr(self, "selection_ttl_seconds", 300)
+        return current - pending.created_at >= ttl
+
+    def _purge_expired_pending_steers(self, *, now: float | None = None) -> int:
+        current = time.monotonic() if now is None else now
+        expired = [
+            token
+            for token, pending in self._pending_steers.items()
+            if self._pending_steer_expired(pending, now=current)
+        ]
+        for token in expired:
+            self._pending_steers.pop(token, None)
+        return len(expired)
 
     async def _project_for_thread(
         self,
