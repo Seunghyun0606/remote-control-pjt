@@ -464,6 +464,10 @@ async def test_runner_reconcile_recovers_missing_execution_id_by_latest_working_
         ),
     )
     await _wait_for_state(manager, "JOB-REMOTE-CRASH-WINDOW", "COMPLETED")
+    for _ in range(100):
+        if websocket.sent:
+            break
+        await asyncio.sleep(0.01)
     assert websocket.sent
     from remote_control.transport.protocol import Envelope
     ack = Envelope.model_validate_json(websocket.sent[-1])
