@@ -40,7 +40,7 @@ def create_app(
     api_token: str = "",
     web_ui_enabled: bool = True,
 ) -> FastAPI:
-    app = FastAPI(title="Remote Agent Control", version="0.11.0")
+    app = FastAPI(title="Remote Agent Control", version="0.11.1")
     dashboard = DashboardService(controller)
 
     if api_token:
