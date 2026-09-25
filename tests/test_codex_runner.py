@@ -266,3 +266,32 @@ async def test_read_result_survives_oversized_jsonl_event(monkeypatch):
     assert events
     assert events[0]["type"] == "raw_output_truncated"
     assert events[0]["omitted_bytes"] > 0
+
+
+
+@pytest.mark.asyncio
+async def test_reader_callback_failure_terminates_codex_process_tree(monkeypatch):
+    process = _FakeProcess([{"type": "fake.progress", "message": "boom"}])
+    terminated = []
+
+    async def terminate(pid, *, process, timeout_seconds):
+        terminated.append((pid, timeout_seconds))
+        process.terminate()
+        return True
+
+    async def fail_callback(_event):
+        raise RuntimeError("event callback failed")
+
+    monkeypatch.setattr(
+        "remote_control.runners.codex.terminate_process_tree",
+        terminate,
+    )
+
+    with pytest.raises(RuntimeError, match="event callback failed"):
+        await CodexRunner()._read_result(
+            process,
+            on_event=fail_callback,
+        )
+
+    assert terminated == [(12345, 10)]
+    assert process.terminated is True
