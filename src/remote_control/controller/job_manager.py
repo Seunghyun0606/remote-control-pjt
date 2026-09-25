@@ -720,8 +720,9 @@ class JobManager:
         return candidates[0]
 
     async def reconcile_startup(self, *, now: datetime | None = None) -> int:
+        stale_locks = await self._reconcile_stale_project_session_locks()
         if self.recovery is None:
-            return 0
+            return stale_locks
         current = now or datetime.now(timezone.utc)
 
         cancelling = await self.jobs.list_states({JobState.CANCELLING.value})
@@ -775,7 +776,7 @@ class JobManager:
                 JobState.RUNNING.value,
             }
         )
-        count = 0
+        count = stale_locks
         for job in recoverable:
             existing = await self.recovery.get(job.id)
             session_id = await self._external_session_id(job)
@@ -1023,6 +1024,31 @@ class JobManager:
             )
             adopted += 1
         return adopted
+
+    async def _reconcile_stale_project_session_locks(self) -> int:
+        if self.project_sessions is None:
+            return 0
+        released = 0
+        for project_session in await self.project_sessions.list_locked():
+            job_id = project_session.locked_by_job_id
+            if not job_id:
+                continue
+            job = await self.jobs.get(job_id)
+            if job is not None and JobState(job.state) not in TERMINAL_STATES:
+                continue
+            reason = (
+                "missing_job"
+                if job is None
+                else f"terminal_job:{job.state}"
+            )
+            updated = await self.project_sessions.release_stale_lock(
+                session_id=project_session.id,
+                expected_job_id=job_id,
+                reason=reason,
+            )
+            if updated is not None and updated.locked_by_job_id is None:
+                released += 1
+        return released
 
     async def expire_approvals(self, *, now: datetime | None = None) -> int:
         if self.approvals is None:
