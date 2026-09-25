@@ -5,7 +5,9 @@ import pytest
 
 from remote_control.controller.job_manager import JobManager
 from remote_control.execution_leases import ExecutionLeaseRegistry
-from remote_control.recovery.models import RecoveryMode
+from remote_control.projects.models import ProjectDefinition, RepositoryConfig
+from remote_control.projects.registry import ProjectRegistry
+from remote_control.recovery.models import RecoveryKind, RecoveryMode
 from remote_control.runner_daemon import RunnerDaemon
 from remote_control.runner_journal import RunnerExecutionJournal
 from remote_control.runners.fake import FakeAgentRunner
@@ -18,6 +20,7 @@ from remote_control.storage.repositories import (
     RecoveryRepository,
 )
 from remote_control.transport.protocol import message
+from remote_control.transport.runner_ws import RunnerGateway
 
 
 async def _wait_for_state(manager: JobManager, job_id: str, state: str) -> None:
@@ -347,3 +350,117 @@ async def test_controller_refuses_active_local_job_without_durable_pid(
 
     with pytest.raises(RuntimeError, match="PID was not durably recorded"):
         await manager.reconcile_startup()
+
+
+
+class _FakeWebSocket:
+    def __init__(self):
+        self.sent = []
+        self.closed = []
+
+    async def send_text(self, text):
+        self.sent.append(text)
+
+    async def close(self, code=1000):
+        self.closed.append(code)
+
+
+@pytest.mark.asyncio
+async def test_runner_reconcile_recovers_missing_execution_id_by_latest_working_tree(
+    tmp_path,
+    database,
+):
+    projects = ProjectRegistry(
+        {
+            "demo": ProjectDefinition(
+                id="demo",
+                name="Demo",
+                repository=RepositoryConfig(
+                    path={"desktop-main": "C:/dev/demo"}
+                ),
+                allowed_hosts=["desktop-main"],
+                default_host="desktop-main",
+            )
+        }
+    )
+    jobs = JobRepository(database)
+    recovery = RecoveryRepository(database)
+    await jobs.add(
+        JobRecord(
+            id="JOB-REMOTE-CRASH-WINDOW",
+            project_id="demo",
+            requested_by_channel="telegram",
+            requested_by_user="100",
+            requested_host="desktop-main",
+            assigned_host="desktop-main",
+            instruction="unfinished",
+            state="WAITING_HOST",
+            external_session_id="thread-current",
+        )
+    )
+    await recovery.upsert(
+        "JOB-REMOTE-CRASH-WINDOW",
+        kind=RecoveryKind.RESTART.value,
+        mode=RecoveryMode.RESUME.value,
+        attempt_count=0,
+        next_retry_at=None,
+        execution_id=None,
+        resume_instruction="continue",
+        last_error="controller restarted before execution id was persisted",
+    )
+    manager = JobManager(
+        projects=projects,
+        jobs=jobs,
+        events=EventRepository(database),
+        runner=FakeAgentRunner(),
+        local_host_id="lightsail-main",
+        recovery=recovery,
+        execution_leases=_lease_registry(database),
+    )
+    await manager._acquire_execution_lease(
+        "JOB-REMOTE-CRASH-WINDOW",
+        "desktop-main",
+    )
+
+    gateway = RunnerGateway()
+    websocket = _FakeWebSocket()
+    await gateway.attach("desktop-main", websocket)
+
+    adopted = await manager.reconcile_runner(
+        host_id="desktop-main",
+        running_jobs=[
+            {
+                "execution_id": "exec-current",
+                "session_id": "thread-current",
+                "working_directory": "C:/dev/demo",
+                "started_at": "2026-09-26T10:00:00+00:00",
+            }
+        ],
+        completed_jobs=[
+            {
+                "execution_id": "exec-old",
+                "session_id": "thread-old",
+                "working_directory": "C:/dev/demo",
+                "started_at": "2026-09-25T10:00:00+00:00",
+            }
+        ],
+        gateway=gateway,
+    )
+
+    assert adopted == 1
+    rebound = await recovery.get("JOB-REMOTE-CRASH-WINDOW")
+    assert rebound is not None
+    assert rebound.execution_id == "exec-current"
+    assert (await manager.require("JOB-REMOTE-CRASH-WINDOW")).state == "RUNNING"
+
+    await gateway.handle(
+        "desktop-main",
+        message(
+            "JOB_RESULT",
+            execution_id="exec-current",
+            returncode=0,
+            session_id="thread-current",
+            final_message="done",
+        ),
+    )
+    await _wait_for_state(manager, "JOB-REMOTE-CRASH-WINDOW", "COMPLETED")
