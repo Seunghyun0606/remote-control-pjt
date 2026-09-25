@@ -124,7 +124,7 @@ async def test_startup_preserves_project_session_lock_for_active_job(
             requested_host="lightsail-main",
             assigned_host="lightsail-main",
             instruction="active",
-            state="RUNNING",
+            state="WAITING_HOST",
         )
     )
     session = await project_sessions.acquire(
