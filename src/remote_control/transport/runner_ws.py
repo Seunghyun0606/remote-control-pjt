@@ -181,9 +181,10 @@ class RunnerGateway:
                 f"for execution {execution_id!r}"
             ) from exc
 
-        if result.retry_kind == "host":
+        if result.retry_kind in {"host", "cancel_unconfirmed"}:
             raise ConnectionError(
-                result.final_message or f"runner {host_id!r} disconnected during cancellation"
+                result.final_message
+                or f"runner {host_id!r} could not confirm cancellation"
             )
 
     async def start_remote(
@@ -337,6 +338,14 @@ class RunnerGateway:
         execution_id = str(payload.get("execution_id") or "")
         pending = self._pending.get(execution_id)
         if pending is None or pending.host_id != host_id:
+            if envelope.type == "JOB_RESULT" and execution_id:
+                try:
+                    await self.send(
+                        host_id,
+                        message("JOB_RESULT_ACK", execution_id=execution_id),
+                    )
+                except ConnectionError:
+                    pass
             return
 
         if envelope.type == "JOB_ACCEPTED":
@@ -371,6 +380,13 @@ class RunnerGateway:
                     )
                 )
             self._pending.pop(execution_id, None)
+            try:
+                await self.send(
+                    host_id,
+                    message("JOB_RESULT_ACK", execution_id=execution_id),
+                )
+            except ConnectionError:
+                pass
             return
 
         if envelope.type == "JOB_ERROR":
