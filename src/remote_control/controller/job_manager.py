@@ -2529,12 +2529,41 @@ class JobManager:
             JobState.WAITING_HUMAN,
             JobState.WAITING_HOST,
             JobState.WAITING_QUOTA,
-        }:
+        } or state in TERMINAL_STATES:
             return
-        if state not in TERMINAL_STATES:
-            await self._transition(job_id, JobState.CANCELLED)
-            if self.recovery is not None:
-                await self.recovery.delete(job_id)
+
+        # Task cancellation is not proof that the OS process stopped. Keep the
+        # Job and its execution lease non-terminal until recovery can reconcile
+        # local process state or a remote Runner snapshot.
+        if self.recovery is not None:
+            mode = (
+                RecoveryMode.RESUME
+                if await self._external_session_id(current)
+                else RecoveryMode.START
+            )
+            await self._enter_host_wait(
+                job_id,
+                mode=mode,
+                error="execution task was cancelled before process termination was proven",
+                assigned_host=current.assigned_host,
+                resume_instruction=(
+                    RESTART_RESUME_INSTRUCTION
+                    if mode == RecoveryMode.RESUME
+                    else None
+                ),
+            )
+            return
+
+        await self.jobs.update(
+            job_id,
+            error="execution task cancelled; process termination is unconfirmed",
+        )
+        await self.events.append(
+            "TASK_CANCEL_UNCONFIRMED",
+            job_id=job_id,
+            project_id=current.project_id,
+            host_id=current.assigned_host,
+        )
 
     async def _fail(self, job_id: str, exc: Exception) -> None:
         current = await self.require(job_id)
