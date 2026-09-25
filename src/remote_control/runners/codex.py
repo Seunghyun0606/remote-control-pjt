@@ -243,7 +243,7 @@ class CodexRunner(AgentRunner):
                 )
             )
             return CodexRunHandle(process, reader_task)
-        except BaseException:
+        except BaseException as exc:
             stopped = await terminate_process_tree(
                 process.pid,
                 process=process,
@@ -253,7 +253,7 @@ class CodexRunner(AgentRunner):
                 raise RuntimeError(
                     "Codex initialization failed and the spawned process tree "
                     f"could not be terminated: pid={process.pid}"
-                )
+                ) from exc
             raise
 
     async def _read_result(
@@ -346,7 +346,7 @@ class CodexRunner(AgentRunner):
                 retry_kind="quota" if quota_signal is not None else None,
                 retry_at=quota_signal.reset_at if quota_signal is not None else None,
             )
-        except BaseException:
+        except BaseException as exc:
             if process.returncode is None:
                 stopped = await terminate_process_tree(
                     process.pid,
@@ -356,7 +356,7 @@ class CodexRunner(AgentRunner):
                 if not stopped:
                     raise RuntimeError(
                         f"failed to terminate Codex process tree after reader failure pid={process.pid}"
-                    )
+                    ) from exc
             if not stderr_task.done():
                 stderr_task.cancel()
                 await asyncio.gather(stderr_task, return_exceptions=True)
