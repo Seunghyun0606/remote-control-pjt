@@ -32,8 +32,11 @@ Modes:
 - `START`: start the Job when a Host becomes available
 - `RESUME`: continue from Codex session/repository state
 - `ADOPT`: runtime metadata for a remote execution that may still be alive
+- `CANCEL`: preserve a remote cancellation intent until execution termination is confirmed
 
 Recovery records are removed when the Job reaches a terminal state.
+
+A remote Job in `CANCELLING` is deliberately non-terminal. If its Runner disconnects, the recovery row keeps `mode=CANCEL` and the execution id so a reconnect can re-adopt that execution and finish cancellation safely. The Project Session is not unlocked merely because the cancel request was sent.
 
 ## WAITING_HOST
 
