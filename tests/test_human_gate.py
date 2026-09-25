@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from pathlib import Path
 
 import pytest
@@ -131,4 +133,17 @@ async def test_runner_gateway_forwards_human_gate_event():
 
     assert events
     assert events[0]["question"] == "Proceed?"
-    await handle.cancel()
+
+    cancel_task = asyncio.create_task(handle.cancel())
+    await asyncio.sleep(0)
+    await gateway.handle(
+        "desktop-main",
+        message(
+            "JOB_RESULT",
+            execution_id=handle.execution_id,
+            returncode=130,
+            session_id="thread-1",
+            final_message="cancelled",
+        ),
+    )
+    await cancel_task
