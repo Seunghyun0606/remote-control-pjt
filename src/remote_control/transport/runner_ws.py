@@ -59,11 +59,12 @@ class _PendingProjectOperation:
 
 
 class RunnerGateway:
-    def __init__(self) -> None:
+    def __init__(self, *, cancel_ack_timeout_seconds: int = 30) -> None:
         self._connections: dict[str, WebSocket] = {}
         self._pending: dict[str, _PendingRun] = {}
         self._project_pending: dict[str, _PendingProjectOperation] = {}
         self._lock = asyncio.Lock()
+        self.cancel_ack_timeout_seconds = max(cancel_ack_timeout_seconds, 1)
 
     async def attach(self, host_id: str, websocket: WebSocket) -> None:
         async with self._lock:
@@ -72,10 +73,12 @@ class RunnerGateway:
         if previous is not None and previous is not websocket:
             await previous.close(code=1012)
 
-    async def detach(self, host_id: str, websocket: WebSocket) -> None:
+    async def detach(self, host_id: str, websocket: WebSocket) -> bool:
         async with self._lock:
-            if self._connections.get(host_id) is websocket:
-                self._connections.pop(host_id, None)
+            if self._connections.get(host_id) is not websocket:
+                return False
+            self._connections.pop(host_id, None)
+
         for execution_id, pending in list(self._pending.items()):
             if pending.host_id == host_id and not pending.future.done():
                 pending.future.set_result(
@@ -93,6 +96,7 @@ class RunnerGateway:
                     ConnectionError(f"runner {host_id!r} disconnected")
                 )
                 self._project_pending.pop(request_id, None)
+        return True
 
     def is_connected(self, host_id: str) -> bool:
         return host_id in self._connections
@@ -148,21 +152,34 @@ class RunnerGateway:
         execution_id: str,
         session_id: str | None,
     ) -> None:
-        pending = self._pending.pop(execution_id, None)
-        try:
-            await self.send(
-                host_id,
-                message("JOB_CANCEL", execution_id=execution_id),
+        del session_id
+        pending = self._pending.get(execution_id)
+        if pending is None or pending.future.done():
+            return
+        if pending.host_id != host_id:
+            raise ConnectionError(
+                f"execution {execution_id!r} is not owned by runner {host_id!r}"
             )
-        finally:
-            if pending is not None and not pending.future.done():
-                pending.future.set_result(
-                    AgentRunResult(
-                        returncode=130,
-                        session_id=session_id,
-                        final_message="cancelled by controller",
-                    )
-                )
+
+        await self.send(
+            host_id,
+            message("JOB_CANCEL", execution_id=execution_id),
+        )
+        try:
+            result = await asyncio.wait_for(
+                asyncio.shield(pending.future),
+                timeout=self.cancel_ack_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"runner {host_id!r} did not confirm cancellation "
+                f"for execution {execution_id!r}"
+            ) from exc
+
+        if result.retry_kind == "host":
+            raise ConnectionError(
+                result.final_message or f"runner {host_id!r} disconnected during cancellation"
+            )
 
     async def start_remote(
         self,
