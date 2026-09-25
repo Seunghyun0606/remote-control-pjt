@@ -5,6 +5,7 @@ import pytest
 
 from remote_control.controller.job_manager import JobManager
 from remote_control.execution_leases import ExecutionLeaseRegistry
+from remote_control.process_control import ProcessSafetyError
 from remote_control.projects.models import ProjectDefinition, RepositoryConfig
 from remote_control.projects.registry import ProjectRegistry
 from remote_control.recovery.models import RecoveryKind, RecoveryMode
@@ -92,6 +93,79 @@ async def test_same_working_tree_is_exclusive_across_users_and_channels(
     )
     await manager.wait_until_idle(third.id)
     assert (await manager.require(third.id)).state == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_local_process_safety_error_holds_lease_until_pid_is_reconciled(
+    monkeypatch,
+    project_registry,
+    database,
+):
+    events = EventRepository(database)
+    leases = _lease_registry(database)
+    runner = FakeAgentRunner()
+
+    async def unsafe_start(**_kwargs):
+        raise ProcessSafetyError(
+            "spawned Codex could not be terminated",
+            pid=7777,
+        )
+
+    runner.start = unsafe_start
+    manager = JobManager(
+        projects=project_registry,
+        jobs=JobRepository(database),
+        events=events,
+        runner=runner,
+        local_host_id="lightsail-main",
+        execution_leases=leases,
+        recovery=RecoveryRepository(database),
+    )
+
+    job = await manager.create(
+        project_id="demo",
+        instruction="unsafe start",
+        requested_by_channel="telegram",
+        requested_by_user="100",
+    )
+    await _wait_for_state(manager, job.id, "PAUSED")
+
+    held = await manager.require(job.id)
+    assert held.pid == 7777
+    assert (held.error or "").startswith("PROCESS_SAFETY_HOLD:")
+    assert await leases.get_for_job(job.id) is not None
+
+    with pytest.raises(ValueError, match="process safety hold"):
+        await manager.resume(job.id)
+
+    async def cannot_terminate(pid, *, working_directory, timeout_seconds):
+        del pid, working_directory, timeout_seconds
+        return False
+
+    monkeypatch.setattr(
+        "remote_control.controller.job_manager.terminate_persisted_codex_process",
+        cannot_terminate,
+    )
+    with pytest.raises(RuntimeError, match="termination is still unconfirmed"):
+        await manager.cancel(job.id)
+
+    still_held = await manager.require(job.id)
+    assert still_held.state == "PAUSED"
+    assert still_held.pid == 7777
+    assert await leases.get_for_job(job.id) is not None
+
+    async def terminate(pid, *, working_directory, timeout_seconds):
+        del pid, working_directory, timeout_seconds
+        return True
+
+    monkeypatch.setattr(
+        "remote_control.controller.job_manager.terminate_persisted_codex_process",
+        terminate,
+    )
+    cancelled = await manager.cancel(job.id)
+    assert cancelled.state == "CANCELLED"
+    assert cancelled.pid is None
+    assert await leases.get_for_job(job.id) is None
 
 
 @pytest.mark.asyncio
