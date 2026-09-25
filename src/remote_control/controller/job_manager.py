@@ -1704,6 +1704,7 @@ class JobManager:
     ) -> None:
         current_result = result
         while True:
+            result_handle = self._handles.get(job_id)
             current = await self.require(job_id)
             if JobState(current.state) in {
                 JobState.WAITING_HUMAN,
@@ -1720,6 +1721,7 @@ class JobManager:
                 )
                 if quota is not None:
                     await self._enter_quota_wait(job_id, quota)
+                    await self._ack_result_handle(job_id, result_handle)
                     return
                 if current_result.retry_kind == "host":
                     await self._enter_host_wait(
@@ -1737,6 +1739,7 @@ class JobManager:
                 await self._transition(job_id, JobState.FAILED)
                 if self.recovery is not None:
                     await self.recovery.delete(job_id)
+                await self._ack_result_handle(job_id, result_handle)
                 await self._notify(
                     job_id,
                     "❌ Agent 실행이 실패했습니다."
@@ -1793,6 +1796,7 @@ class JobManager:
                     )
 
             if finalize_project_os:
+                await self._ack_result_handle(job_id, result_handle)
                 await self._finalize_project_adapter(
                     job_id,
                     current_result.final_message,
@@ -1800,6 +1804,7 @@ class JobManager:
                 return
 
             if completed:
+                await self._ack_result_handle(job_id, result_handle)
                 await self._notify(
                     job_id,
                     "✅ 작업이 완료되었습니다."
@@ -1808,6 +1813,7 @@ class JobManager:
                 return
 
             assert steering is not None
+            await self._ack_result_handle(job_id, result_handle)
             await self._notify(job_id, "↪ 추가 지시를 기존 Codex session에 전달합니다.")
             next_result = await self._resume_or_fallback(
                 job_id,
@@ -1851,7 +1857,7 @@ class JobManager:
                     on_event=self._event_callback(job_id),
                 )
                 self._handles[job_id] = handle
-            await self._set_handle(job_id, handle)
+                await self._set_handle(job_id, handle)
                 current = await self.require(job_id)
                 if JobState(current.state) != JobState.RUNNING:
                     await handle.cancel()
@@ -1962,6 +1968,8 @@ class JobManager:
             host_id=job.assigned_host,
             payload={"had_session": bool(requested_session_id)},
         )
+        previous_handle = self._handles.get(job_id)
+        await self._ack_result_handle(job_id, previous_handle)
         try:
             handle = await self._start_new_turn(job, fallback_instruction)
         except ConnectionError as exc:
@@ -2051,6 +2059,7 @@ class JobManager:
         if current_state == JobState.CANCELLING:
             if result.retry_kind not in {"host", "cancel_unconfirmed"}:
                 await self._finalize_cancellation(job_id, result=result)
+                await self._ack_result_handle(job_id, handle)
             else:
                 await self._record_cancel_pending(
                     job_id,
@@ -2069,6 +2078,8 @@ class JobManager:
             JobState.WAITING_HOST,
             JobState.WAITING_QUOTA,
         }:
+            if current_state != JobState.WAITING_HOST:
+                await self._ack_result_handle(job_id, handle)
             return None
 
         identity_mismatch = bool(
@@ -2098,6 +2109,7 @@ class JobManager:
         )
         if quota is not None:
             await self._enter_quota_wait(job_id, quota)
+            await self._ack_result_handle(job_id, handle)
             return None
         if result.retry_kind == "host":
             await self._enter_host_wait(
@@ -2116,6 +2128,7 @@ class JobManager:
             and (gate := extract_human_gate_from_text(result.final_message)) is not None
         ):
             await self._enter_human_gate(job_id, gate)
+            await self._ack_result_handle(job_id, handle)
             return None
 
         return result
@@ -2390,6 +2403,28 @@ class JobManager:
         )
         return f"Apply these user steering instructions together:\n{joined}"
 
+    async def _ack_result_handle(
+        self,
+        job_id: str,
+        handle: RunHandle | None,
+    ) -> None:
+        if handle is None:
+            return
+        try:
+            await handle.acknowledge_result()
+        except ConnectionError as exc:
+            job = await self.require(job_id)
+            await self.events.append(
+                "RESULT_ACK_PENDING",
+                job_id=job_id,
+                project_id=job.project_id,
+                host_id=job.assigned_host,
+                payload={
+                    "execution_id": getattr(handle, "execution_id", None),
+                    "error": str(exc),
+                },
+            )
+
     async def _persist_cancel_intent(
         self,
         job_id: str,
@@ -2525,6 +2560,7 @@ class JobManager:
         await self._transition(job_id, JobState.FAILED)
         if self.recovery is not None:
             await self.recovery.delete(job_id)
+        await self._ack_result_handle(job_id, self._handles.get(job_id))
         await self._notify(job_id, f"❌ 작업 실패: {exc}")
 
     async def _transition(
