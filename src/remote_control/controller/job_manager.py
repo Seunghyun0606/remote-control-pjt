@@ -1204,11 +1204,14 @@ class JobManager:
             return
         job = await self.require(job_id)
         project = self.projects.get(job.project_id)
+        working_directory: str | Path = project.path_for(host_id)
+        if host_id == self.local_host_id:
+            working_directory = Path(working_directory).expanduser().resolve()
         await self.execution_leases.acquire(
             job_id=job.id,
             project_id=job.project_id,
             host_id=host_id,
-            working_directory=project.path_for(host_id),
+            working_directory=working_directory,
         )
 
     async def _reconcile_stale_project_session_locks(self) -> int:
