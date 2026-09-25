@@ -65,7 +65,7 @@ Codex quota detection accepts:
 
 Structured reset timestamps have priority. For remote execution, timezone-less quota hints are interpreted on the Runner where Codex produced the message and normalized to an explicit UTC timestamp before they reach the Controller. This prevents a UTC Controller and a local-time Desktop Runner from assigning different meanings to the same reset hint.
 
-If a future reset timestamp is available, it becomes `next_retry_at`. A time-only hint that is already in the past is treated as stale and does **not** roll over to the next day; the normal exponential backoff is used instead. This avoids an accidental ~24 hour delay when a retry lands a few seconds after the advertised reset minute.
+If Codex provides a reset timestamp, Remote Control schedules the retry for **reset time + grace period**. The default grace is 600 seconds (10 minutes), so a Codex reset at 17:37 is retried at 17:47 rather than exactly at the boundary. A time-only hint that is already in the past is treated as stale and does **not** roll over to the next day; the normal exponential backoff is used instead.
 
 Otherwise the default policy is:
 
@@ -80,6 +80,7 @@ Configure:
 ```dotenv
 REMOTE_CONTROL_QUOTA_RETRY_INITIAL_SECONDS=1800
 REMOTE_CONTROL_QUOTA_RETRY_MAX_SECONDS=7200
+REMOTE_CONTROL_QUOTA_RESET_GRACE_SECONDS=600
 ```
 
 The attempt count survives retries and resets only when the Job completes/cancels/fails.
