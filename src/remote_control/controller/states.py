@@ -31,6 +31,7 @@ _ALLOWED_TRANSITIONS: dict[JobState, set[JobState]] = {
         JobState.CANCELLED,
         JobState.WAITING_HOST,
         JobState.WAITING_QUOTA,
+        JobState.PAUSED,
         JobState.COMPLETED,
     },
     JobState.RUNNING: {
