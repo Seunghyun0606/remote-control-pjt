@@ -93,6 +93,10 @@ class Settings(_BaseSettings):
         default="",
         validation_alias="TELEGRAM_ALLOWED_USER_IDS",
     )
+    telegram_selection_ttl_seconds: int = Field(
+        default=300,
+        validation_alias="REMOTE_CONTROL_TELEGRAM_SELECTION_TTL_SECONDS",
+    )
     slack_enabled: bool = Field(
         default=False,
         validation_alias="REMOTE_CONTROL_SLACK_ENABLED",
