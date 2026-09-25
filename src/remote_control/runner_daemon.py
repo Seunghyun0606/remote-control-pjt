@@ -46,6 +46,7 @@ class RunnerDaemon:
         )
         self.running: dict[str, RunHandle] = {}
         self.running_sessions: dict[str, str | None] = {}
+        self.running_working_directories: dict[str, str] = {}
         self.completed: dict[str, AgentRunResult] = {}
         self._send_lock = asyncio.Lock()
         self._websocket: ClientConnection | None = None
@@ -142,18 +143,25 @@ class RunnerDaemon:
             {
                 "execution_id": execution_id,
                 "session_id": self.running_sessions.get(execution_id),
+                "working_directory": self.running_working_directories.get(execution_id),
             }
             for execution_id in sorted(self.running)
         ]
 
     def _completed_snapshot(self) -> list[dict]:
-        return [
-            {
-                "execution_id": execution_id,
-                "session_id": result.session_id,
-            }
-            for execution_id, result in sorted(self.completed.items())
-        ]
+        snapshot: list[dict] = []
+        for execution_id, result in sorted(self.completed.items()):
+            entry = self.journal.get(execution_id)
+            snapshot.append(
+                {
+                    "execution_id": execution_id,
+                    "session_id": result.session_id,
+                    "working_directory": (
+                        entry.working_directory if entry is not None else None
+                    ),
+                }
+            )
+        return snapshot
 
     async def _handle(self, websocket: ClientConnection, envelope: Envelope) -> None:
         if envelope.type == "JOB_START":
@@ -270,6 +278,7 @@ class RunnerDaemon:
 
         seen_session: str | None = session_id or None
         self.running_sessions[execution_id] = seen_session
+        self.running_working_directories[execution_id] = working_directory_text
         try:
             self.journal.reserve(
                 execution_id=execution_id,
@@ -279,6 +288,7 @@ class RunnerDaemon:
             )
         except Exception as exc:
             self.running_sessions.pop(execution_id, None)
+            self.running_working_directories.pop(execution_id, None)
             await self._send(
                 websocket,
                 message(
@@ -333,6 +343,7 @@ class RunnerDaemon:
                 )
         except Exception as exc:
             self.running_sessions.pop(execution_id, None)
+            self.running_working_directories.pop(execution_id, None)
             self.journal.remove(execution_id)
             await self._send(
                 websocket,
@@ -427,6 +438,7 @@ class RunnerDaemon:
             result.session_id = self.running_sessions.get(execution_id)
         self.running.pop(execution_id, None)
         self.running_sessions.pop(execution_id, None)
+        self.running_working_directories.pop(execution_id, None)
         self.journal.complete(execution_id, result)
         self.completed[execution_id] = result
         await self._flush_completed()
