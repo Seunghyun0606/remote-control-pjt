@@ -2128,6 +2128,7 @@ class JobManager:
         state = JobState(current.state)
         if state in {
             JobState.PAUSED,
+            JobState.CANCELLING,
             JobState.CANCELLED,
             JobState.WAITING_HUMAN,
             JobState.WAITING_HOST,
