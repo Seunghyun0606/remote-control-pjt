@@ -98,7 +98,7 @@ Linux Python 3.11/3.12 and Windows smoke all install with:
 pip install -c constraints/lock.txt -e ".[dev]"
 ```
 
-The lock contains exact pins for every resolved direct and transitive package. Platform-only dependencies such as `colorama` are constrained but are installed only when selected by the platform resolver. Tests also verify that every declared direct dependency is present in the lock.
+The lock contains exact pins for every resolved application direct and transitive package. Platform-only dependencies such as `colorama` are constrained but are installed only when selected by the platform resolver. Tests also verify that every declared direct dependency is present in the lock.
 
 ## P2-6 — broader Windows CI
 
