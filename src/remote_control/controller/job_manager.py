@@ -25,6 +25,7 @@ from remote_control.human_gate import (
     human_gate_protocol_instruction,
 )
 from remote_control.process_control import (
+    ProcessSafetyError,
     canonical_working_directory,
     terminate_persisted_codex_process,
 )
