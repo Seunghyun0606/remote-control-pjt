@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from remote_control.storage.models import Base
@@ -13,7 +13,23 @@ CURRENT_SCHEMA_VERSION = 1
 
 
 async def _baseline_schema(connection: AsyncConnection) -> None:
-    await connection.run_sync(Base.metadata.create_all)
+    def create_and_validate(sync_connection) -> None:
+        Base.metadata.create_all(sync_connection)
+        inspector = inspect(sync_connection)
+        for table in Base.metadata.sorted_tables:
+            actual = {
+                column["name"]
+                for column in inspector.get_columns(table.name)
+            }
+            expected = {column.name for column in table.columns}
+            missing = sorted(expected - actual)
+            if missing:
+                raise RuntimeError(
+                    "database baseline schema is missing columns: "
+                    f"table={table.name} missing={','.join(missing)}"
+                )
+
+    await connection.run_sync(create_and_validate)
 
 
 MIGRATIONS: dict[int, Migration] = {
