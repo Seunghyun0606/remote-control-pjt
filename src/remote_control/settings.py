@@ -200,6 +200,14 @@ class RunnerSettings(_BaseSettings):
         default=5,
         validation_alias="REMOTE_RUNNER_RECONNECT_SECONDS",
     )
+    state_path: str = Field(
+        default="~/.remote-control/runner-executions.json",
+        validation_alias="REMOTE_RUNNER_STATE_PATH",
+    )
+
+    @property
+    def resolved_state_path(self) -> Path:
+        return Path(self.state_path).expanduser().resolve()
 
     @property
     def capabilities(self) -> set[str]:
