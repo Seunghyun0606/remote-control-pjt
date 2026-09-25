@@ -28,7 +28,12 @@ async def terminate_persisted_codex_process(
     normalized_directory = canonical_working_directory(working_directory)
     if os.name == "nt":
         normalized_command = normalized_command.casefold()
-    if "--cd" not in normalized_command or normalized_directory not in normalized_command:
+    cd_patterns = (
+        f'--cd {normalized_directory}',
+        f'--cd "{normalized_directory}"',
+        f"--cd '{normalized_directory}'",
+    )
+    if not any(pattern in normalized_command for pattern in cd_patterns):
         return False
     return await terminate_process_tree(
         pid,
