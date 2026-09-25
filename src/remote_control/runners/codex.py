@@ -244,11 +244,16 @@ class CodexRunner(AgentRunner):
             )
             return CodexRunHandle(process, reader_task)
         except BaseException:
-            await terminate_process_tree(
+            stopped = await terminate_process_tree(
                 process.pid,
                 process=process,
                 timeout_seconds=10,
             )
+            if not stopped:
+                raise RuntimeError(
+                    "Codex initialization failed and the spawned process tree "
+                    f"could not be terminated: pid={process.pid}"
+                )
             raise
 
     async def _read_result(
