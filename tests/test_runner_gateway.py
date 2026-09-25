@@ -1,4 +1,5 @@
-import asyncio\nfrom pathlib import Path
+import asyncio
+from pathlib import Path
 
 import pytest
 
