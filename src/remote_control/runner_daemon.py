@@ -38,13 +38,18 @@ class RunnerDaemon:
         self.completed: dict[str, AgentRunResult] = {}
         self._send_lock = asyncio.Lock()
         self._websocket: ClientConnection | None = None
+        self._background_tasks: set[asyncio.Task[None]] = set()
 
     async def run_forever(self) -> None:
         while True:
             try:
                 await self._run_connection()
+            except asyncio.CancelledError:
+                raise
             except (OSError, ConnectionClosed) as exc:
                 logger.warning("runner connection lost: %s", exc)
+            except Exception:
+                logger.exception("runner connection loop failed; reconnecting")
             await asyncio.sleep(self.settings.reconnect_seconds)
 
     async def _run_connection(self) -> None:
@@ -75,15 +80,37 @@ class RunnerDaemon:
                 ),
             )
             await self._flush_completed()
-            heartbeat = asyncio.create_task(self._heartbeat(websocket))
+            heartbeat = asyncio.create_task(
+                self._heartbeat(websocket),
+                name="runner-heartbeat",
+            )
+            receiver = asyncio.create_task(
+                self._receive_loop(websocket),
+                name="runner-receiver",
+            )
             try:
-                async for raw in websocket:
-                    envelope = Envelope.model_validate_json(raw)
-                    await self._handle(websocket, envelope)
+                done, pending = await asyncio.wait(
+                    {heartbeat, receiver},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in done:
+                    await task
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
             finally:
-                heartbeat.cancel()
+                for task in (heartbeat, receiver):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(heartbeat, receiver, return_exceptions=True)
                 if self._websocket is websocket:
                     self._websocket = None
+
+    async def _receive_loop(self, websocket: ClientConnection) -> None:
+        async for raw in websocket:
+            envelope = Envelope.model_validate_json(raw)
+            await self._handle(websocket, envelope)
 
     async def _heartbeat(self, websocket: ClientConnection) -> None:
         while True:
@@ -271,7 +298,35 @@ class RunnerDaemon:
                 session_id=seen_session or handle.session_id,
             ),
         )
-        asyncio.create_task(self._finish_job(execution_id, handle))
+        self._start_background_task(
+            self._finish_job(execution_id, handle),
+            name=f"runner-job:{execution_id}",
+        )
+
+    def _start_background_task(
+        self,
+        coroutine,
+        *,
+        name: str,
+    ) -> asyncio.Task[None]:
+        task = asyncio.create_task(coroutine, name=name)
+        self._background_tasks.add(task)
+
+        def cleanup(done_task: asyncio.Task[None]) -> None:
+            self._background_tasks.discard(done_task)
+            try:
+                exc = done_task.exception()
+            except asyncio.CancelledError:
+                return
+            if exc is not None:
+                logger.error(
+                    "runner background task failed task=%s",
+                    done_task.get_name(),
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+        task.add_done_callback(cleanup)
+        return task
 
     async def _finish_job(
         self,

@@ -26,6 +26,19 @@ def collect_diagnostics(
         DiagnosticItem("Host", True, settings.host_id),
         DiagnosticItem("Config", settings.resolved_config_path.exists(), str(settings.resolved_config_path)),
         DiagnosticItem("Database", True, settings.resolved_db_url),
+        DiagnosticItem(
+            "Control API Security",
+            settings.api_is_loopback or bool(settings.api_token),
+            (
+                "loopback bind"
+                if settings.api_is_loopback
+                else (
+                    "token configured"
+                    if settings.api_token
+                    else "CONTROLLER_API_TOKEN is required for non-loopback bind"
+                )
+            ),
+        ),
     ]
 
     items.append(_executable_item("Codex", settings.codex_executable, run_versions))
@@ -102,7 +115,13 @@ def collect_diagnostics(
 
 def validate_startup(settings: Settings, projects: ProjectRegistry) -> None:
     failures: list[str] = []
-    required_names = {"Config", "Codex", "Git", "Projectctl"}
+    required_names = {
+        "Config",
+        "Codex",
+        "Git",
+        "Projectctl",
+        "Control API Security",
+    }
     for item in collect_diagnostics(settings, projects=projects, run_versions=True):
         if not item.ok and item.name in required_names:
             failures.append(f"{item.name}: {item.detail}")

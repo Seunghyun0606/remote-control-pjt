@@ -125,6 +125,11 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
     settings = Settings(_env_file=env_file or ".env")
     if not settings.runner_token:
         raise RuntimeError("CONTROLLER_RUNNER_TOKEN is required")
+    if not settings.api_is_loopback and not settings.api_token:
+        raise RuntimeError(
+            "CONTROLLER_API_TOKEN is required when REMOTE_CONTROL_API_HOST "
+            "is not loopback"
+        )
 
     projects = ProjectRegistry.from_yaml(settings.resolved_config_path)
     validate_startup(settings, projects)
@@ -268,6 +273,7 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
         controller,
         runner_gateway=gateway,
         runner_token=settings.runner_token,
+        api_token=settings.api_token,
         web_ui_enabled=settings.web_ui_enabled,
     )
     config = uvicorn.Config(

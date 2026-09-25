@@ -112,7 +112,7 @@ codex resume --include-non-interactive <codex-session-id>
 
 Remote Runner를 사용하는 경우에도 해당 Runner 프로세스의 `CODEX_HOME`이 실제 Desktop Codex store와 같아야 합니다. Session은 host-local Codex storage에 의존하므로 기존 thread가 있는 Project는 가능한 한 같은 host에서 이어가는 것이 안전합니다.
 
-Resume 시 Codex가 요청한 thread와 다른 `thread.started` ID를 반환하면 Remote Control은 정상 resume으로 인정하지 않습니다. 해당 프로세스를 중단하고 기존 repository state를 다시 읽는 새 Codex thread로 한 번 복구합니다.
+Resume 시 Codex가 요청한 thread와 다른 `thread.started` ID를 반환하면 Remote Control은 정상 resume으로 인정하지 않습니다. 명시적인 session/thread 부재 또는 `SESSION_IDENTITY_MISMATCH`인 경우에만 repository state를 다시 읽는 새 Codex thread로 복구합니다. CLI 옵션 오류, 권한/파일 오류, 실행 실패, 알 수 없는 Codex 오류는 새 thread로 숨기지 않고 원래 Job 실패로 남깁니다.
 
 ### WAITING Job 수동 재실행과 재시작 복구
 
@@ -289,6 +289,8 @@ TELEGRAM_BOT_TOKEN=<DESKTOP_BOT_TOKEN>
 TELEGRAM_ALLOWED_USER_IDS=<YOUR_NUMERIC_TELEGRAM_USER_ID>
 
 CONTROLLER_RUNNER_TOKEN=<GENERATED_RANDOM_SECRET>
+# 127.0.0.1 외 주소에 bind할 때 필수
+CONTROLLER_API_TOKEN=
 
 CODEX_EXECUTABLE=codex
 # Desktop Codex와 같은 thread store를 공유하려면 동일한 home을 사용합니다.
@@ -1162,7 +1164,7 @@ Controller는 기본적으로:
 
 에 bind합니다.
 
-외부 공개가 필요하면 인증 reverse proxy/private network를 사용하세요.
+외부 bind가 필요하면 `CONTROLLER_API_TOKEN`을 반드시 설정해야 Controller가 시작됩니다. 토큰이 설정된 경우 `/health`를 제외한 REST/UI HTTP 요청은 Bearer 또는 `X-Remote-Control-Token` 인증이 필요합니다. 브라우저 공개는 여전히 인증 reverse proxy/private network를 권장합니다.
 
 상세:
 
@@ -1219,6 +1221,8 @@ REMOTE_RUNNER_HOST_ID=desktop-main
 - Codex auth는 실행 Host 로컬에만 존재
 - Project OS canonical YAML은 `projectctl`만 변경
 - Web UI는 read-only
+- non-loopback Control API bind는 `CONTROLLER_API_TOKEN` 필수
+- Runner WebSocket secret과 Control API secret은 분리
 
 ---
 
@@ -1246,6 +1250,7 @@ GET /jobs/{job_id}/project-work
 - [Project Adapters](docs/PROJECT_ADAPTERS.md)
 - [Recovery & Scheduler](docs/RECOVERY.md)
 - [Cancellation and Runner Reconnect Safety](docs/CANCELLATION_AND_RECONNECT.md)
+- [Runtime Hardening — P0/P1 Closure](docs/RUNTIME_HARDENING_P0_P1.md)
 - [Sessions and Feedback](docs/SESSIONS_AND_FEEDBACK.md)
 - [Human Gate](docs/HUMAN_GATE.md)
 - [Messaging](docs/MESSAGING.md)

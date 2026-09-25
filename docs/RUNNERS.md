@@ -15,6 +15,21 @@ For `codex exec resume`, exec-level options such as `--sandbox` and `--cd` are p
 
 Codex JSONL stdout can contain large single-line events (for example command/tool output). The Runner launches Codex with a 16 MiB asyncio stream limit instead of Python's small default line limit so a large JSONL event does not terminate the Job with `Separator is not found, and chunk exceed the limit`.
 
+
+## Session resume failure policy
+
+Remote Control does not treat every non-zero `codex exec resume` as a missing session.
+
+A fresh Codex thread is created only for an explicitly unavailable saved session/thread/rollout or for `SESSION_IDENTITY_MISMATCH`. CLI syntax errors, launch errors, permission/filesystem failures and unknown Codex failures remain failures and preserve the original error instead of silently starting unrelated work.
+
+The event ledger records `SESSION_RESUME_FAILED.fallback_allowed` before any fallback.
+
+## Runner supervision
+
+The Remote Runner is a long-lived supervisor. Heartbeat and receive loops are supervised as one connection generation: failure of either tears down that generation and reconnects. Unexpected protocol/handler exceptions are logged and reconnect rather than terminating `run_forever`.
+
+Background Job-finalizer task exceptions are also consumed and logged so they do not become unobserved asyncio task failures.
+
 ## ProjectOperationExecutor
 
 R5 adds a separate short-lived operation boundary for repository/Project OS metadata.

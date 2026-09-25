@@ -42,11 +42,13 @@ class FakeAgentRunner(AgentRunner):
         delay: float = 0,
         resume_returncode: int | None = None,
         resume_session_id: str = "fake-session",
+        resume_final_message: str | None = None,
     ) -> None:
         self.returncode = returncode
         self.delay = delay
         self.resume_returncode = returncode if resume_returncode is None else resume_returncode
         self.resume_session_id = resume_session_id
+        self.resume_final_message = resume_final_message
         self.started: list[dict] = []
         self.resumed: list[dict] = []
 
@@ -109,9 +111,13 @@ class FakeAgentRunner(AgentRunner):
                 returncode=self.resume_returncode,
                 session_id=self.resume_session_id,
                 final_message=(
-                    "fake resumed"
-                    if self.resume_returncode == 0
-                    else "fake resume failed"
+                    self.resume_final_message
+                    if self.resume_final_message is not None
+                    else (
+                        "fake resumed"
+                        if self.resume_returncode == 0
+                        else "fake resume failed"
+                    )
                 ),
             ),
             delay=self.delay,

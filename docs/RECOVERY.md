@@ -101,7 +101,9 @@ Retry attempt: 2
 Next retry: ...
 ```
 
-When the retry becomes due, the Scheduler sends a quota-resumed notification and prefers the existing Codex session before falling back to repository state.
+When the retry becomes due, the Scheduler sends a quota-resumed notification and prefers the existing Codex session.
+
+A new Codex thread is **not** a generic recovery for arbitrary resume failure. Fallback is limited to an explicitly missing saved session/thread/rollout or `SESSION_IDENTITY_MISMATCH`. Syntax, executable, permission, filesystem and unknown resume failures remain Job failures so the root cause is not hidden.
 
 ## Recovery Scheduler
 

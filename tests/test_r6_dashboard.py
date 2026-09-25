@@ -111,3 +111,39 @@ async def test_web_ui_can_be_disabled(project_registry, database):
 
     assert page.status_code == 404
     assert snapshot.status_code == 200
+
+
+
+@pytest.mark.asyncio
+async def test_control_api_auth_protects_dashboard_and_rest(project_registry, database):
+    controller, _ = await build_controller(project_registry, database)
+    app = create_app(
+        controller,
+        api_token="control-secret",
+        web_ui_enabled=True,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+    ) as client:
+        health = await client.get("/health")
+        unauthenticated = await client.get("/dashboard")
+        wrong = await client.get(
+            "/dashboard",
+            headers={"Authorization": "Bearer wrong"},
+        )
+        bearer = await client.get(
+            "/dashboard",
+            headers={"Authorization": "Bearer control-secret"},
+        )
+        custom_header = await client.get(
+            "/projects",
+            headers={"X-Remote-Control-Token": "control-secret"},
+        )
+
+    assert health.status_code == 200
+    assert unauthenticated.status_code == 401
+    assert wrong.status_code == 401
+    assert bearer.status_code == 200
+    assert custom_header.status_code == 200

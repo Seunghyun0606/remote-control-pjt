@@ -1601,6 +1601,9 @@ class JobManager:
                 }:
                     return None
 
+                fallback_allowed = _resume_failure_allows_fallback(
+                    result.final_message
+                )
                 await self.events.append(
                     "SESSION_RESUME_FAILED",
                     job_id=job_id,
@@ -1610,8 +1613,14 @@ class JobManager:
                         "external_session_id": requested_session_id,
                         "returncode": result.returncode,
                         "error": result.final_message,
+                        "fallback_allowed": fallback_allowed,
                     },
                 )
+                if not fallback_allowed:
+                    raise RuntimeError(
+                        "Codex session resume failed without safe fallback: "
+                        + (result.final_message or f"returncode={result.returncode}")
+                    )
             except ConnectionError as exc:
                 await self._enter_host_wait(
                     job_id,
@@ -1633,6 +1642,7 @@ class JobManager:
                 if quota is not None:
                     await self._enter_quota_wait(job_id, quota, resume_instruction=instruction)
                     return None
+                fallback_allowed = _resume_failure_allows_fallback(str(exc))
                 await self.events.append(
                     "SESSION_RESUME_FAILED",
                     job_id=job_id,
@@ -1641,8 +1651,14 @@ class JobManager:
                     payload={
                         "external_session_id": requested_session_id,
                         "error": str(exc),
+                        "fallback_allowed": fallback_allowed,
                     },
                 )
+                if not fallback_allowed:
+                    raise RuntimeError(
+                        "Codex session resume failed without safe fallback: "
+                        + str(exc)
+                    ) from exc
 
         current = await self.require(job_id)
         if JobState(current.state) != JobState.RUNNING:
@@ -1765,11 +1781,19 @@ class JobManager:
         }:
             return None
 
-        if result.session_id:
+        identity_mismatch = bool(
+            result.final_message
+            and "SESSION_IDENTITY_MISMATCH" in result.final_message
+        )
+        if result.session_id and not identity_mismatch:
             await self._record_session(job_id, result.session_id)
         await self.jobs.update(
             job_id,
-            external_session_id=result.session_id or current.external_session_id,
+            external_session_id=(
+                current.external_session_id
+                if identity_mismatch
+                else result.session_id or current.external_session_id
+            ),
             result=result.final_message,
         )
 
@@ -1809,13 +1833,19 @@ class JobManager:
     def _event_callback(self, job_id: str):
         async def on_event(event: dict) -> None:
             job = await self.require(job_id)
-            await self.events.append(
-                "AGENT_EVENT",
-                job_id=job_id,
-                project_id=job.project_id,
-                host_id=job.assigned_host,
-                payload=_small_event(event),
-            )
+            try:
+                await self.events.append(
+                    "AGENT_EVENT",
+                    job_id=job_id,
+                    project_id=job.project_id,
+                    host_id=job.assigned_host,
+                    payload=_small_event(event),
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to persist AGENT_EVENT; continuing agent execution job_id=%s",
+                    job_id,
+                )
 
             session_id = extract_session_id(event)
             if session_id:
@@ -1836,16 +1866,23 @@ class JobManager:
                 feedback is not None
                 and self.feedback_throttler.allow(job_id, feedback)
             ):
-                await self.events.append(
-                    "FEEDBACK_SENT",
-                    job_id=job_id,
-                    project_id=job.project_id,
-                    host_id=job.assigned_host,
-                    payload={
-                        "level": feedback.level.value,
-                        "text": feedback.text,
-                    },
-                )
+                try:
+                    await self.events.append(
+                        "FEEDBACK_SENT",
+                        job_id=job_id,
+                        project_id=job.project_id,
+                        host_id=job.assigned_host,
+                        payload={
+                            "level": feedback.level.value,
+                            "text": feedback.text,
+                        },
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to persist FEEDBACK_SENT; continuing agent execution "
+                        "job_id=%s",
+                        job_id,
+                    )
                 await self._notify(job_id, f"⏳ 진행\n\n{feedback.text}")
 
         return on_event
@@ -2424,6 +2461,34 @@ def _small_event(event: dict) -> dict:
             clean_item["options"] = item_options[:8]
         allowed["item"] = clean_item
     return allowed
+
+
+def _resume_failure_allows_fallback(message: str | None) -> bool:
+    if not message:
+        return False
+    normalized = " ".join(message.lower().split())
+    if "session_identity_mismatch" in normalized:
+        return True
+    explicit_absence_markers = (
+        "no saved session",
+        "no session found",
+        "session not found",
+        "thread not found",
+        "no saved thread",
+        "rollout not found",
+        "no rollout found",
+        "could not find session",
+        "couldn't find session",
+        "failed to find session",
+        "could not find thread",
+        "failed to find thread",
+    )
+    if any(marker in normalized for marker in explicit_absence_markers):
+        return True
+    return (
+        ("session " in normalized or "thread " in normalized or "rollout " in normalized)
+        and " not found" in normalized
+    )
 
 
 def _optional_detail(message: str | None) -> str:

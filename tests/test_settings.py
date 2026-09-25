@@ -38,3 +38,17 @@ def test_quota_reset_grace_can_be_overridden():
         REMOTE_CONTROL_QUOTA_RESET_GRACE_SECONDS=900,
     )
     assert settings.quota_reset_grace_seconds == 900
+
+
+
+def test_control_api_token_and_loopback_detection():
+    local = Settings(_env_file=None, CONTROLLER_API_TOKEN="secret")
+    assert local.api_token == "secret"
+    assert local.api_is_loopback is True
+
+    exposed = Settings(
+        _env_file=None,
+        REMOTE_CONTROL_API_HOST="0.0.0.0",
+        CONTROLLER_API_TOKEN="secret",
+    )
+    assert exposed.api_is_loopback is False

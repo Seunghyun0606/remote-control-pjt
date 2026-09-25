@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import platform
 from functools import lru_cache
 from pathlib import Path
@@ -82,6 +83,7 @@ class Settings(_BaseSettings):
         validation_alias="REMOTE_CONTROL_RESTART_GRACE_SECONDS",
     )
     runner_token: str = Field(default="", validation_alias="CONTROLLER_RUNNER_TOKEN")
+    api_token: str = Field(default="", validation_alias="CONTROLLER_API_TOKEN")
 
     telegram_bot_token: str | None = Field(
         default=None,
@@ -137,6 +139,16 @@ class Settings(_BaseSettings):
         if not path.is_absolute():
             path = (self.resolved_home_path / path).resolve()
         return f"{prefix}{path.as_posix()}"
+
+    @property
+    def api_is_loopback(self) -> bool:
+        host = self.api_host.strip().lower()
+        if host == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return False
 
     @property
     def telegram_allowed_user_ids(self) -> set[int]:

@@ -98,8 +98,12 @@ async def test_steering_is_applied_on_next_turn(project_registry, database):
 
 
 @pytest.mark.asyncio
-async def test_resume_failure_falls_back_to_new_session(project_registry, database):
-    runner = FakeAgentRunner(delay=0.2, resume_returncode=1)
+async def test_missing_resume_session_falls_back_to_new_session(project_registry, database):
+    runner = FakeAgentRunner(
+        delay=0.2,
+        resume_returncode=1,
+        resume_final_message="No saved session found for thread fake-session",
+    )
     manager = build_manager(project_registry, database, runner)
 
     job = await manager.create(
@@ -117,6 +121,69 @@ async def test_resume_failure_falls_back_to_new_session(project_registry, databa
     assert len(runner.resumed) == 1
     assert len(runner.started) == 2
     assert "previous Codex session is unavailable" in runner.started[-1]["instruction"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_resume_failure_does_not_start_new_session(
+    project_registry,
+    database,
+):
+    runner = FakeAgentRunner(
+        delay=0.05,
+        resume_returncode=2,
+        resume_final_message="unexpected argument '--sandbox'",
+    )
+    manager = build_manager(project_registry, database, runner)
+
+    job = await manager.create(
+        project_id="demo",
+        instruction="initial work",
+        requested_by_channel="test",
+        requested_by_user="u1",
+    )
+    await wait_for_state(manager, job.id, "RUNNING")
+    await manager.pause(job.id)
+
+    await manager.resume(job.id, instruction="continue after pause")
+    await wait_for_state(manager, job.id, "FAILED")
+
+    current = await manager.require(job.id)
+    assert "without safe fallback" in (current.error or "")
+    assert len(runner.resumed) == 1
+    assert len(runner.started) == 1
+
+
+@pytest.mark.asyncio
+async def test_session_identity_mismatch_allows_new_session_fallback(
+    project_registry,
+    database,
+):
+    runner = FakeAgentRunner(
+        delay=0.05,
+        resume_returncode=65,
+        resume_session_id="other-thread",
+        resume_final_message=(
+            "SESSION_IDENTITY_MISMATCH expected=fake-session actual=other-thread"
+        ),
+    )
+    manager = build_manager(project_registry, database, runner)
+
+    job = await manager.create(
+        project_id="demo",
+        instruction="initial work",
+        requested_by_channel="test",
+        requested_by_user="u1",
+    )
+    await wait_for_state(manager, job.id, "RUNNING")
+    await manager.pause(job.id)
+
+    await manager.resume(job.id, instruction="continue after mismatch")
+    await wait_for_state(manager, job.id, "COMPLETED")
+
+    assert len(runner.resumed) == 1
+    assert len(runner.started) == 2
+    current = await manager.require(job.id)
+    assert current.external_session_id == "fake-session"
 
 
 @pytest.mark.asyncio
