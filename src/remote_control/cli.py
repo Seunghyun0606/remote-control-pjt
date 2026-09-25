@@ -207,6 +207,7 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
         progress_interval_seconds=settings.progress_interval_seconds,
         quota_retry_initial_seconds=settings.quota_retry_initial_seconds,
         quota_retry_max_seconds=settings.quota_retry_max_seconds,
+        quota_reset_grace_seconds=settings.quota_reset_grace_seconds,
         restart_grace_seconds=settings.restart_grace_seconds,
     )
     controller = ControllerService(
