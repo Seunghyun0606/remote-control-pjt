@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from remote_control.approvals.registry import ApprovalPrompt, ApprovalRegistry
 from remote_control.controller.states import JobState, TERMINAL_STATES, validate_transition
+from remote_control.event_payloads import sanitize_agent_event
 from remote_control.feedback import FeedbackPolicy, FeedbackThrottler
 from remote_control.hosts.registry import HostRegistry
 from remote_control.hosts.router import HostRouter, HostUnavailable
@@ -719,8 +720,9 @@ class JobManager:
         return candidates[0]
 
     async def reconcile_startup(self, *, now: datetime | None = None) -> int:
+        stale_locks = await self._reconcile_stale_project_session_locks()
         if self.recovery is None:
-            return 0
+            return stale_locks
         current = now or datetime.now(timezone.utc)
 
         cancelling = await self.jobs.list_states({JobState.CANCELLING.value})
@@ -774,7 +776,7 @@ class JobManager:
                 JobState.RUNNING.value,
             }
         )
-        count = 0
+        count = stale_locks
         for job in recoverable:
             existing = await self.recovery.get(job.id)
             session_id = await self._external_session_id(job)
@@ -1022,6 +1024,31 @@ class JobManager:
             )
             adopted += 1
         return adopted
+
+    async def _reconcile_stale_project_session_locks(self) -> int:
+        if self.project_sessions is None:
+            return 0
+        released = 0
+        for project_session in await self.project_sessions.list_locked():
+            job_id = project_session.locked_by_job_id
+            if not job_id:
+                continue
+            job = await self.jobs.get(job_id)
+            if job is not None and JobState(job.state) not in TERMINAL_STATES:
+                continue
+            reason = (
+                "missing_job"
+                if job is None
+                else f"terminal_job:{job.state}"
+            )
+            updated = await self.project_sessions.release_stale_lock(
+                session_id=project_session.id,
+                expected_job_id=job_id,
+                reason=reason,
+            )
+            if updated is not None and updated.locked_by_job_id is None:
+                released += 1
+        return released
 
     async def expire_approvals(self, *, now: datetime | None = None) -> int:
         if self.approvals is None:
@@ -1839,7 +1866,7 @@ class JobManager:
                     job_id=job_id,
                     project_id=job.project_id,
                     host_id=job.assigned_host,
-                    payload=_small_event(event),
+                    payload=sanitize_agent_event(event),
                 )
             except Exception:
                 logger.exception(
@@ -2404,63 +2431,6 @@ def _approval_instruction(
         decision += f"\nAdditional human note:\n{response_text.strip()}"
     decision += f"\n\nOriginal question:\n{prompt.question}"
     return decision
-
-
-def _small_event(event: dict) -> dict:
-    allowed: dict = {}
-    for key in (
-        "type",
-        "event_type",
-        "message",
-        "text",
-        "error",
-        "thread_id",
-        "session_id",
-        "question",
-        "prompt",
-        "details",
-        "description",
-        "header",
-        "approval_type",
-        "resets_at",
-        "reset_at",
-        "retry_at",
-        "retry_after",
-        "retry_after_seconds",
-    ):
-        value = event.get(key)
-        if isinstance(value, (str, int, float, bool)) or value is None:
-            allowed[key] = value
-
-    options = event.get("options")
-    if isinstance(options, list):
-        allowed["options"] = options[:8]
-
-    item = event.get("item")
-    if isinstance(item, dict):
-        clean_item = {}
-        for key in (
-            "type",
-            "text",
-            "content",
-            "command",
-            "status",
-            "exit_code",
-            "question",
-            "prompt",
-            "details",
-            "description",
-            "header",
-            "approval_type",
-        ):
-            value = item.get(key)
-            if isinstance(value, (str, int, float, bool)) or value is None:
-                clean_item[key] = value
-        item_options = item.get("options")
-        if isinstance(item_options, list):
-            clean_item["options"] = item_options[:8]
-        allowed["item"] = clean_item
-    return allowed
 
 
 def _resume_failure_allows_fallback(message: str | None) -> bool:

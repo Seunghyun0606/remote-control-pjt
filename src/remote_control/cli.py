@@ -256,6 +256,7 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
             controller=controller,
             topics=telegram_topics,
             bindings=telegram_bindings,
+            selection_ttl_seconds=settings.telegram_selection_ttl_seconds,
         )
 
     slack: SlackProvider | None = None

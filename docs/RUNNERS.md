@@ -13,7 +13,7 @@ Codex instructions are passed through stdin and process arguments are constructe
 
 For `codex exec resume`, exec-level options such as `--sandbox` and `--cd` are placed before the `resume` subcommand. This matches the Codex CLI parser: resume-specific arguments only contain session selection and prompt fields.
 
-Codex JSONL stdout can contain large single-line events (for example command/tool output). The Runner launches Codex with a 16 MiB asyncio stream limit instead of Python's small default line limit so a large JSONL event does not terminate the Job with `Separator is not found, and chunk exceed the limit`.
+Codex JSONL stdout can contain very large single-line events (for example command/tool output). The Runner reads stdout in 64 KiB chunks and performs newline framing itself instead of relying on asyncio's line-separator limit. One record is retained up to 32 MiB; larger records are drained to the next newline and surfaced as bounded `raw_output_truncated` events. This prevents `Separator is not found, and chunk exceed the limit` from terminating the Job while keeping memory bounded.
 
 
 ## Session resume failure policy

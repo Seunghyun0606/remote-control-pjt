@@ -243,7 +243,7 @@ cd remote-control-pjt
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
-pip install -e ".[dev]"
+pip install -c constraints/dev.txt -e ".[dev]"
 Copy-Item .env.example .env
 ```
 
@@ -1251,6 +1251,7 @@ GET /jobs/{job_id}/project-work
 - [Recovery & Scheduler](docs/RECOVERY.md)
 - [Cancellation and Runner Reconnect Safety](docs/CANCELLATION_AND_RECONNECT.md)
 - [Runtime Hardening — P0/P1 Closure](docs/RUNTIME_HARDENING_P0_P1.md)
+- [Runtime Hardening — P2](docs/RUNTIME_HARDENING_P2.md)
 - [Sessions and Feedback](docs/SESSIONS_AND_FEEDBACK.md)
 - [Human Gate](docs/HUMAN_GATE.md)
 - [Messaging](docs/MESSAGING.md)

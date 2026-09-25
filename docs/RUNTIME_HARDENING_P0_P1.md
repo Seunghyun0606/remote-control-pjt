@@ -122,14 +122,6 @@ After pulling the version containing these changes:
 7. verify a Remote Runner reconnects after a forced WebSocket disconnect;
 8. verify an invalid resume error remains `FAILED` rather than creating an unrelated new thread.
 
-## Remaining lower-priority backlog
+## P2 follow-up
 
-The following review findings remain outside this P0/P1 change set:
-
-- replace the fixed 16 MiB JSONL line limit with chunk/framing logic;
-- startup reconciliation for stale Project Session locks;
-- local/remote event payload truncation unification;
-- formal DB schema migrations;
-- dependency lock/constraints;
-- broader Windows recovery/Runner CI coverage;
-- Telegram pending-selection TTL cleanup.
+The lower-priority backlog from this review has been implemented in [Runtime Hardening — P2](RUNTIME_HARDENING_P2.md), including chunk-framed Codex JSONL, stale Project Session lock reconciliation, shared event sanitization, versioned DB migrations, dependency constraints, broader Windows CI, and Telegram selection TTL/ownership.

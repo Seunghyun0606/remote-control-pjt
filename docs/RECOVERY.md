@@ -122,6 +122,8 @@ Each tick performs:
 
 ## Controller restart
 
+Before normal Job recovery, startup reconciles Project Session locks. A lock is released only when its owning Job is missing or already terminal. Locks for active recovery/cancellation states are preserved. Stale releases are recorded as `PROJECT_SESSION_STALE_LOCK_RELEASED`.
+
 At startup the Controller scans persisted jobs in active execution states.
 
 Those jobs are converted to `WAITING_HOST` while recovery is reconciled.

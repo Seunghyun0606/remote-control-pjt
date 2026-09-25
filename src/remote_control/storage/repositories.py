@@ -253,6 +253,16 @@ class ProjectSessionRepository:
             )
             return list(result.scalars())
 
+    async def list_locked(self, limit: int = 1000) -> list[ProjectSessionRecord]:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(ProjectSessionRecord)
+                .where(ProjectSessionRecord.locked_by_job_id.is_not(None))
+                .order_by(ProjectSessionRecord.last_active_at)
+                .limit(limit)
+            )
+            return list(result.scalars())
+
     async def update(self, session_id: str, **changes: Any) -> ProjectSessionRecord:
         async with self.db.sessions() as session:
             record = await session.get(ProjectSessionRecord, session_id)

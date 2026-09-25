@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
-from remote_control.storage.models import Base
+from remote_control.storage.migrations import apply_migrations
 
 
 class Database:
@@ -34,7 +34,7 @@ class Database:
 
     async def init(self) -> None:
         async with self.engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            await apply_migrations(connection)
 
     async def close(self) -> None:
         await self.engine.dispose()

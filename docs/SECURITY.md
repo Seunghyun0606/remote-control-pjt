@@ -100,6 +100,12 @@ The R6 `/ui` surface renders runtime state only. It does not expose run, steer, 
 
 `/dashboard` and the existing HTTP API still contain operational information. The Controller remains loopback-bound by default. If `CONTROLLER_API_TOKEN` is configured, `/ui` and `/dashboard` are protected by the same HTTP authentication boundary. For browser-facing remote access, prefer an authenticated reverse proxy/private network rather than exposing the Controller directly.
 
+## Telegram selection token boundary
+
+When a Telegram Project has multiple steerable Jobs, the temporary `jobselect` token is owned by the user who created it. Ownership is checked before the token is consumed.
+
+Tokens expire after `REMOTE_CONTROL_TELEGRAM_SELECTION_TTL_SECONDS` (default 300 seconds) and are removed on expiry. This prevents stale inline buttons from remaining actionable indefinitely.
+
 ## Slack boundary
 
 Slack commands pass through the same ControllerService validation as Telegram. Slack text is never treated as a shell command.
