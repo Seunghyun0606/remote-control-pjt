@@ -9,6 +9,12 @@ import subprocess
 from pathlib import Path
 
 
+class ProcessSafetyError(RuntimeError):
+    def __init__(self, message: str, *, pid: int) -> None:
+        super().__init__(message)
+        self.pid = pid
+
+
 def subprocess_group_kwargs() -> dict[str, object]:
     if os.name == "nt":
         return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
