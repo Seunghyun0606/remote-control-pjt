@@ -94,6 +94,20 @@ X-Remote-Control-Token: <token>
 
 Do not reuse Telegram, Slack or Codex credentials as the Control API token.
 
+
+### Control API principal
+
+HTTP authentication and ownership identity are separate concepts.
+
+```dotenv
+CONTROLLER_API_TOKEN=<http-api-secret>
+CONTROLLER_API_PRINCIPAL=api:controller
+```
+
+The client cannot choose Job or Approval ownership through request JSON. API-created Jobs always use the configured server-side principal, and API Human Gate responses are accepted only for approvals owned by that same principal. Request fields such as `requested_by` and `user_id` are rejected rather than trusted.
+
+The Control API token is still operationally privileged for endpoints such as pause/resume/cancel. `CONTROLLER_API_PRINCIPAL` prevents identity impersonation; it is not a replacement for endpoint authorization.
+
 ## Web dashboard boundary
 
 The R6 `/ui` surface renders runtime state only. It does not expose run, steer, stop, approval or shell controls.
