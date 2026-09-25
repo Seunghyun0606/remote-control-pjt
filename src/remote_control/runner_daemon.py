@@ -270,6 +270,24 @@ class RunnerDaemon:
 
         seen_session: str | None = session_id or None
         self.running_sessions[execution_id] = seen_session
+        try:
+            self.journal.reserve(
+                execution_id=execution_id,
+                working_directory=working_directory_text,
+                boot_id=self.boot_id,
+                session_id=seen_session,
+            )
+        except Exception as exc:
+            self.running_sessions.pop(execution_id, None)
+            await self._send(
+                websocket,
+                message(
+                    "JOB_ERROR",
+                    execution_id=execution_id,
+                    error=f"failed to reserve runner execution journal: {exc}",
+                ),
+            )
+            return
 
         async def on_event(event: dict) -> None:
             nonlocal seen_session
@@ -315,6 +333,7 @@ class RunnerDaemon:
                 )
         except Exception as exc:
             self.running_sessions.pop(execution_id, None)
+            self.journal.remove(execution_id)
             await self._send(
                 websocket,
                 message("JOB_ERROR", execution_id=execution_id, error=str(exc)),
@@ -323,6 +342,7 @@ class RunnerDaemon:
 
         if handle.pid is None:
             await handle.cancel()
+            self.journal.remove(execution_id)
             await self._send(
                 websocket,
                 message(
@@ -333,13 +353,12 @@ class RunnerDaemon:
             )
             return
         try:
-            self.journal.start(
-                execution_id=execution_id,
-                pid=handle.pid,
-                working_directory=working_directory_text,
-                boot_id=self.boot_id,
-                session_id=seen_session or handle.session_id,
-            )
+            self.journal.attach_pid(execution_id, handle.pid)
+            if seen_session or handle.session_id:
+                self.journal.update_session(
+                    execution_id,
+                    seen_session or handle.session_id or "",
+                )
         except Exception:
             await handle.cancel()
             raise
@@ -430,6 +449,12 @@ class RunnerDaemon:
         if self._journal_recovered:
             return
         for entry in self.journal.list():
+            if entry.state == "STARTING":
+                raise RuntimeError(
+                    "refusing to start Runner because a previous execution may "
+                    "have spawned before its PID was durably recorded: "
+                    f"execution={entry.execution_id}"
+                )
             if entry.state == "COMPLETED":
                 self.completed[entry.execution_id] = entry.to_result()
                 continue
