@@ -27,6 +27,8 @@ class JobRecord(Base):
     state: Mapped[str] = mapped_column(String(32), index=True)
     external_session_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    process_executable: Mapped[str | None] = mapped_column(Text, nullable=True)
+    process_start_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
