@@ -192,13 +192,52 @@ async def test_fresh_and_upgrade_databases_reach_identical_schema(tmp_path):
 
         async def schema_snapshot(database):
             async with database.engine.connect() as connection:
-                result = await connection.execute(
-                    text(
-                        "SELECT type, name, tbl_name, sql FROM sqlite_master "
-                        "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+                table_rows = (
+                    await connection.execute(
+                        text(
+                            "SELECT name FROM sqlite_master "
+                            "WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+                            "ORDER BY name"
+                        )
                     )
-                )
-                return [tuple(row) for row in result.all()]
+                ).all()
+                snapshot = {}
+                for (table_name,) in table_rows:
+                    columns = [
+                        tuple(row)
+                        for row in (
+                            await connection.execute(
+                                text(f"PRAGMA table_info('{table_name}')")
+                            )
+                        ).all()
+                    ]
+                    indexes = []
+                    for index_row in (
+                        await connection.execute(
+                            text(f"PRAGMA index_list('{table_name}')")
+                        )
+                    ).all():
+                        index_name = index_row[1]
+                        index_columns = [
+                            row[2]
+                            for row in (
+                                await connection.execute(
+                                    text(f"PRAGMA index_info('{index_name}')")
+                                )
+                            ).all()
+                        ]
+                        indexes.append(
+                            (
+                                index_name,
+                                bool(index_row[2]),
+                                tuple(index_columns),
+                            )
+                        )
+                    snapshot[table_name] = {
+                        "columns": columns,
+                        "indexes": sorted(indexes),
+                    }
+                return snapshot
 
         assert await schema_snapshot(fresh) == await schema_snapshot(upgrade)
     finally:
