@@ -120,7 +120,7 @@ A Project Session controls conversational context; it is not the repository conc
 
 Persisted PIDs are not trusted by number alone. Crash recovery verifies the process command contains the expected Codex working-directory argument before terminating the process tree. If identity cannot be proven, startup fails closed.
 
-Runner Protocol v2 prevents older peers from silently bypassing durable result acknowledgement and execution-journal safety.
+Runner Protocol v3 prevents older peers from bypassing stable Runner instance identity, durable result acknowledgement, execution ownership, and execution-journal safety.
 
 ## Telegram selection token boundary
 
