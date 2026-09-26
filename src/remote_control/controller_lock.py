@@ -9,6 +9,10 @@ class ControllerAlreadyRunningError(RuntimeError):
     pass
 
 
+class RunnerAlreadyRunningError(RuntimeError):
+    pass
+
+
 class ControllerRuntimeLock:
     """Process-scoped cross-platform singleton lock for one Controller runtime."""
 
@@ -86,3 +90,14 @@ def _unlock_file(handle: BinaryIO) -> None:
     except OSError:
         # OS releases advisory locks when the descriptor/process exits.
         pass
+
+
+class RunnerRuntimeLock(ControllerRuntimeLock):
+    def acquire(self) -> None:
+        try:
+            super().acquire()
+        except ControllerAlreadyRunningError as exc:
+            raise RunnerAlreadyRunningError(
+                "another Remote Control Runner already owns this journal runtime: "
+                f"{self.path}"
+            ) from exc
