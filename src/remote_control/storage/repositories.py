@@ -19,6 +19,7 @@ from remote_control.storage.models import (
     ProjectSessionRecord,
     ProjectWorkRecord,
     RecoveryRecord,
+    RemoteExecutionRecord,
     SessionRecord,
     TelegramMessageBindingRecord,
     TelegramProjectTopicRecord,
@@ -243,6 +244,93 @@ class ExecutionLeaseRepository:
                 return
             await session.delete(target)
             await session.commit()
+
+
+class RemoteExecutionRepository:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def get(self, execution_id: str) -> RemoteExecutionRecord | None:
+        async with self.db.sessions() as session:
+            return await session.get(RemoteExecutionRecord, execution_id)
+
+    async def list_for_host(
+        self,
+        host_id: str,
+        *,
+        include_acknowledged: bool = False,
+    ) -> list[RemoteExecutionRecord]:
+        async with self.db.sessions() as session:
+            query = select(RemoteExecutionRecord).where(
+                RemoteExecutionRecord.host_id == host_id
+            )
+            if not include_acknowledged:
+                query = query.where(RemoteExecutionRecord.state != "ACKNOWLEDGED")
+            result = await session.execute(
+                query.order_by(RemoteExecutionRecord.started_at)
+            )
+            return list(result.scalars())
+
+    async def list_for_job(self, job_id: str) -> list[RemoteExecutionRecord]:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(RemoteExecutionRecord)
+                .where(RemoteExecutionRecord.job_id == job_id)
+                .order_by(RemoteExecutionRecord.started_at)
+            )
+            return list(result.scalars())
+
+    async def upsert(
+        self,
+        execution_id: str,
+        **changes: Any,
+    ) -> RemoteExecutionRecord:
+        async with self.db.sessions() as session:
+            record = await session.get(RemoteExecutionRecord, execution_id)
+            if record is None:
+                record = RemoteExecutionRecord(
+                    execution_id=execution_id,
+                    **changes,
+                )
+                session.add(record)
+            else:
+                for key, value in changes.items():
+                    setattr(record, key, value)
+            await session.commit()
+            await session.refresh(record)
+            return record
+
+    async def mark_result_received(
+        self,
+        execution_id: str,
+        *,
+        session_id: str | None,
+    ) -> RemoteExecutionRecord | None:
+        async with self.db.sessions() as session:
+            record = await session.get(RemoteExecutionRecord, execution_id)
+            if record is None:
+                return None
+            record.state = "RESULT_RECEIVED"
+            if session_id:
+                record.session_id = session_id
+            record.result_received_at = datetime.now().astimezone()
+            await session.commit()
+            await session.refresh(record)
+            return record
+
+    async def mark_acknowledged(
+        self,
+        execution_id: str,
+    ) -> RemoteExecutionRecord | None:
+        async with self.db.sessions() as session:
+            record = await session.get(RemoteExecutionRecord, execution_id)
+            if record is None:
+                return None
+            record.state = "ACKNOWLEDGED"
+            record.acknowledged_at = datetime.now().astimezone()
+            await session.commit()
+            await session.refresh(record)
+            return record
 
 
 class ProjectSessionRepository:
