@@ -1145,10 +1145,24 @@ class JobManager:
                 for execution_id, owner in list(ownership_by_execution.items()):
                     if execution_id in reported:
                         continue
-                    owner_job = await self.jobs.get(owner.job_id)
-                    if owner_job is not None and JobState(owner_job.state) in TERMINAL_STATES:
-                        await self.remote_executions.mark_acknowledged(execution_id)
-                        ownership_by_execution.pop(execution_id, None)
+                    await self.remote_executions.mark_acknowledged(execution_id)
+                    ownership_by_execution.pop(execution_id, None)
+                    try:
+                        await self.events.append(
+                            "REMOTE_EXECUTION_ABSENT_RECONCILED",
+                            job_id=owner.job_id,
+                            host_id=host_id,
+                            payload={
+                                "execution_id": execution_id,
+                                "runner_instance_id": current_runner_instance,
+                            },
+                        )
+                    except Exception:
+                        logger.exception(
+                            "remote execution absence audit failed "
+                            "execution_id=%s",
+                            execution_id,
+                        )
 
         execution_owners = {
             execution_id: owner.job_id
