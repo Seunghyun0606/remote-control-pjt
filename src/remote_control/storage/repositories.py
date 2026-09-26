@@ -335,7 +335,7 @@ class ExecutionLeaseRepository:
             )
             try:
                 await session.commit()
-            except IntegrityError:
+            except Exception:
                 await session.rollback()
                 raise
             await session.refresh(job)
