@@ -39,6 +39,32 @@ class JobRepository:
             await session.refresh(job)
             return job
 
+    async def add_with_event(
+        self,
+        job: JobRecord,
+        *,
+        event_type: str,
+        host_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> JobRecord:
+        record = EventRecord(
+            event_type=event_type,
+            job_id=job.id,
+            project_id=job.project_id,
+            host_id=host_id,
+            payload_json=json.dumps(payload or {}, ensure_ascii=False),
+        )
+        async with self.db.sessions() as session:
+            session.add(job)
+            session.add(record)
+            try:
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+            await session.refresh(job)
+            return job
+
     async def get(self, job_id: str) -> JobRecord | None:
         async with self.db.sessions() as session:
             return await session.get(JobRecord, job_id)
@@ -102,6 +128,47 @@ class JobRepository:
             for key, value in changes.items():
                 setattr(job, key, value)
             await session.commit()
+            await session.refresh(job)
+            return job
+
+    async def transition_with_event(
+        self,
+        job_id: str,
+        *,
+        expected_state: str,
+        target_state: str,
+        changes: dict[str, Any] | None = None,
+        event_type: str,
+        payload: dict[str, Any] | None = None,
+    ) -> JobRecord:
+        async with self.db.sessions() as session:
+            job = await session.get(JobRecord, job_id)
+            if job is None:
+                raise KeyError(f"unknown job: {job_id}")
+            if job.state != expected_state:
+                raise RuntimeError(
+                    "job state changed during lifecycle transition: "
+                    f"job={job.id} expected={expected_state} actual={job.state}"
+                )
+
+            job.state = target_state
+            for key, value in (changes or {}).items():
+                setattr(job, key, value)
+
+            session.add(
+                EventRecord(
+                    event_type=event_type,
+                    job_id=job.id,
+                    project_id=job.project_id,
+                    host_id=job.assigned_host,
+                    payload_json=json.dumps(payload or {}, ensure_ascii=False),
+                )
+            )
+            try:
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
             await session.refresh(job)
             return job
 
