@@ -10,15 +10,18 @@ from remote_control.messaging.telegram import (
     BOT_COMMANDS,
     TelegramProvider,
     build_job_action_markup,
+    build_queue_markup,
     extract_job_id,
     extract_project_id,
     parse_job_action_callback,
+    parse_queue_action_callback,
 )
 from remote_control.runners.fake import FakeAgentRunner
 from remote_control.storage.models import JobRecord
 from remote_control.storage.repositories import (
     EventRepository,
     JobRepository,
+    RecoveryRepository,
     TelegramMessageBindingRepository,
     TelegramProjectTopicRepository,
 )
@@ -166,7 +169,17 @@ async def test_telegram_topic_and_message_binding_repositories(database):
 
 def test_telegram_command_menu_and_message_scope_helpers():
     commands = {command.command for command in BOT_COMMANDS}
-    assert {"start", "help", "projects", "sync", "run", "status", "jobs", "steer"} <= commands
+    assert {
+        "start",
+        "help",
+        "projects",
+        "sync",
+        "run",
+        "status",
+        "queue",
+        "jobs",
+        "steer",
+    } <= commands
     assert extract_job_id("[demo / JOB-20260924-ABC123]\nworking") == "JOB-20260924-ABC123"
     assert extract_project_id("[demo / JOB-20260924-ABC123]\nworking") == "demo"
     assert extract_project_id(
@@ -391,3 +404,153 @@ def test_job_action_markup_for_failed_and_paused_jobs():
     assert parse_job_action_callback(
         "jobaction:retry:JOB-20260924-ABC123"
     ) == ("retry", "JOB-20260924-ABC123")
+
+
+
+def test_queue_markup_and_callback_parser():
+    jobs = [
+        JobRecord(
+            id="JOB-QUEUE-AAA111",
+            project_id="demo",
+            requested_by_channel="telegram",
+            requested_by_user="100",
+            requested_host="lightsail-main",
+            assigned_host="lightsail-main",
+            instruction="first queued",
+            state="WAITING_LEASE",
+        ),
+        JobRecord(
+            id="JOB-QUEUE-BBB222",
+            project_id="demo",
+            requested_by_channel="telegram",
+            requested_by_user="100",
+            requested_host="lightsail-main",
+            assigned_host="lightsail-main",
+            instruction="second queued",
+            state="WAITING_LEASE",
+        ),
+    ]
+
+    markup = build_queue_markup(jobs)
+    assert markup.inline_keyboard[0][0].callback_data == (
+        "queueaction:up:JOB-QUEUE-AAA111"
+    )
+    assert markup.inline_keyboard[1][1].callback_data == (
+        "queueaction:down:JOB-QUEUE-BBB222"
+    )
+    assert markup.inline_keyboard[1][2].callback_data == (
+        "queueaction:cancel:JOB-QUEUE-BBB222"
+    )
+    assert markup.inline_keyboard[-1][0].callback_data == "queueaction:refresh:_"
+    assert parse_queue_action_callback(
+        "queueaction:up:JOB-QUEUE-BBB222"
+    ) == ("up", "JOB-QUEUE-BBB222")
+    assert parse_queue_action_callback("queueaction:refresh:_") == (
+        "refresh",
+        None,
+    )
+
+
+class _FakeCallbackMessage:
+    def __init__(self, *, chat_id: int, message_thread_id: int | None) -> None:
+        self.chat_id = chat_id
+        self.message_thread_id = message_thread_id
+
+
+class _FakeCallbackQuery:
+    def __init__(self, data: str, message: _FakeCallbackMessage) -> None:
+        self.data = data
+        self.message = message
+        self.answers: list[tuple[str | None, bool]] = []
+        self.edits: list[dict] = []
+
+    async def answer(self, text=None, show_alert=False):
+        self.answers.append((text, show_alert))
+
+    async def edit_message_text(self, text, reply_markup=None):
+        self.edits.append({"text": text, "reply_markup": reply_markup})
+
+
+@pytest.mark.asyncio
+async def test_telegram_queue_action_reorders_and_refreshes_view(
+    project_registry,
+    database,
+):
+    jobs = JobRepository(database)
+    recovery = RecoveryRepository(database)
+    manager = JobManager(
+        projects=project_registry,
+        jobs=jobs,
+        events=EventRepository(database),
+        runner=FakeAgentRunner(),
+        local_host_id="lightsail-main",
+        recovery=recovery,
+    )
+    controller = ControllerService(projects=project_registry, jobs=manager)
+    topics = TelegramProjectTopicRepository(database)
+    bindings = TelegramMessageBindingRepository(database)
+    bot = _FakeBot()
+    provider = _provider(
+        controller=controller,
+        topics=topics,
+        bindings=bindings,
+        bot=bot,
+    )
+    await topics.upsert(
+        user_id="100",
+        project_id="demo",
+        chat_id="100",
+        message_thread_id=42,
+        topic_name="Demo Project",
+    )
+
+    for position, suffix in enumerate(("AAA111", "BBB222"), start=1):
+        job_id = f"JOB-QUEUE-{suffix}"
+        await jobs.add(
+            JobRecord(
+                id=job_id,
+                project_id="demo",
+                requested_by_channel="telegram",
+                requested_by_user="100",
+                requested_host="lightsail-main",
+                assigned_host="lightsail-main",
+                instruction=f"queued {position}",
+                state="WAITING_LEASE",
+            )
+        )
+        await recovery.upsert(
+            job_id,
+            kind="LEASE",
+            mode="START",
+            attempt_count=0,
+            next_retry_at=None,
+            execution_id=None,
+            resume_instruction=f"queued {position}",
+            last_error="busy",
+            queue_position=position,
+        )
+
+    query = _FakeCallbackQuery(
+        "queueaction:up:JOB-QUEUE-BBB222",
+        _FakeCallbackMessage(chat_id=100, message_thread_id=42),
+    )
+    update = type(
+        "_QueueUpdate",
+        (),
+        {
+            "callback_query": query,
+            "effective_user": _FakeUser(100),
+        },
+    )()
+
+    await provider._handle_queue_action(update, None)
+
+    queued = await manager.queued_for_user("100", project_id="demo")
+    assert [job.id for job in queued] == [
+        "JOB-QUEUE-BBB222",
+        "JOB-QUEUE-AAA111",
+    ]
+    assert query.answers[-1][0] == "대기 순서를 변경했습니다."
+    assert query.edits
+    assert "1. JOB-QUEUE-BBB222" in query.edits[-1]["text"]
+    assert query.edits[-1]["reply_markup"] is not None
