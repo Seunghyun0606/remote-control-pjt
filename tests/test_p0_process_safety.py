@@ -591,7 +591,7 @@ async def test_runner_reconcile_recovers_missing_execution_id_by_latest_working_
     ack = Envelope.model_validate_json(websocket.sent[-1])
     assert ack.type == "JOB_RESULT_ACK"
     assert ack.payload["execution_id"] == "exec-current"
-
+    await manager.wait_until_idle("JOB-REMOTE-CRASH-WINDOW")
 
 
 @pytest.mark.asyncio
