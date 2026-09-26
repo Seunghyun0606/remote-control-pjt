@@ -71,7 +71,8 @@ BOT_COMMANDS = (
     BotCommand("doctor", "Host와 실행환경 진단"),
     BotCommand("pause", "Job 일시정지"),
     BotCommand("resume", "Job 재개"),
-    BotCommand("steer", "실행 중인 Job에 추가 지시"),
+    BotCommand("steer", "현재 turn 종료 후 추가 지시"),
+    BotCommand("redirect", "현재 turn 종료 후 즉시 방향전환"),
     BotCommand("stop", "Job 중지"),
 )
 
