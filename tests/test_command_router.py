@@ -36,6 +36,11 @@ def test_pause_resume_and_steer_commands(project_registry):
     assert steer.job_id == "JOB-1"
     assert steer.instruction == "UI는 건드리지 마"
 
+    redirect = router.parse("/redirect --job JOB-1 DB 구조부터 다시 잡아")
+    assert redirect.intent == Intent.REDIRECT
+    assert redirect.job_id == "JOB-1"
+    assert redirect.instruction == "DB 구조부터 다시 잡아"
+
 
 def test_retry_sessions_and_doctor_commands(project_registry):
     router = CommandRouter(project_registry)
