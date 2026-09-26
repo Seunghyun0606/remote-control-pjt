@@ -1605,6 +1605,7 @@ class JobManager:
             if (
                 job is None
                 or JobState(job.state) in TERMINAL_STATES
+                or JobState(job.state) == JobState.WAITING_LEASE
                 or not job.assigned_host
             ):
                 await self.execution_leases.release_for_job(lease.job_id)
@@ -1627,7 +1628,7 @@ class JobManager:
 
         active_states = {state.value for state in JobState if state not in TERMINAL_STATES}
         for job in await self.jobs.list_states(active_states):
-            if not job.assigned_host:
+            if not job.assigned_host or JobState(job.state) == JobState.WAITING_LEASE:
                 continue
             try:
                 await self._acquire_execution_lease(job.id, job.assigned_host)
@@ -1821,10 +1822,84 @@ class JobManager:
             if state == JobState.WAITING_QUOTA:
                 if await self._retry_quota(job, record):
                     recovered += 1
+            elif state == JobState.WAITING_LEASE:
+                if await self._retry_lease(job, record):
+                    recovered += 1
             elif state == JobState.WAITING_HOST:
                 if await self._retry_host(job, record):
                     recovered += 1
         return recovered
+
+    async def _retry_lease(self, job: JobRecord, record: RecoveryRecord) -> bool:
+        if JobState(job.state) != JobState.WAITING_LEASE:
+            return False
+
+        requested_host = job.assigned_host or job.requested_host
+        try:
+            host_id = await self._resolve_host(job.project_id, requested_host)
+        except HostUnavailable:
+            return False
+
+        try:
+            await self._assign_execution_lease(job.id, host_id)
+        except ExecutionLeaseBusyError:
+            return False
+
+        if self.project_sessions is not None:
+            try:
+                project_session = await self.project_sessions.acquire(
+                    project_id=job.project_id,
+                    owner_user_id=job.requested_by_user,
+                    job_id=job.id,
+                    seed_external_session_id=job.external_session_id,
+                    seed_host_id=host_id,
+                )
+            except ProjectSessionBusyError:
+                if self.execution_leases is not None:
+                    await self.execution_leases.release_for_job(job.id)
+                await self._transition(
+                    job.id,
+                    JobState.WAITING_LEASE,
+                    assigned_host=host_id,
+                )
+                return False
+
+            if project_session.external_session_id != job.external_session_id:
+                job = await self.jobs.update(
+                    job.id,
+                    external_session_id=project_session.external_session_id,
+                )
+
+        await self.recovery.upsert(
+            job.id,
+            kind=RecoveryKind.LEASE.value,
+            mode=record.mode,
+            attempt_count=record.attempt_count,
+            next_retry_at=None,
+            execution_id=None,
+            resume_instruction=record.resume_instruction,
+            last_error=None,
+        )
+        await self.events.append(
+            "LEASE_QUEUE_RELEASED",
+            job_id=job.id,
+            project_id=job.project_id,
+            host_id=host_id,
+            payload={"mode": record.mode},
+        )
+        await self._notify(job.id, "▶ 작업 순서가 되어 Codex 실행을 시작합니다.")
+
+        mode = RecoveryMode(record.mode)
+        if mode == RecoveryMode.START:
+            self._start_task(job.id, self._execute_new(job.id))
+        else:
+            await self._transition(job.id, JobState.STARTING)
+            await self._transition(job.id, JobState.RUNNING)
+            if self.sessions is not None:
+                await self.sessions.mark(job.id, SessionStatus.ACTIVE)
+            instruction = record.resume_instruction or RETRY_RESUME_INSTRUCTION
+            self._start_task(job.id, self._execute_resume(job.id, instruction))
+        return True
 
     async def _retry_quota(self, job: JobRecord, record: RecoveryRecord) -> bool:
         if job.assigned_host and self.hosts is not None:
@@ -2917,6 +2992,53 @@ class JobManager:
             f"시도 {attempt}, 자동 재시도: {next_retry.isoformat()}{grace_text}",
         )
         asyncio.create_task(self._stop_active_turn(job_id), name=f"quota-stop:{job_id}")
+        return record
+
+    async def _enter_lease_wait(
+        self,
+        job_id: str,
+        *,
+        mode: RecoveryMode,
+        error: str,
+        assigned_host: str,
+        resume_instruction: str | None = None,
+    ) -> RecoveryRecord | None:
+        if self.recovery is None:
+            raise RuntimeError(error)
+        async with self._job_locks[f"lease:{job_id}"]:
+            job = await self.require(job_id)
+            state = JobState(job.state)
+            if state in TERMINAL_STATES:
+                return None
+            if state != JobState.WAITING_LEASE:
+                await self._transition(
+                    job_id,
+                    JobState.WAITING_LEASE,
+                    assigned_host=assigned_host,
+                    error=error,
+                )
+            record = await self.recovery.upsert(
+                job_id,
+                kind=RecoveryKind.LEASE.value,
+                mode=mode.value,
+                attempt_count=0,
+                next_retry_at=datetime.now(timezone.utc),
+                execution_id=None,
+                resume_instruction=resume_instruction,
+                last_error=error,
+            )
+            await self.events.append(
+                "LEASE_QUEUE_WAIT",
+                job_id=job.id,
+                project_id=job.project_id,
+                host_id=assigned_host,
+                payload={"mode": mode.value, "reason": error},
+            )
+        await self._notify(
+            job_id,
+            "⏳ 같은 작업 디렉터리가 사용 중이라 대기열에 등록했습니다. "
+            "앞선 작업이 끝나면 자동으로 시작합니다.",
+        )
         return record
 
     async def _enter_host_wait(
