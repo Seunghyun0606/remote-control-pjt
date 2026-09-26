@@ -49,6 +49,9 @@ def test_retry_sessions_and_doctor_commands(project_registry):
     assert retry.intent == Intent.RETRY
     assert retry.job_id == "JOB-1"
 
+    queue = router.parse("/queue")
+    assert queue.intent == Intent.QUEUE
+
     sessions = router.parse("/sessions")
     assert sessions.intent == Intent.SESSIONS
 
