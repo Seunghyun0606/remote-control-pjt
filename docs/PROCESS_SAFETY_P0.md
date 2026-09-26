@@ -180,7 +180,7 @@ These original semantics were introduced with Protocol v2. Remote Control 0.12.0
 
 ## Upgrade
 
-1. Pull the same 0.12.0 code on Controller and Runner hosts.
+1. Pull the same 0.13.0 build on Controller and Runner hosts.
 2. Install/update dependencies.
 3. Stop old Controller and Runner processes.
 4. Start exactly one Controller; schema migration to v5 is automatic.
