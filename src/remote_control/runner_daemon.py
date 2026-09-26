@@ -9,6 +9,7 @@ from uuid import uuid4
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
+from remote_control.controller_lock import RunnerRuntimeLock
 from remote_control.event_payloads import sanitize_agent_event
 from remote_control.human_gate import extract_human_gate
 from remote_control.process_control import (
@@ -40,6 +41,10 @@ class RunnerDaemon:
         self.boot_id = uuid4().hex
         self.journal = journal or RunnerExecutionJournal(settings.resolved_state_path)
         self.instance_id = self.journal.instance_id
+        lock_path = settings.resolved_state_path.with_name(
+            settings.resolved_state_path.name + ".lock"
+        )
+        self.runtime_lock = RunnerRuntimeLock(lock_path)
         self._journal_recovered = False
         self.runner = CodexRunner(
             executable=settings.codex_executable,
@@ -62,26 +67,30 @@ class RunnerDaemon:
         self._fatal_error: RunnerSafetyError | None = None
 
     async def run_forever(self) -> None:
-        await self._recover_persisted_executions()
-        while True:
-            if self._fatal_error is not None:
-                raise self._fatal_error
-            try:
-                await self._run_connection()
-            except asyncio.CancelledError:
-                raise
-            except RunnerSafetyError:
-                logger.exception(
-                    "runner safety invariant failed; refusing automatic reconnect"
-                )
-                raise
-            except (OSError, ConnectionClosed) as exc:
-                logger.warning("runner connection lost: %s", exc)
-            except Exception:
-                logger.exception("runner connection loop failed; reconnecting")
-            if self._fatal_error is not None:
-                raise self._fatal_error
-            await asyncio.sleep(self.settings.reconnect_seconds)
+        self.runtime_lock.acquire()
+        try:
+            await self._recover_persisted_executions()
+            while True:
+                if self._fatal_error is not None:
+                    raise self._fatal_error
+                try:
+                    await self._run_connection()
+                except asyncio.CancelledError:
+                    raise
+                except RunnerSafetyError:
+                    logger.exception(
+                        "runner safety invariant failed; refusing automatic reconnect"
+                    )
+                    raise
+                except (OSError, ConnectionClosed) as exc:
+                    logger.warning("runner connection lost: %s", exc)
+                except Exception:
+                    logger.exception("runner connection loop failed; reconnecting")
+                if self._fatal_error is not None:
+                    raise self._fatal_error
+                await asyncio.sleep(self.settings.reconnect_seconds)
+        finally:
+            self.runtime_lock.release()
 
     async def _run_connection(self) -> None:
         async with connect(
