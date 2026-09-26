@@ -247,6 +247,8 @@ class JobManager:
                 )
                 external_session_id = project_session.external_session_id
             except ProjectSessionBusyError as exc:
+                if self.recovery is None:
+                    raise
                 session_busy_error = exc
                 session_hint = await self.project_sessions.active_for(
                     project.id,
@@ -368,6 +370,8 @@ class JobManager:
                     project_session.external_session_id or original.external_session_id
                 )
             except ProjectSessionBusyError as exc:
+                if self.recovery is None:
+                    raise
                 session_busy_error = exc
                 session_hint = await self.project_sessions.active_for(
                     original.project_id,
