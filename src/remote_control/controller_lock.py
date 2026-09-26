@@ -26,8 +26,18 @@ class ControllerRuntimeLock:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         handle = self.path.open("a+b")
         try:
-            handle.seek(0)
-            if handle.read(1) == b"":
+            # Do not read the byte that another Windows process may already
+            # hold with msvcrt.locking(). A competing reader receives
+            # PermissionError before we get a chance to translate lock
+            # contention into ControllerAlreadyRunningError.
+            #
+            # fstat() inspects file metadata without touching the locked byte.
+            # msvcrt.locking() needs at least one byte in the file, so seed an
+            # empty lock file before attempting the non-blocking byte-range
+            # lock. Concurrent seed writes are harmless; the lock below is the
+            # authoritative ownership decision.
+            if os.fstat(handle.fileno()).st_size == 0:
+                handle.seek(0)
                 handle.write(b"0")
                 handle.flush()
             handle.seek(0)
