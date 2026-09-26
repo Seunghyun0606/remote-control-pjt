@@ -73,7 +73,7 @@ R4 active execution adoption is unchanged.
 
 A reconnect that replaces an existing WebSocket is connection-generation safe: cleanup from the old socket is ignored once a newer socket for the same `host_id` is active. The stale socket therefore cannot fail pending Jobs or mark the replacement Host connection offline.
 
-Replacement is permitted only for the same stable Runner instance. A different `runner_instance_id` is rejected while the logical host still owns unresolved work.
+Stale-socket replacement is permitted only for the same `runner_instance_id` and the same `runner_boot_id` (the same process reconnecting). A different live boot generation is rejected. The Runner also owns an OS-level lock beside its journal, preventing two Runner processes from performing startup recovery against the same journal concurrently.
 
 Remote cancellation is acknowledgement-based. `JOB_CANCEL` only requests termination; the Controller keeps the Job in `CANCELLING` and retains the Project Session lock until the Runner returns a terminal `JOB_RESULT`. See [Cancellation and Runner Reconnect Safety](CANCELLATION_AND_RECONNECT.md).
 
