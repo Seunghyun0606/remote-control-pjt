@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from remote_control.controller.job_manager import JobManager
@@ -75,7 +77,7 @@ async def test_same_working_tree_is_exclusive_across_users_and_channels(
     )
     second = await manager.require(second.id)
 
-    assert second.state == "FAILED"
+    assert second.state == "WAITING_LEASE"
     assert "already leased by job" in (second.error or "")
     current_lease = await leases.get_for_job(first.id)
     assert current_lease is not None
@@ -84,6 +86,13 @@ async def test_same_working_tree_is_exclusive_across_users_and_channels(
     await manager.cancel(first.id)
     assert (await manager.require(first.id)).state == "CANCELLED"
     assert await leases.get_for_job(first.id) is None
+
+    recovered = await manager.recover_due(
+        now=datetime.now(timezone.utc) + timedelta(seconds=1)
+    )
+    assert recovered == 1
+    await _wait_for_state(manager, second.id, "COMPLETED")
+    assert await leases.get_for_job(second.id) is None
 
     third = await manager.create(
         project_id="demo",
@@ -551,7 +560,9 @@ async def test_runner_reconcile_recovers_missing_execution_id_by_latest_working_
                 "execution_id": "exec-current",
                 "session_id": "thread-current",
                 "working_directory": "C:/dev/demo",
-                "started_at": "2026-09-26T10:00:00+00:00",
+                "started_at": (
+                    datetime.now(timezone.utc) + timedelta(seconds=1)
+                ).isoformat(),
             }
         ],
         completed_jobs=[
@@ -559,7 +570,9 @@ async def test_runner_reconcile_recovers_missing_execution_id_by_latest_working_
                 "execution_id": "exec-old",
                 "session_id": "thread-old",
                 "working_directory": "C:/dev/demo",
-                "started_at": "2026-09-25T10:00:00+00:00",
+                "started_at": (
+                    datetime.now(timezone.utc) - timedelta(days=1)
+                ).isoformat(),
             }
         ],
         gateway=gateway,
