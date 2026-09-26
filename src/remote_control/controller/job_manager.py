@@ -650,6 +650,34 @@ class JobManager:
             )
             return job
 
+    async def redirect(self, job_id: str, instruction: str) -> JobRecord:
+        instruction = instruction.strip()
+        if not instruction:
+            raise ValueError("redirect instruction must not be empty")
+
+        async with self._job_locks[f"redirect:{job_id}"]:
+            job = await self.require(job_id)
+            if JobState(job.state) != JobState.RUNNING:
+                raise ValueError(f"job {job_id} must be RUNNING to redirect")
+
+            await self.events.append(
+                "REDIRECT_REQUESTED",
+                job_id=job.id,
+                project_id=job.project_id,
+                host_id=job.assigned_host,
+                payload={"instruction": instruction},
+            )
+            await self.pause(job_id)
+            redirected = await self.resume(job_id, instruction=instruction)
+            await self.events.append(
+                "REDIRECT_APPLIED",
+                job_id=job.id,
+                project_id=job.project_id,
+                host_id=redirected.assigned_host,
+                payload={"instruction": instruction},
+            )
+            return redirected
+
     async def cancel(self, job_id: str) -> JobRecord:
         async with self._job_locks[f"cancel-request:{job_id}"]:
             job = await self.require(job_id)
@@ -1099,6 +1127,38 @@ class JobManager:
                 last_error="controller restarted in WAITING_AGENT without adapter finalization",
             )
             count += 1
+
+        waiting_lease = await self.jobs.list_states({JobState.WAITING_LEASE.value})
+        for job in waiting_lease:
+            existing = await self.recovery.get(job.id)
+            if existing is None:
+                await self.recovery.upsert(
+                    job.id,
+                    kind=RecoveryKind.LEASE.value,
+                    mode=RecoveryMode.START.value,
+                    attempt_count=0,
+                    next_retry_at=current,
+                    execution_id=None,
+                    resume_instruction=job.instruction,
+                    last_error="recovered WAITING_LEASE without recovery metadata",
+                )
+            else:
+                await self.recovery.upsert(
+                    job.id,
+                    kind=RecoveryKind.LEASE.value,
+                    mode=existing.mode,
+                    attempt_count=existing.attempt_count,
+                    next_retry_at=current,
+                    execution_id=None,
+                    resume_instruction=existing.resume_instruction,
+                    last_error=existing.last_error,
+                )
+            await self.events.append(
+                "WAITING_LEASE_REARMED_ON_STARTUP",
+                job_id=job.id,
+                project_id=job.project_id,
+                host_id=job.assigned_host,
+            )
 
         waiting_quota = await self.jobs.list_states({JobState.WAITING_QUOTA.value})
         for job in waiting_quota:
@@ -1868,7 +1928,12 @@ class JobManager:
                 job = await self.jobs.update(
                     job.id,
                     external_session_id=project_session.external_session_id,
+                    error=None,
                 )
+            else:
+                job = await self.jobs.update(job.id, error=None)
+        else:
+            job = await self.jobs.update(job.id, error=None)
 
         await self.recovery.upsert(
             job.id,
