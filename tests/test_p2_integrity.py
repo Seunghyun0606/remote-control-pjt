@@ -70,6 +70,51 @@ async def test_migration_baseline_rejects_incomplete_existing_schema(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_database_migrates_v2_runtime_to_v4(database):
+    async with database.engine.begin() as connection:
+        await connection.execute(text("DROP TABLE remote_executions"))
+        await connection.execute(
+            text("ALTER TABLE hosts DROP COLUMN runner_instance_id")
+        )
+        await connection.execute(
+            text("ALTER TABLE hosts DROP COLUMN runner_boot_id")
+        )
+        await connection.execute(
+            text("DELETE FROM schema_migrations WHERE version > 2")
+        )
+
+    await database.init()
+
+    async with database.engine.connect() as connection:
+        version = (
+            await connection.execute(
+                text("SELECT MAX(version) FROM schema_migrations")
+            )
+        ).scalar_one()
+        host_columns = {
+            row[1]
+            for row in (
+                await connection.execute(text("PRAGMA table_info(hosts)"))
+            ).all()
+        }
+        tables = {
+            row[0]
+            for row in (
+                await connection.execute(
+                    text(
+                        "SELECT name FROM sqlite_master "
+                        "WHERE type='table'"
+                    )
+                )
+            ).all()
+        }
+
+    assert version == 4
+    assert {"runner_instance_id", "runner_boot_id"} <= host_columns
+    assert "remote_executions" in tables
+
+
+@pytest.mark.asyncio
 async def test_database_startup_rejects_missing_expected_index(database):
     async with database.engine.begin() as connection:
         await connection.execute(text("DROP INDEX ix_jobs_project_id"))
