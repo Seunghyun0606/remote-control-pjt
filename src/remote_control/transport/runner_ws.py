@@ -102,15 +102,20 @@ class RunnerGateway:
         async with self._lock:
             previous = self._connections.get(host_id)
             previous_instance = self._connection_instances.get(host_id)
+            previous_boot = self._connection_boots.get(host_id)
             if (
                 previous is not None
                 and previous is not websocket
                 and previous_instance is not None
-                and previous_instance != instance_id
+                and (
+                    previous_instance != instance_id
+                    or previous_boot != boot_id
+                )
             ):
                 raise RunnerInstanceConflict(
-                    f"host {host_id!r} is already connected by runner instance "
-                    f"{previous_instance!r}; refusing takeover by {instance_id!r}"
+                    f"host {host_id!r} already has a live runner generation "
+                    f"{previous_instance!r}/{previous_boot!r}; refusing takeover by "
+                    f"{instance_id!r}/{boot_id!r}"
                 )
             self._connections[host_id] = websocket
             self._connection_instances[host_id] = instance_id
