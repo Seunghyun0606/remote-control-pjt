@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict
 from remote_control.api.dashboard import DashboardService, render_dashboard_html
 from remote_control.controller.service import ControllerService
 from remote_control.transport.protocol import Envelope
-from remote_control.transport.runner_ws import RunnerGateway
+from remote_control.transport.runner_ws import RunnerGateway, RunnerInstanceConflict
 
 
 class RunRequest(BaseModel):
@@ -296,7 +296,26 @@ def create_app(
                     return
 
                 host_id = str(first.payload.get("host_id") or "")
-                if not host_id:
+                runner_instance_id = str(
+                    first.payload.get("runner_instance_id") or ""
+                )
+                runner_boot_id = str(first.payload.get("runner_boot_id") or "")
+                if not host_id or not runner_instance_id or not runner_boot_id:
+                    await websocket.close(code=1008)
+                    return
+
+                try:
+                    await controller.jobs.validate_runner_registration(
+                        host_id=host_id,
+                        runner_instance_id=runner_instance_id,
+                    )
+                    await runner_gateway.attach(
+                        host_id,
+                        websocket,
+                        runner_instance_id=runner_instance_id,
+                        runner_boot_id=runner_boot_id,
+                    )
+                except (ValueError, RunnerInstanceConflict):
                     await websocket.close(code=1008)
                     return
 
@@ -309,8 +328,9 @@ def create_app(
                         for value in first.payload.get("capabilities", [])
                         if isinstance(value, str)
                     },
+                    runner_instance_id=runner_instance_id,
+                    runner_boot_id=runner_boot_id,
                 )
-                await runner_gateway.attach(host_id, websocket)
 
                 while True:
                     envelope = Envelope.model_validate_json(await websocket.receive_text())
