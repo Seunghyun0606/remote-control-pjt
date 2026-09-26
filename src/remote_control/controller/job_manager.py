@@ -1413,6 +1413,13 @@ class JobManager:
             )
             if owner_job_id is not None and owner_job_id != job.id:
                 continue
+            if owner_job_id is None and execution_owners is not None:
+                report_session_id = report.get("session_id")
+                if (
+                    not job.external_session_id
+                    or report_session_id != job.external_session_id
+                ):
+                    continue
             working_directory = report.get("working_directory")
             if not isinstance(working_directory, str):
                 continue
