@@ -811,6 +811,101 @@ class JobManager:
     ) -> list[JobRecord]:
         return await self.jobs.list_active_for_user(user_id, project_id=project_id)
 
+    async def queued_for_user(
+        self,
+        user_id: str,
+        *,
+        project_id: str | None = None,
+    ) -> list[JobRecord]:
+        if self.recovery is None:
+            return []
+        queued: list[JobRecord] = []
+        for record in await self.recovery.list_queue():
+            job = await self.jobs.get(record.job_id)
+            if job is None or JobState(job.state) != JobState.WAITING_LEASE:
+                continue
+            if job.requested_by_user != user_id:
+                continue
+            if project_id is not None and job.project_id != project_id:
+                continue
+            queued.append(job)
+        return queued
+
+    async def move_waiting_lease(
+        self,
+        job_id: str,
+        *,
+        user_id: str,
+        direction: str,
+        project_id: str | None = None,
+    ) -> JobRecord:
+        if self.recovery is None:
+            raise ValueError("Recovery Registry가 활성화되지 않았습니다.")
+        if direction not in {"up", "down"}:
+            raise ValueError("queue direction must be up or down")
+
+        async with self._job_locks["lease-queue-order"]:
+            target = await self.select_for_user(
+                user_id,
+                job_id=job_id,
+                states={JobState.WAITING_LEASE},
+                project_id=project_id,
+            )
+            target_record = await self.recovery.get(target.id)
+            if target_record is None or target_record.queue_position is None:
+                raise ValueError("queued job has no durable queue position")
+
+            lane: list[tuple[JobRecord, RecoveryRecord]] = []
+            target_lane = self._queue_lane_key(target)
+            for record in await self.recovery.list_queue():
+                candidate = await self.jobs.get(record.job_id)
+                if candidate is None:
+                    continue
+                if JobState(candidate.state) != JobState.WAITING_LEASE:
+                    continue
+                if self._queue_lane_key(candidate) != target_lane:
+                    continue
+                lane.append((candidate, record))
+
+            index = next(
+                (i for i, (candidate, _record) in enumerate(lane) if candidate.id == target.id),
+                None,
+            )
+            if index is None:
+                raise ValueError("queued job is missing from its queue lane")
+            neighbor_index = index - 1 if direction == "up" else index + 1
+            if neighbor_index < 0 or neighbor_index >= len(lane):
+                return target
+
+            neighbor, neighbor_record = lane[neighbor_index]
+            if neighbor.requested_by_user != user_id:
+                raise ValueError("다른 사용자의 Job 순서를 변경할 수 없습니다")
+
+            await self.recovery.swap_queue_positions(target.id, neighbor.id)
+            await self.events.append(
+                "LEASE_QUEUE_REORDERED",
+                job_id=target.id,
+                project_id=target.project_id,
+                host_id=target.assigned_host,
+                payload={
+                    "direction": direction,
+                    "from_position": target_record.queue_position,
+                    "to_position": neighbor_record.queue_position,
+                    "swapped_with": neighbor.id,
+                },
+            )
+            return await self.require(target.id)
+
+    def _queue_lane_key(self, job: JobRecord) -> tuple[str, str]:
+        host_id = job.assigned_host or job.requested_host
+        project = self.projects.get(job.project_id)
+        if host_id == "auto":
+            return (job.project_id, host_id)
+        return (
+            host_id,
+            canonical_working_directory(project.path_for(host_id)),
+        )
+
     async def project_work_for(self, job_id: str) -> ProjectWorkRecord | None:
         if self.project_work is None:
             return None
@@ -1143,6 +1238,11 @@ class JobManager:
         waiting_lease = await self.jobs.list_states({JobState.WAITING_LEASE.value})
         for job in waiting_lease:
             existing = await self.recovery.get(job.id)
+            queue_position = (
+                existing.queue_position
+                if existing is not None and existing.queue_position is not None
+                else await self.recovery.next_queue_position()
+            )
             if existing is None:
                 await self.recovery.upsert(
                     job.id,
@@ -1153,6 +1253,7 @@ class JobManager:
                     execution_id=None,
                     resume_instruction=job.instruction,
                     last_error="recovered WAITING_LEASE without recovery metadata",
+                    queue_position=queue_position,
                 )
             else:
                 await self.recovery.upsert(
@@ -1164,6 +1265,7 @@ class JobManager:
                     execution_id=None,
                     resume_instruction=existing.resume_instruction,
                     last_error=existing.last_error,
+                    queue_position=queue_position,
                 )
             await self.events.append(
                 "WAITING_LEASE_REARMED_ON_STARTUP",
@@ -1956,6 +2058,7 @@ class JobManager:
             execution_id=None,
             resume_instruction=record.resume_instruction,
             last_error=None,
+            queue_position=None,
         )
         await self.events.append(
             "LEASE_QUEUE_RELEASED",
@@ -3121,6 +3224,21 @@ class JobManager:
                     assigned_host=assigned_host,
                     error=error,
                 )
+            existing = await self.recovery.get(job_id)
+            queue_position = (
+                existing.queue_position
+                if existing is not None and existing.queue_position is not None
+                else None
+            )
+            if queue_position is None:
+                async with self._job_locks["lease-queue-order"]:
+                    current_record = await self.recovery.get(job_id)
+                    queue_position = (
+                        current_record.queue_position
+                        if current_record is not None
+                        and current_record.queue_position is not None
+                        else await self.recovery.next_queue_position()
+                    )
             record = await self.recovery.upsert(
                 job_id,
                 kind=RecoveryKind.LEASE.value,
@@ -3130,6 +3248,7 @@ class JobManager:
                 execution_id=None,
                 resume_instruction=resume_instruction,
                 last_error=error,
+                queue_position=queue_position,
             )
             await self.events.append(
                 "LEASE_QUEUE_WAIT",
