@@ -47,6 +47,7 @@ from remote_control.storage.repositories import (
     ProjectSessionRepository,
     ProjectWorkRepository,
     RecoveryRepository,
+    RemoteExecutionRepository,
     SessionRepository,
     TelegramMessageBindingRepository,
     TelegramProjectTopicRepository,
@@ -175,6 +176,7 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
             events=events,
         )
         recovery = RecoveryRepository(db)
+        remote_executions = RemoteExecutionRepository(db)
         project_work = ProjectWorkRepository(db)
         telegram_topics = TelegramProjectTopicRepository(db)
         telegram_bindings = TelegramMessageBindingRepository(db)
@@ -220,6 +222,7 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
             project_adapters=project_adapters,
             project_work=project_work,
             execution_leases=execution_leases,
+            remote_executions=remote_executions,
             progress_interval_seconds=settings.progress_interval_seconds,
             quota_retry_initial_seconds=settings.quota_retry_initial_seconds,
             quota_retry_max_seconds=settings.quota_retry_max_seconds,
