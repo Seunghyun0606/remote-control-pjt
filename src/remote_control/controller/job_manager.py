@@ -1178,14 +1178,18 @@ class JobManager:
                 reported=reported,
                 execution_owners=execution_owners,
             )
+            recorded_execution = (
+                record.execution_id
+                if (
+                    record.execution_id in reported
+                    and execution_owners.get(record.execution_id) in {None, job.id}
+                )
+                else None
+            )
             execution_id = (
                 matched_execution
                 if record.mode == RecoveryMode.ADOPT.value and matched_execution
-                else (
-                    record.execution_id
-                    if record.execution_id in reported
-                    else matched_execution
-                )
+                else (recorded_execution or matched_execution)
             )
             if execution_id is None:
                 continue
@@ -1335,9 +1339,15 @@ class JobManager:
                 reported=reported,
                 execution_owners=execution_owners,
             )
-            execution_id = matched_execution or (
-                record.execution_id if record.execution_id in reported else None
+            recorded_execution = (
+                record.execution_id
+                if (
+                    record.execution_id in reported
+                    and execution_owners.get(record.execution_id) in {None, job.id}
+                )
+                else None
             )
+            execution_id = matched_execution or recorded_execution
             if execution_id is None:
                 continue
             if record.execution_id != execution_id:
@@ -3164,22 +3174,48 @@ class JobManager:
         current = JobState(job.state)
         validate_transition(current, target)
         updated = await self.jobs.update(job_id, state=target.value, **changes)
-        await self.events.append(
-            f"JOB_{target.value}",
-            job_id=job_id,
-            project_id=job.project_id,
-            host_id=updated.assigned_host,
-            payload={"from": current.value, "to": target.value},
-        )
+        try:
+            await self.events.append(
+                f"JOB_{target.value}",
+                job_id=job_id,
+                project_id=job.project_id,
+                host_id=updated.assigned_host,
+                payload={"from": current.value, "to": target.value},
+            )
+        except Exception:
+            logger.exception(
+                "Job transition audit event failed job_id=%s from=%s to=%s",
+                job_id,
+                current.value,
+                target.value,
+            )
+
         if target in TERMINAL_STATES:
+            release_error: Exception | None = None
             if self.project_sessions is not None:
-                await self.project_sessions.release_for_job(
-                    project_id=job.project_id,
-                    owner_user_id=job.requested_by_user,
-                    job_id=job.id,
-                )
+                try:
+                    await self.project_sessions.release_for_job(
+                        project_id=job.project_id,
+                        owner_user_id=job.requested_by_user,
+                        job_id=job.id,
+                    )
+                except Exception as exc:
+                    release_error = exc
+                    logger.exception(
+                        "Project Session release failed for terminal Job job_id=%s",
+                        job_id,
+                    )
             if self.execution_leases is not None:
-                await self.execution_leases.release_for_job(job.id)
+                try:
+                    await self.execution_leases.release_for_job(job.id)
+                except Exception as exc:
+                    release_error = release_error or exc
+                    logger.exception(
+                        "Execution lease release failed for terminal Job job_id=%s",
+                        job_id,
+                    )
+            if release_error is not None:
+                raise release_error
         return updated
 
     async def _notify(self, job_id: str, message: str) -> None:
