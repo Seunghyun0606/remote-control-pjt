@@ -1083,6 +1083,7 @@ class JobManager:
         running_jobs: list[dict],
         completed_jobs: list[dict],
         gateway: RunnerGateway,
+        runner_instance_id: str | None = None,
         snapshot_complete: bool = True,
     ) -> int:
         if self.recovery is None:
@@ -1095,6 +1096,54 @@ class JobManager:
         if not reported and not snapshot_complete:
             return 0
 
+        current_runner_instance = (
+            runner_instance_id or gateway.runner_instance_id(host_id)
+        )
+        ownership_by_execution = {}
+        if self.remote_executions is not None:
+            ownership_by_execution = {
+                record.execution_id: record
+                for record in await self.remote_executions.list_for_host(host_id)
+                if (
+                    current_runner_instance is None
+                    or record.runner_instance_id == current_runner_instance
+                )
+            }
+
+            completed_ids = {
+                str(item.get("execution_id"))
+                for item in completed_jobs
+                if isinstance(item, dict) and item.get("execution_id")
+            }
+            for execution_id in list(completed_ids):
+                owner = ownership_by_execution.get(execution_id)
+                if owner is None:
+                    continue
+                owner_job = await self.jobs.get(owner.job_id)
+                if owner_job is None or JobState(owner_job.state) not in TERMINAL_STATES:
+                    continue
+                await gateway.ack_remote_result(
+                    host_id=host_id,
+                    execution_id=execution_id,
+                )
+                await self.remote_executions.mark_acknowledged(execution_id)
+                reported.pop(execution_id, None)
+                ownership_by_execution.pop(execution_id, None)
+
+            if snapshot_complete:
+                for execution_id, owner in list(ownership_by_execution.items()):
+                    if execution_id in reported:
+                        continue
+                    owner_job = await self.jobs.get(owner.job_id)
+                    if owner_job is not None and JobState(owner_job.state) in TERMINAL_STATES:
+                        await self.remote_executions.mark_acknowledged(execution_id)
+                        ownership_by_execution.pop(execution_id, None)
+
+        execution_owners = {
+            execution_id: owner.job_id
+            for execution_id, owner in ownership_by_execution.items()
+        }
+
         waiting = await self.jobs.list_states({JobState.WAITING_HOST.value})
         adopted = 0
         for job in waiting:
@@ -1103,10 +1152,20 @@ class JobManager:
             record = await self.recovery.get(job.id)
             if record is None:
                 continue
-            matched_execution = self._match_reported_execution(
+            owned_matches = [
+                owner
+                for owner in ownership_by_execution.values()
+                if owner.job_id == job.id and owner.execution_id in reported
+            ]
+            owned_matches.sort(key=lambda item: item.started_at)
+            owned_execution = (
+                owned_matches[-1].execution_id if owned_matches else None
+            )
+            matched_execution = owned_execution or self._match_reported_execution(
                 job,
                 host_id=host_id,
                 reported=reported,
+                execution_owners=execution_owners,
             )
             execution_id = (
                 matched_execution
@@ -1180,10 +1239,20 @@ class JobManager:
                 if record is None or record.mode != RecoveryMode.ADOPT.value:
                     continue
 
-                known_execution = self._match_reported_execution(
+                owned_matches = [
+                    owner
+                    for owner in ownership_by_execution.values()
+                    if owner.job_id == job.id and owner.execution_id in reported
+                ]
+                owned_matches.sort(key=lambda item: item.started_at)
+                owned_execution = (
+                    owned_matches[-1].execution_id if owned_matches else None
+                )
+                known_execution = owned_execution or self._match_reported_execution(
                     job,
                     host_id=host_id,
                     reported=reported,
+                    execution_owners=execution_owners,
                 ) or (
                     record.execution_id
                     if record.execution_id in reported
@@ -1222,6 +1291,16 @@ class JobManager:
                     host_id=host_id,
                     payload={"next_mode": safe_mode.value},
                 )
+                if self.remote_executions is not None:
+                    for owner in ownership_by_execution.values():
+                        if (
+                            owner.job_id == job.id
+                            and owner.runner_instance_id == current_runner_instance
+                            and owner.execution_id not in reported
+                        ):
+                            await self.remote_executions.mark_acknowledged(
+                                owner.execution_id
+                            )
 
         cancelling = await self.jobs.list_states({JobState.CANCELLING.value})
         for job in cancelling:
@@ -1230,10 +1309,20 @@ class JobManager:
             record = await self.recovery.get(job.id)
             if record is None or record.mode != RecoveryMode.CANCEL.value:
                 continue
-            matched_execution = self._match_reported_execution(
+            owned_matches = [
+                owner
+                for owner in ownership_by_execution.values()
+                if owner.job_id == job.id and owner.execution_id in reported
+            ]
+            owned_matches.sort(key=lambda item: item.started_at)
+            owned_execution = (
+                owned_matches[-1].execution_id if owned_matches else None
+            )
+            matched_execution = owned_execution or self._match_reported_execution(
                 job,
                 host_id=host_id,
                 reported=reported,
+                execution_owners=execution_owners,
             )
             execution_id = matched_execution or (
                 record.execution_id if record.execution_id in reported else None
@@ -1287,23 +1376,41 @@ class JobManager:
         *,
         host_id: str,
         reported: dict[str, dict],
+        execution_owners: dict[str, str] | None = None,
     ) -> str | None:
         project = self.projects.get(job.project_id)
         target = canonical_working_directory(project.path_for(host_id))
         matches: list[tuple[str, str]] = []
+        job_created_at = job.created_at
+        if job_created_at.tzinfo is None:
+            job_created_at = job_created_at.replace(tzinfo=timezone.utc)
         for execution_id, report in reported.items():
+            owner_job_id = (
+                execution_owners.get(execution_id)
+                if execution_owners is not None
+                else None
+            )
+            if owner_job_id is not None and owner_job_id != job.id:
+                continue
             working_directory = report.get("working_directory")
             if not isinstance(working_directory, str):
                 continue
             if canonical_working_directory(working_directory) != target:
                 continue
             started_at = report.get("started_at")
-            matches.append(
-                (
-                    str(started_at) if isinstance(started_at, str) else "",
-                    execution_id,
+            if not isinstance(started_at, str) or not started_at:
+                continue
+            try:
+                started = datetime.fromisoformat(
+                    started_at.replace("Z", "+00:00")
                 )
-            )
+            except ValueError:
+                continue
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            if started < job_created_at:
+                continue
+            matches.append((started.isoformat(), execution_id))
         if not matches:
             return None
         matches.sort()
