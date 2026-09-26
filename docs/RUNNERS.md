@@ -73,6 +73,8 @@ R4 active execution adoption is unchanged.
 
 A reconnect that replaces an existing WebSocket is connection-generation safe: cleanup from the old socket is ignored once a newer socket for the same `host_id` is active. The stale socket therefore cannot fail pending Jobs or mark the replacement Host connection offline.
 
+Replacement is permitted only for the same stable Runner instance. A different `runner_instance_id` is rejected while the logical host still owns unresolved work.
+
 Remote cancellation is acknowledgement-based. `JOB_CANCEL` only requests termination; the Controller keeps the Job in `CANCELLING` and retains the Project Session lock until the Runner returns a terminal `JOB_RESULT`. See [Cancellation and Runner Reconnect Safety](CANCELLATION_AND_RECONNECT.md).
 
 R5 Project Operations are short requests. A connection loss fails the request; JobManager recovery decides whether to wait for the pinned Host and retry.
@@ -84,7 +86,7 @@ Codex credentials remain local to each execution Host. Project Operation payload
 
 ## Durable execution journal
 
-Remote Runner 0.11.0 persists execution lifecycle state in a host-scoped journal. The default is `~/.remote-control/<host-id>-executions.json`; override it with `REMOTE_RUNNER_STATE_PATH`.
+Remote Runner persists execution lifecycle state and a stable `runner_instance_id` in a host-scoped journal. The default is `~/.remote-control/<host-id>-executions.json`; override it with `REMOTE_RUNNER_STATE_PATH`.
 
 The journal records `STARTING → RUNNING → COMPLETED`. On restart, a previously RUNNING Codex process tree is verified against its expected `--cd` working directory and terminated before the Runner reconnects. COMPLETED results are retransmitted until the Controller sends `JOB_RESULT_ACK`.
 
@@ -92,4 +94,4 @@ A STARTING record or an unverifiable live PID is fail-closed: the Runner refuses
 
 Codex is launched in an isolated process group/session so cancellation and restart recovery terminate the process tree rather than only the immediate wrapper process.
 
-These rules require Runner Protocol v2. See [Process Safety P0 Closure](PROCESS_SAFETY_P0.md).
+Remote Control 0.12.0 uses Runner Protocol v3. `runner_instance_id` survives process restarts while `runner_boot_id` changes on every boot. A different instance using the same `host_id` cannot take over while active Jobs, execution leases, or unacknowledged remote executions remain. See [Final Generation & Ownership Hardening](FINAL_HARDENING_012.md).
