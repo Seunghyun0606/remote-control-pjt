@@ -160,6 +160,7 @@ class RecoveryRecord(Base):
     execution_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     resume_instruction: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    queue_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
