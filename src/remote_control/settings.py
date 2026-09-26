@@ -52,6 +52,10 @@ class Settings(_BaseSettings):
         validation_alias="REMOTE_CONTROL_CONFIG",
     )
     host_id: str = Field(default="lightsail-main", validation_alias="REMOTE_CONTROL_HOST_ID")
+    controller_lock_path: str | None = Field(
+        default=None,
+        validation_alias="REMOTE_CONTROL_CONTROLLER_LOCK_PATH",
+    )
     api_host: str = Field(default="127.0.0.1", validation_alias="REMOTE_CONTROL_API_HOST")
     api_port: int = Field(default=8787, validation_alias="REMOTE_CONTROL_API_PORT")
     heartbeat_timeout_seconds: int = Field(
@@ -147,6 +151,28 @@ class Settings(_BaseSettings):
         if not path.is_absolute():
             path = (self.resolved_home_path / path).resolve()
         return f"{prefix}{path.as_posix()}"
+
+    @property
+    def resolved_controller_lock_path(self) -> Path:
+        if self.controller_lock_path:
+            path = Path(self.controller_lock_path).expanduser()
+            if not path.is_absolute():
+                path = (self.resolved_home_path / path).resolve()
+            return path
+
+        prefix = "sqlite+aiosqlite:///"
+        resolved_db = self.resolved_db_url
+        if resolved_db.startswith(prefix):
+            raw_path = resolved_db[len(prefix) :]
+            if raw_path != ":memory:":
+                db_path = Path(raw_path)
+                return db_path.with_name(db_path.name + ".controller.lock")
+
+        return (
+            self.resolved_home_path
+            / "state"
+            / f"controller-{self.host_id}.lock"
+        ).resolve()
 
     @property
     def api_is_loopback(self) -> bool:

@@ -16,13 +16,13 @@ timestamp
 payload
 ```
 
-Remote Control 0.11.0 uses **Runner Protocol version 2**. Protocol v1 peers are rejected so process-safety semantics cannot be weakened by a mixed Controller/Runner deployment.
+Remote Control 0.12.0 uses **Runner Protocol version 3**. Protocol v1/v2 peers are rejected because v3 adds stable Runner instance identity and Controller-side remote execution ownership.
 
 ## Connection lifecycle
 
 Runner → Controller:
 
-- `HOST_REGISTER` including `runner_boot_id`
+- `HOST_REGISTER` including stable `runner_instance_id` and per-process `runner_boot_id`
 - `RUNNING_JOBS`
 - `HEARTBEAT`
 
@@ -107,6 +107,10 @@ If the Runner disconnects, pending Project Operations fail with a recoverable co
 `JOB_PAUSE` remains reserved as a dedicated transport primitive.
 
 
-## Protocol v2 safety boundary
+## Protocol v3 generation boundary
 
-Protocol v2 is intentionally not wire-compatible with v1. Controller and Runner must be upgraded together. See [Process Safety P0 Closure](PROCESS_SAFETY_P0.md).
+Protocol v3 is intentionally not wire-compatible with v1/v2. Controller and Runner must be upgraded together.
+
+The stable `runner_instance_id` is persisted in the Runner journal. The Controller uses it to distinguish a restart of the same Runner from an unrelated process or machine reusing the same logical `host_id`.
+
+The Controller assigns each new remote turn an `execution_id` before dispatch and persists the Job ownership. Retransmitted terminal results are ACKed by exact ownership. See [Final Generation & Ownership Hardening](FINAL_HARDENING_012.md).

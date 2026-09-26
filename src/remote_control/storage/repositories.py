@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -19,6 +19,7 @@ from remote_control.storage.models import (
     ProjectSessionRecord,
     ProjectWorkRecord,
     RecoveryRecord,
+    RemoteExecutionRecord,
     SessionRecord,
     TelegramMessageBindingRecord,
     TelegramProjectTopicRecord,
@@ -178,6 +179,10 @@ class HostRepository:
                 current.status = record.status
                 current.capabilities_json = record.capabilities_json
                 current.last_heartbeat = record.last_heartbeat
+                if record.runner_instance_id is not None:
+                    current.runner_instance_id = record.runner_instance_id
+                if record.runner_boot_id is not None:
+                    current.runner_boot_id = record.runner_boot_id
                 target = current
             await session.commit()
             await session.refresh(target)
@@ -209,6 +214,50 @@ class ExecutionLeaseRepository:
                 raise
             await session.refresh(record)
             return record
+
+    async def assign_job(
+        self,
+        *,
+        record: ExecutionLeaseRecord,
+        expected_state: str,
+        assigned_host: str,
+    ) -> tuple[JobRecord, ExecutionLeaseRecord]:
+        async with self.db.sessions() as session:
+            job = await session.get(JobRecord, record.job_id)
+            if job is None:
+                raise KeyError(f"unknown job: {record.job_id}")
+            if job.state != expected_state:
+                raise RuntimeError(
+                    f"job state changed during assignment: "
+                    f"job={job.id} expected={expected_state} actual={job.state}"
+                )
+
+            result = await session.execute(
+                select(ExecutionLeaseRecord)
+                .where(ExecutionLeaseRecord.job_id == record.job_id)
+                .limit(1)
+            )
+            lease = result.scalar_one_or_none()
+            if lease is None:
+                session.add(record)
+                lease = record
+            elif lease.lease_key != record.lease_key:
+                raise ValueError(
+                    "job already owns a different execution lease: "
+                    f"job={record.job_id} current={lease.lease_key} "
+                    f"requested={record.lease_key}"
+                )
+
+            job.assigned_host = assigned_host
+            job.state = "ASSIGNED"
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                raise
+            await session.refresh(job)
+            await session.refresh(lease)
+            return job, lease
 
     async def get(self, lease_key: str) -> ExecutionLeaseRecord | None:
         async with self.db.sessions() as session:
@@ -243,6 +292,93 @@ class ExecutionLeaseRepository:
                 return
             await session.delete(target)
             await session.commit()
+
+
+class RemoteExecutionRepository:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def get(self, execution_id: str) -> RemoteExecutionRecord | None:
+        async with self.db.sessions() as session:
+            return await session.get(RemoteExecutionRecord, execution_id)
+
+    async def list_for_host(
+        self,
+        host_id: str,
+        *,
+        include_acknowledged: bool = False,
+    ) -> list[RemoteExecutionRecord]:
+        async with self.db.sessions() as session:
+            query = select(RemoteExecutionRecord).where(
+                RemoteExecutionRecord.host_id == host_id
+            )
+            if not include_acknowledged:
+                query = query.where(RemoteExecutionRecord.state != "ACKNOWLEDGED")
+            result = await session.execute(
+                query.order_by(RemoteExecutionRecord.started_at)
+            )
+            return list(result.scalars())
+
+    async def list_for_job(self, job_id: str) -> list[RemoteExecutionRecord]:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(RemoteExecutionRecord)
+                .where(RemoteExecutionRecord.job_id == job_id)
+                .order_by(RemoteExecutionRecord.started_at)
+            )
+            return list(result.scalars())
+
+    async def upsert(
+        self,
+        execution_id: str,
+        **changes: Any,
+    ) -> RemoteExecutionRecord:
+        async with self.db.sessions() as session:
+            record = await session.get(RemoteExecutionRecord, execution_id)
+            if record is None:
+                record = RemoteExecutionRecord(
+                    execution_id=execution_id,
+                    **changes,
+                )
+                session.add(record)
+            else:
+                for key, value in changes.items():
+                    setattr(record, key, value)
+            await session.commit()
+            await session.refresh(record)
+            return record
+
+    async def mark_result_received(
+        self,
+        execution_id: str,
+        *,
+        session_id: str | None,
+    ) -> RemoteExecutionRecord | None:
+        async with self.db.sessions() as session:
+            record = await session.get(RemoteExecutionRecord, execution_id)
+            if record is None:
+                return None
+            record.state = "RESULT_RECEIVED"
+            if session_id:
+                record.session_id = session_id
+            record.result_received_at = datetime.now(timezone.utc)
+            await session.commit()
+            await session.refresh(record)
+            return record
+
+    async def mark_acknowledged(
+        self,
+        execution_id: str,
+    ) -> RemoteExecutionRecord | None:
+        async with self.db.sessions() as session:
+            record = await session.get(RemoteExecutionRecord, execution_id)
+            if record is None:
+                return None
+            record.state = "ACKNOWLEDGED"
+            record.acknowledged_at = datetime.now(timezone.utc)
+            await session.commit()
+            await session.refresh(record)
+            return record
 
 
 class ProjectSessionRepository:

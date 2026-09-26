@@ -18,3 +18,5 @@ class HostInfo:
     status: HostStatus
     capabilities: set[str]
     last_heartbeat: datetime | None
+    runner_instance_id: str | None = None
+    runner_boot_id: str | None = None

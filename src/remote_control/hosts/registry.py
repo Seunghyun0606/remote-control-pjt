@@ -34,6 +34,8 @@ class HostRegistry:
             name=name,
             os_name=os_name,
             capabilities=capabilities,
+            runner_instance_id=None,
+            runner_boot_id=None,
         )
 
     async def register(
@@ -43,6 +45,8 @@ class HostRegistry:
         name: str,
         os_name: str,
         capabilities: set[str],
+        runner_instance_id: str | None = None,
+        runner_boot_id: str | None = None,
     ) -> HostInfo:
         now = datetime.now(timezone.utc)
         record = HostRecord(
@@ -52,6 +56,8 @@ class HostRegistry:
             status=HostStatus.ONLINE.value,
             capabilities_json=json.dumps(sorted(capabilities)),
             last_heartbeat=now,
+            runner_instance_id=runner_instance_id,
+            runner_boot_id=runner_boot_id,
         )
         existing = await self.hosts.get(host_id)
         stored = await self.hosts.upsert(record)
@@ -142,4 +148,6 @@ class HostRegistry:
             status=HostStatus(record.status),
             capabilities=capabilities,
             last_heartbeat=record.last_heartbeat,
+            runner_instance_id=record.runner_instance_id,
+            runner_boot_id=record.runner_boot_id,
         )

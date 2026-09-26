@@ -13,6 +13,10 @@ from remote_control.runners.base import AgentRunResult, RunEventCallback, RunHan
 from remote_control.transport.protocol import Envelope, message
 
 
+class RunnerInstanceConflict(ConnectionError):
+    pass
+
+
 class RemoteRunHandle(RunHandle):
     def __init__(
         self,
@@ -78,15 +82,44 @@ class _PendingProjectOperation:
 class RunnerGateway:
     def __init__(self, *, cancel_ack_timeout_seconds: int = 30) -> None:
         self._connections: dict[str, WebSocket] = {}
+        self._connection_instances: dict[str, str] = {}
+        self._connection_boots: dict[str, str] = {}
         self._pending: dict[str, _PendingRun] = {}
         self._project_pending: dict[str, _PendingProjectOperation] = {}
         self._lock = asyncio.Lock()
         self.cancel_ack_timeout_seconds = max(cancel_ack_timeout_seconds, 1)
 
-    async def attach(self, host_id: str, websocket: WebSocket) -> None:
+    async def attach(
+        self,
+        host_id: str,
+        websocket: WebSocket,
+        *,
+        runner_instance_id: str | None = None,
+        runner_boot_id: str | None = None,
+    ) -> None:
+        instance_id = runner_instance_id or f"legacy:{host_id}"
+        boot_id = runner_boot_id or "legacy"
         async with self._lock:
             previous = self._connections.get(host_id)
+            previous_instance = self._connection_instances.get(host_id)
+            previous_boot = self._connection_boots.get(host_id)
+            if (
+                previous is not None
+                and previous is not websocket
+                and previous_instance is not None
+                and (
+                    previous_instance != instance_id
+                    or previous_boot != boot_id
+                )
+            ):
+                raise RunnerInstanceConflict(
+                    f"host {host_id!r} already has a live runner generation "
+                    f"{previous_instance!r}/{previous_boot!r}; refusing takeover by "
+                    f"{instance_id!r}/{boot_id!r}"
+                )
             self._connections[host_id] = websocket
+            self._connection_instances[host_id] = instance_id
+            self._connection_boots[host_id] = boot_id
         if previous is not None and previous is not websocket:
             await previous.close(code=1012)
 
@@ -95,6 +128,8 @@ class RunnerGateway:
             if self._connections.get(host_id) is not websocket:
                 return False
             self._connections.pop(host_id, None)
+            self._connection_instances.pop(host_id, None)
+            self._connection_boots.pop(host_id, None)
 
         for execution_id, pending in list(self._pending.items()):
             if pending.host_id == host_id and not pending.future.done():
@@ -117,6 +152,12 @@ class RunnerGateway:
 
     def is_connected(self, host_id: str) -> bool:
         return host_id in self._connections
+
+    def runner_instance_id(self, host_id: str) -> str | None:
+        return self._connection_instances.get(host_id)
+
+    def runner_boot_id(self, host_id: str) -> str | None:
+        return self._connection_boots.get(host_id)
 
     async def send(self, host_id: str, envelope: Envelope) -> None:
         websocket = self._connections.get(host_id)
@@ -218,6 +259,7 @@ class RunnerGateway:
         instruction: str,
         working_directory: Path,
         on_event: RunEventCallback | None = None,
+        execution_id: str | None = None,
     ) -> RunHandle:
         return await self._start_remote_operation(
             message_type="JOB_START",
@@ -226,6 +268,7 @@ class RunnerGateway:
             working_directory=working_directory,
             on_event=on_event,
             project_id=project_id,
+            execution_id=execution_id,
         )
 
     async def resume_remote(
@@ -236,6 +279,7 @@ class RunnerGateway:
         instruction: str,
         working_directory: Path,
         on_event: RunEventCallback | None = None,
+        execution_id: str | None = None,
     ) -> RunHandle:
         return await self._start_remote_operation(
             message_type="JOB_RESUME",
@@ -244,6 +288,7 @@ class RunnerGateway:
             working_directory=working_directory,
             on_event=on_event,
             session_id=session_id,
+            execution_id=execution_id,
         )
 
     async def steer_remote(
@@ -254,6 +299,7 @@ class RunnerGateway:
         instruction: str,
         working_directory: Path,
         on_event: RunEventCallback | None = None,
+        execution_id: str | None = None,
     ) -> RunHandle:
         return await self._start_remote_operation(
             message_type="JOB_STEER",
@@ -262,6 +308,7 @@ class RunnerGateway:
             working_directory=working_directory,
             on_event=on_event,
             session_id=session_id,
+            execution_id=execution_id,
         )
 
     def adopt_remote(
@@ -301,10 +348,11 @@ class RunnerGateway:
         on_event: RunEventCallback | None,
         project_id: str | None = None,
         session_id: str | None = None,
+        execution_id: str | None = None,
     ) -> RunHandle:
         if not self.is_connected(host_id):
             raise ConnectionError(f"runner {host_id!r} is not connected")
-        execution_id = uuid4().hex
+        execution_id = execution_id or uuid4().hex
         future: asyncio.Future[AgentRunResult] = asyncio.get_running_loop().create_future()
         handle = RemoteRunHandle(
             execution_id=execution_id,

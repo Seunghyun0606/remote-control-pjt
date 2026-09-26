@@ -48,6 +48,7 @@ from remote_control.storage.repositories import (
     JobRepository,
     ProjectWorkRepository,
     RecoveryRepository,
+    RemoteExecutionRepository,
 )
 from remote_control.transport.runner_ws import RunnerGateway
 
@@ -101,6 +102,7 @@ class JobManager:
         project_adapters: ProjectAdapterRegistry | None = None,
         project_work: ProjectWorkRepository | None = None,
         execution_leases: ExecutionLeaseRegistry | None = None,
+        remote_executions: RemoteExecutionRepository | None = None,
         progress_interval_seconds: int = 300,
         quota_retry_initial_seconds: int = 1800,
         quota_retry_max_seconds: int = 7200,
@@ -120,6 +122,7 @@ class JobManager:
         self.project_adapters = project_adapters
         self.project_work = project_work
         self.execution_leases = execution_leases
+        self.remote_executions = remote_executions
         self.host_router = HostRouter(hosts) if hosts is not None else None
         self.feedback_policy = FeedbackPolicy()
         self.feedback_throttler = FeedbackThrottler(progress_interval_seconds)
@@ -136,6 +139,55 @@ class JobManager:
         self._job_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._notifiers: dict[str, Notifier] = {}
         self._approval_notifiers: dict[str, ApprovalNotifier] = {}
+
+    async def validate_runner_registration(
+        self,
+        *,
+        host_id: str,
+        runner_instance_id: str,
+    ) -> None:
+        if host_id == self.local_host_id:
+            raise ValueError(
+                f"remote runner cannot reuse Controller local host id {host_id!r}"
+            )
+        if self.hosts is None:
+            return
+        existing = await self.hosts.get(host_id)
+        if (
+            existing is None
+            or existing.runner_instance_id is None
+            or existing.runner_instance_id == runner_instance_id
+        ):
+            return
+
+        active_states = {
+            state.value for state in JobState if state not in TERMINAL_STATES
+        }
+        active_jobs = [
+            job
+            for job in await self.jobs.list_states(active_states)
+            if job.assigned_host == host_id
+        ]
+        active_leases = (
+            [
+                lease
+                for lease in await self.execution_leases.list()
+                if lease.host_id == host_id
+            ]
+            if self.execution_leases is not None
+            else []
+        )
+        unacknowledged = (
+            await self.remote_executions.list_for_host(host_id)
+            if self.remote_executions is not None
+            else []
+        )
+        if active_jobs or active_leases or unacknowledged:
+            raise ValueError(
+                "runner instance takeover is unsafe while host-owned work exists: "
+                f"host={host_id} current={existing.runner_instance_id} "
+                f"requested={runner_instance_id}"
+            )
 
     def set_notifier(
         self,
@@ -242,7 +294,7 @@ class JobManager:
             return await self.require(job.id)
 
         try:
-            await self._acquire_execution_lease(job.id, assigned_host)
+            await self._assign_execution_lease(job.id, assigned_host)
         except ExecutionLeaseBusyError as exc:
             await self.jobs.update(job.id, error=str(exc))
             await self._transition(job.id, JobState.FAILED)
@@ -255,7 +307,6 @@ class JobManager:
             )
             return await self.require(job.id)
 
-        await self._transition(job.id, JobState.ASSIGNED, assigned_host=assigned_host)
         self._start_task(job.id, self._execute_new(job.id))
         return await self.require(job.id)
 
@@ -346,7 +397,7 @@ class JobManager:
             return await self.require(retry.id)
 
         try:
-            await self._acquire_execution_lease(retry.id, assigned_host)
+            await self._assign_execution_lease(retry.id, assigned_host)
         except ExecutionLeaseBusyError as exc:
             await self.jobs.update(retry.id, error=str(exc))
             await self._transition(retry.id, JobState.FAILED)
@@ -359,11 +410,6 @@ class JobManager:
             )
             return await self.require(retry.id)
 
-        await self._transition(
-            retry.id,
-            JobState.ASSIGNED,
-            assigned_host=assigned_host,
-        )
         if original.external_session_id:
             self._start_task(retry.id, self._execute_retry(retry.id))
         else:
@@ -805,6 +851,23 @@ class JobManager:
             return stale_locks + lease_repairs
         current = now or datetime.now(timezone.utc)
 
+        queued = await self.jobs.list_states({JobState.QUEUED.value})
+        for job in queued:
+            session_id = await self._external_session_id(job)
+            mode = RecoveryMode.RESUME if session_id else RecoveryMode.START
+            await self._enter_host_wait(
+                job.id,
+                mode=mode,
+                error="controller restarted before Job assignment completed",
+                assigned_host=None,
+                resume_instruction=(
+                    RESTART_RESUME_INSTRUCTION
+                    if mode == RecoveryMode.RESUME
+                    else None
+                ),
+            )
+            lease_repairs += 1
+
         cancelling = await self.jobs.list_states({JobState.CANCELLING.value})
         for job in cancelling:
             if not job.assigned_host or job.assigned_host == self.local_host_id:
@@ -1031,6 +1094,7 @@ class JobManager:
         running_jobs: list[dict],
         completed_jobs: list[dict],
         gateway: RunnerGateway,
+        runner_instance_id: str | None = None,
         snapshot_complete: bool = True,
     ) -> int:
         if self.recovery is None:
@@ -1043,6 +1107,68 @@ class JobManager:
         if not reported and not snapshot_complete:
             return 0
 
+        current_runner_instance = (
+            runner_instance_id or gateway.runner_instance_id(host_id)
+        )
+        ownership_by_execution = {}
+        if self.remote_executions is not None:
+            ownership_by_execution = {
+                record.execution_id: record
+                for record in await self.remote_executions.list_for_host(host_id)
+                if (
+                    current_runner_instance is None
+                    or record.runner_instance_id == current_runner_instance
+                )
+            }
+
+            completed_ids = {
+                str(item.get("execution_id"))
+                for item in completed_jobs
+                if isinstance(item, dict) and item.get("execution_id")
+            }
+            for execution_id in list(completed_ids):
+                owner = ownership_by_execution.get(execution_id)
+                if owner is None:
+                    continue
+                owner_job = await self.jobs.get(owner.job_id)
+                if owner_job is None or JobState(owner_job.state) not in TERMINAL_STATES:
+                    continue
+                await gateway.ack_remote_result(
+                    host_id=host_id,
+                    execution_id=execution_id,
+                )
+                await self.remote_executions.mark_acknowledged(execution_id)
+                reported.pop(execution_id, None)
+                ownership_by_execution.pop(execution_id, None)
+
+            if snapshot_complete:
+                for execution_id, owner in list(ownership_by_execution.items()):
+                    if execution_id in reported:
+                        continue
+                    await self.remote_executions.mark_acknowledged(execution_id)
+                    ownership_by_execution.pop(execution_id, None)
+                    try:
+                        await self.events.append(
+                            "REMOTE_EXECUTION_ABSENT_RECONCILED",
+                            job_id=owner.job_id,
+                            host_id=host_id,
+                            payload={
+                                "execution_id": execution_id,
+                                "runner_instance_id": current_runner_instance,
+                            },
+                        )
+                    except Exception:
+                        logger.exception(
+                            "remote execution absence audit failed "
+                            "execution_id=%s",
+                            execution_id,
+                        )
+
+        execution_owners = {
+            execution_id: owner.job_id
+            for execution_id, owner in ownership_by_execution.items()
+        }
+
         waiting = await self.jobs.list_states({JobState.WAITING_HOST.value})
         adopted = 0
         for job in waiting:
@@ -1051,19 +1177,33 @@ class JobManager:
             record = await self.recovery.get(job.id)
             if record is None:
                 continue
-            matched_execution = self._match_reported_execution(
+            owned_matches = [
+                owner
+                for owner in ownership_by_execution.values()
+                if owner.job_id == job.id and owner.execution_id in reported
+            ]
+            owned_matches.sort(key=lambda item: item.started_at)
+            owned_execution = (
+                owned_matches[-1].execution_id if owned_matches else None
+            )
+            matched_execution = owned_execution or self._match_reported_execution(
                 job,
                 host_id=host_id,
                 reported=reported,
+                execution_owners=execution_owners,
+            )
+            recorded_execution = (
+                record.execution_id
+                if (
+                    record.execution_id in reported
+                    and execution_owners.get(record.execution_id) in {None, job.id}
+                )
+                else None
             )
             execution_id = (
                 matched_execution
                 if record.mode == RecoveryMode.ADOPT.value and matched_execution
-                else (
-                    record.execution_id
-                    if record.execution_id in reported
-                    else matched_execution
-                )
+                else (recorded_execution or matched_execution)
             )
             if execution_id is None:
                 continue
@@ -1128,10 +1268,20 @@ class JobManager:
                 if record is None or record.mode != RecoveryMode.ADOPT.value:
                     continue
 
-                known_execution = self._match_reported_execution(
+                owned_matches = [
+                    owner
+                    for owner in ownership_by_execution.values()
+                    if owner.job_id == job.id and owner.execution_id in reported
+                ]
+                owned_matches.sort(key=lambda item: item.started_at)
+                owned_execution = (
+                    owned_matches[-1].execution_id if owned_matches else None
+                )
+                known_execution = owned_execution or self._match_reported_execution(
                     job,
                     host_id=host_id,
                     reported=reported,
+                    execution_owners=execution_owners,
                 ) or (
                     record.execution_id
                     if record.execution_id in reported
@@ -1170,6 +1320,16 @@ class JobManager:
                     host_id=host_id,
                     payload={"next_mode": safe_mode.value},
                 )
+                if self.remote_executions is not None:
+                    for owner in ownership_by_execution.values():
+                        if (
+                            owner.job_id == job.id
+                            and owner.runner_instance_id == current_runner_instance
+                            and owner.execution_id not in reported
+                        ):
+                            await self.remote_executions.mark_acknowledged(
+                                owner.execution_id
+                            )
 
         cancelling = await self.jobs.list_states({JobState.CANCELLING.value})
         for job in cancelling:
@@ -1178,14 +1338,30 @@ class JobManager:
             record = await self.recovery.get(job.id)
             if record is None or record.mode != RecoveryMode.CANCEL.value:
                 continue
-            matched_execution = self._match_reported_execution(
+            owned_matches = [
+                owner
+                for owner in ownership_by_execution.values()
+                if owner.job_id == job.id and owner.execution_id in reported
+            ]
+            owned_matches.sort(key=lambda item: item.started_at)
+            owned_execution = (
+                owned_matches[-1].execution_id if owned_matches else None
+            )
+            matched_execution = owned_execution or self._match_reported_execution(
                 job,
                 host_id=host_id,
                 reported=reported,
+                execution_owners=execution_owners,
             )
-            execution_id = matched_execution or (
-                record.execution_id if record.execution_id in reported else None
+            recorded_execution = (
+                record.execution_id
+                if (
+                    record.execution_id in reported
+                    and execution_owners.get(record.execution_id) in {None, job.id}
+                )
+                else None
             )
+            execution_id = matched_execution or recorded_execution
             if execution_id is None:
                 continue
             if record.execution_id != execution_id:
@@ -1235,23 +1411,48 @@ class JobManager:
         *,
         host_id: str,
         reported: dict[str, dict],
+        execution_owners: dict[str, str] | None = None,
     ) -> str | None:
         project = self.projects.get(job.project_id)
         target = canonical_working_directory(project.path_for(host_id))
         matches: list[tuple[str, str]] = []
+        job_created_at = job.created_at
+        if job_created_at.tzinfo is None:
+            job_created_at = job_created_at.replace(tzinfo=timezone.utc)
         for execution_id, report in reported.items():
+            owner_job_id = (
+                execution_owners.get(execution_id)
+                if execution_owners is not None
+                else None
+            )
+            if owner_job_id is not None and owner_job_id != job.id:
+                continue
+            if owner_job_id is None and execution_owners is not None:
+                report_session_id = report.get("session_id")
+                if (
+                    not job.external_session_id
+                    or report_session_id != job.external_session_id
+                ):
+                    continue
             working_directory = report.get("working_directory")
             if not isinstance(working_directory, str):
                 continue
             if canonical_working_directory(working_directory) != target:
                 continue
             started_at = report.get("started_at")
-            matches.append(
-                (
-                    str(started_at) if isinstance(started_at, str) else "",
-                    execution_id,
+            if not isinstance(started_at, str) or not started_at:
+                continue
+            try:
+                started = datetime.fromisoformat(
+                    started_at.replace("Z", "+00:00")
                 )
-            )
+            except ValueError:
+                continue
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            if started < job_created_at:
+                continue
+            matches.append((started.isoformat(), execution_id))
         if not matches:
             return None
         matches.sort()
@@ -1309,9 +1510,28 @@ class JobManager:
         repaired = 0
         for lease in await self.execution_leases.list():
             job = await self.jobs.get(lease.job_id)
-            if job is None or JobState(job.state) in TERMINAL_STATES:
+            if (
+                job is None
+                or JobState(job.state) in TERMINAL_STATES
+                or not job.assigned_host
+            ):
                 await self.execution_leases.release_for_job(lease.job_id)
                 repaired += 1
+                continue
+            project = self.projects.get(job.project_id)
+            expected_path = canonical_working_directory(
+                project.path_for(job.assigned_host)
+            )
+            if (
+                lease.host_id != job.assigned_host
+                or lease.working_directory != expected_path
+            ):
+                raise RuntimeError(
+                    "execution lease does not match active Job assignment; "
+                    f"refusing startup: job={job.id} lease={lease.host_id}:"
+                    f"{lease.working_directory} assigned={job.assigned_host}:"
+                    f"{expected_path}"
+                )
 
         active_states = {state.value for state in JobState if state not in TERMINAL_STATES}
         for job in await self.jobs.list_states(active_states):
@@ -1325,6 +1545,53 @@ class JobManager:
                     f"refusing startup: job={job.id}: {exc}"
                 ) from exc
         return repaired
+
+    async def _assign_execution_lease(
+        self,
+        job_id: str,
+        host_id: str,
+    ) -> JobRecord:
+        job = await self.require(job_id)
+        validate_transition(JobState(job.state), JobState.ASSIGNED)
+        if self.execution_leases is None:
+            return await self._transition(
+                job_id,
+                JobState.ASSIGNED,
+                assigned_host=host_id,
+            )
+
+        project = self.projects.get(job.project_id)
+        working_directory: str | Path = project.path_for(host_id)
+        if host_id == self.local_host_id:
+            working_directory = Path(working_directory).expanduser().resolve()
+        await self.execution_leases.assign_job(
+            job_id=job.id,
+            project_id=job.project_id,
+            host_id=host_id,
+            working_directory=working_directory,
+            expected_state=job.state,
+        )
+        updated = await self.require(job_id)
+        try:
+            await self.events.append(
+                "JOB_ASSIGNED",
+                job_id=job_id,
+                project_id=job.project_id,
+                host_id=host_id,
+                payload={
+                    "from": job.state,
+                    "to": JobState.ASSIGNED.value,
+                    "atomic_with_execution_lease": True,
+                },
+            )
+        except Exception:
+            logger.exception(
+                "JOB_ASSIGNED audit event failed after atomic assignment "
+                "job_id=%s host_id=%s",
+                job_id,
+                host_id,
+            )
+        return updated
 
     async def _acquire_execution_lease(
         self,
@@ -1527,11 +1794,9 @@ class JobManager:
             return False
 
         try:
-            await self._acquire_execution_lease(job.id, host_id)
+            await self._assign_execution_lease(job.id, host_id)
         except ExecutionLeaseBusyError:
             return False
-
-        await self._transition(job.id, JobState.ASSIGNED, assigned_host=host_id)
         if mode == RecoveryMode.START:
             await self.recovery.upsert(
                 job.id,
@@ -1992,12 +2257,22 @@ class JobManager:
             )
             try:
                 operation = self.runner.steer if steering else self.runner.resume
+                execution_id = await self._reserve_remote_execution(
+                    job,
+                    session_id=requested_session_id,
+                )
+                execution_kwargs = (
+                    {"execution_id": execution_id}
+                    if execution_id is not None
+                    else {}
+                )
                 handle = await operation(
                     session_id=requested_session_id,
                     instruction=_with_control_protocol(instruction),
                     working_directory=working_directory,
                     host_id=job.assigned_host,
                     on_event=self._event_callback(job_id),
+                    **execution_kwargs,
                 )
                 self._handles[job_id] = handle
                 await self._set_handle(job_id, handle)
@@ -2134,16 +2409,126 @@ class JobManager:
             return None
         return await self._await_handle(job_id, handle)
 
+    async def _reserve_remote_execution(
+        self,
+        job: JobRecord,
+        *,
+        session_id: str | None = None,
+    ) -> str | None:
+        if (
+            self.remote_executions is None
+            or not job.assigned_host
+            or job.assigned_host == self.local_host_id
+        ):
+            return None
+        if self.hosts is None:
+            raise ConnectionError("remote runner identity registry is unavailable")
+        host = await self.hosts.get(job.assigned_host)
+        if host is None or not host.runner_instance_id:
+            raise ConnectionError(
+                f"runner identity is unavailable for host {job.assigned_host!r}"
+            )
+        project = self.projects.get(job.project_id)
+        execution_id = uuid4().hex
+        await self.remote_executions.upsert(
+            execution_id,
+            job_id=job.id,
+            host_id=job.assigned_host,
+            runner_instance_id=host.runner_instance_id,
+            working_directory=canonical_working_directory(
+                project.path_for(job.assigned_host)
+            ),
+            session_id=session_id,
+            state="ACTIVE",
+            started_at=datetime.now(timezone.utc),
+        )
+        return execution_id
+
+    async def _ensure_remote_execution(
+        self,
+        job: JobRecord,
+        handle: RunHandle,
+    ) -> None:
+        execution_id = getattr(handle, "execution_id", None)
+        if (
+            self.remote_executions is None
+            or not execution_id
+            or not job.assigned_host
+            or job.assigned_host == self.local_host_id
+        ):
+            return
+        existing = await self.remote_executions.get(execution_id)
+        if existing is not None:
+            if existing.job_id != job.id or existing.host_id != job.assigned_host:
+                raise RuntimeError(
+                    "remote execution ownership conflict: "
+                    f"execution={execution_id} owner={existing.job_id}@{existing.host_id} "
+                    f"requested={job.id}@{job.assigned_host}"
+                )
+            if handle.session_id and existing.session_id != handle.session_id:
+                await self.remote_executions.upsert(
+                    execution_id,
+                    session_id=handle.session_id,
+                )
+            return
+
+        if self.hosts is None:
+            raise ConnectionError("remote runner identity registry is unavailable")
+        host = await self.hosts.get(job.assigned_host)
+        if host is None or not host.runner_instance_id:
+            raise ConnectionError(
+                f"runner identity is unavailable for host {job.assigned_host!r}"
+            )
+        project = self.projects.get(job.project_id)
+        await self.remote_executions.upsert(
+            execution_id,
+            job_id=job.id,
+            host_id=job.assigned_host,
+            runner_instance_id=host.runner_instance_id,
+            working_directory=canonical_working_directory(
+                project.path_for(job.assigned_host)
+            ),
+            session_id=handle.session_id,
+            state="ACTIVE",
+            started_at=datetime.now(timezone.utc),
+        )
+
+    async def _mark_remote_result_received(
+        self,
+        handle: RunHandle,
+        result: AgentRunResult,
+    ) -> None:
+        execution_id = getattr(handle, "execution_id", None)
+        if self.remote_executions is None or not execution_id:
+            return
+        try:
+            await self.remote_executions.mark_result_received(
+                execution_id,
+                session_id=result.session_id,
+            )
+        except Exception:
+            logger.exception(
+                "failed to mark remote result received execution_id=%s",
+                execution_id,
+            )
+
     async def _start_new_turn(self, job: JobRecord, instruction: str) -> RunHandle:
         project = self.projects.get(job.project_id)
         assert job.assigned_host is not None
         working_directory = Path(project.path_for(job.assigned_host)).expanduser()
+        execution_id = await self._reserve_remote_execution(job)
+        execution_kwargs = (
+            {"execution_id": execution_id}
+            if execution_id is not None
+            else {}
+        )
         return await self.runner.start(
             project_id=job.project_id,
             instruction=_with_control_protocol(instruction),
             working_directory=working_directory,
             host_id=job.assigned_host,
             on_event=self._event_callback(job.id),
+            **execution_kwargs,
         )
 
     async def _set_handle(self, job_id: str, handle: RunHandle) -> None:
@@ -2152,6 +2537,8 @@ class JobManager:
         if handle.session_id:
             changes["external_session_id"] = handle.session_id
         await self.jobs.update(job_id, **changes)
+        current = await self.require(job_id)
+        await self._ensure_remote_execution(current, handle)
 
         if self.recovery is not None and handle.execution_id:
             existing = await self.recovery.get(job_id)
@@ -2201,6 +2588,8 @@ class JobManager:
                 resume_instruction=RESTART_RESUME_INSTRUCTION,
             )
             return None
+
+        await self._mark_remote_result_received(handle, result)
 
         current = await self.require(job_id)
         current_state = JobState(current.state)
@@ -2561,6 +2950,16 @@ class JobManager:
             return
         try:
             await handle.acknowledge_result()
+            execution_id = getattr(handle, "execution_id", None)
+            if self.remote_executions is not None and execution_id:
+                try:
+                    await self.remote_executions.mark_acknowledged(execution_id)
+                except Exception:
+                    logger.exception(
+                        "remote result ACK sent but ownership ledger update failed "
+                        "execution_id=%s",
+                        execution_id,
+                    )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -2796,22 +3195,48 @@ class JobManager:
         current = JobState(job.state)
         validate_transition(current, target)
         updated = await self.jobs.update(job_id, state=target.value, **changes)
-        await self.events.append(
-            f"JOB_{target.value}",
-            job_id=job_id,
-            project_id=job.project_id,
-            host_id=updated.assigned_host,
-            payload={"from": current.value, "to": target.value},
-        )
+        try:
+            await self.events.append(
+                f"JOB_{target.value}",
+                job_id=job_id,
+                project_id=job.project_id,
+                host_id=updated.assigned_host,
+                payload={"from": current.value, "to": target.value},
+            )
+        except Exception:
+            logger.exception(
+                "Job transition audit event failed job_id=%s from=%s to=%s",
+                job_id,
+                current.value,
+                target.value,
+            )
+
         if target in TERMINAL_STATES:
+            release_error: Exception | None = None
             if self.project_sessions is not None:
-                await self.project_sessions.release_for_job(
-                    project_id=job.project_id,
-                    owner_user_id=job.requested_by_user,
-                    job_id=job.id,
-                )
+                try:
+                    await self.project_sessions.release_for_job(
+                        project_id=job.project_id,
+                        owner_user_id=job.requested_by_user,
+                        job_id=job.id,
+                    )
+                except Exception as exc:
+                    release_error = exc
+                    logger.exception(
+                        "Project Session release failed for terminal Job job_id=%s",
+                        job_id,
+                    )
             if self.execution_leases is not None:
-                await self.execution_leases.release_for_job(job.id)
+                try:
+                    await self.execution_leases.release_for_job(job.id)
+                except Exception as exc:
+                    release_error = release_error or exc
+                    logger.exception(
+                        "Execution lease release failed for terminal Job job_id=%s",
+                        job_id,
+                    )
+            if release_error is not None:
+                raise release_error
         return updated
 
     async def _notify(self, job_id: str, message: str) -> None:

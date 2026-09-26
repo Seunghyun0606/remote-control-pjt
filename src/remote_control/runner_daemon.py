@@ -9,6 +9,7 @@ from uuid import uuid4
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
+from remote_control.controller_lock import RunnerRuntimeLock
 from remote_control.event_payloads import sanitize_agent_event
 from remote_control.human_gate import extract_human_gate
 from remote_control.process_control import (
@@ -38,7 +39,27 @@ class RunnerDaemon:
     ) -> None:
         self.settings = settings
         self.boot_id = uuid4().hex
-        self.journal = journal or RunnerExecutionJournal(settings.resolved_state_path)
+        lock_path = settings.resolved_state_path.with_name(
+            settings.resolved_state_path.name + ".lock"
+        )
+        self.runtime_lock = RunnerRuntimeLock(lock_path)
+
+        # In production the runtime lock must be held before the journal is
+        # opened or initialized. Otherwise two processes starting against a
+        # brand-new journal can race while creating runner_instance_id and the
+        # losing process can still rewrite the winner's durable identity.
+        if journal is None:
+            self.runtime_lock.acquire()
+            try:
+                self.journal = RunnerExecutionJournal(settings.resolved_state_path)
+            except BaseException:
+                self.runtime_lock.release()
+                raise
+        else:
+            # Tests may inject an already-open journal. run_forever() still
+            # acquires the runtime lock before any recovery or connection work.
+            self.journal = journal
+        self.instance_id = self.journal.instance_id
         self._journal_recovered = False
         self.runner = CodexRunner(
             executable=settings.codex_executable,
@@ -61,26 +82,30 @@ class RunnerDaemon:
         self._fatal_error: RunnerSafetyError | None = None
 
     async def run_forever(self) -> None:
-        await self._recover_persisted_executions()
-        while True:
-            if self._fatal_error is not None:
-                raise self._fatal_error
-            try:
-                await self._run_connection()
-            except asyncio.CancelledError:
-                raise
-            except RunnerSafetyError:
-                logger.exception(
-                    "runner safety invariant failed; refusing automatic reconnect"
-                )
-                raise
-            except (OSError, ConnectionClosed) as exc:
-                logger.warning("runner connection lost: %s", exc)
-            except Exception:
-                logger.exception("runner connection loop failed; reconnecting")
-            if self._fatal_error is not None:
-                raise self._fatal_error
-            await asyncio.sleep(self.settings.reconnect_seconds)
+        self.runtime_lock.acquire()
+        try:
+            await self._recover_persisted_executions()
+            while True:
+                if self._fatal_error is not None:
+                    raise self._fatal_error
+                try:
+                    await self._run_connection()
+                except asyncio.CancelledError:
+                    raise
+                except RunnerSafetyError:
+                    logger.exception(
+                        "runner safety invariant failed; refusing automatic reconnect"
+                    )
+                    raise
+                except (OSError, ConnectionClosed) as exc:
+                    logger.warning("runner connection lost: %s", exc)
+                except Exception:
+                    logger.exception("runner connection loop failed; reconnecting")
+                if self._fatal_error is not None:
+                    raise self._fatal_error
+                await asyncio.sleep(self.settings.reconnect_seconds)
+        finally:
+            self.runtime_lock.release()
 
     async def _run_connection(self) -> None:
         async with connect(
@@ -98,6 +123,7 @@ class RunnerDaemon:
                     name=self.settings.name,
                     os=self.settings.os_name,
                     capabilities=sorted(self.settings.capabilities),
+                    runner_instance_id=self.instance_id,
                     runner_boot_id=self.boot_id,
                 ),
             )
@@ -106,6 +132,8 @@ class RunnerDaemon:
                 message(
                     "RUNNING_JOBS",
                     host_id=self.settings.host_id,
+                    runner_instance_id=self.instance_id,
+                    runner_boot_id=self.boot_id,
                     running_jobs=self._running_snapshot(),
                     completed_jobs=self._completed_snapshot(),
                 ),
@@ -151,6 +179,8 @@ class RunnerDaemon:
                 message(
                     "HEARTBEAT",
                     host_id=self.settings.host_id,
+                    runner_instance_id=self.instance_id,
+                    runner_boot_id=self.boot_id,
                     running_jobs=self._running_snapshot(),
                 ),
             )
@@ -212,8 +242,14 @@ class RunnerDaemon:
                 )
         elif envelope.type == "JOB_RESULT_ACK":
             execution_id = str(envelope.payload.get("execution_id") or "")
+            try:
+                self.journal.remove(execution_id)
+            except Exception as exc:
+                raise RunnerSafetyError(
+                    "runner could not durably remove acknowledged execution "
+                    f"{execution_id!r}"
+                ) from exc
             self.completed.pop(execution_id, None)
-            self.journal.remove(execution_id)
         elif envelope.type == "PROJECT_OPERATION_REQUEST":
             await self._project_operation(websocket, envelope)
 
@@ -507,11 +543,18 @@ class RunnerDaemon:
 
         if result.session_id is None:
             result.session_id = self.running_sessions.get(execution_id)
+        try:
+            self.journal.complete(execution_id, result)
+        except Exception as exc:
+            raise RunnerSafetyError(
+                "runner could not durably persist terminal execution result; "
+                f"refusing further work: execution={execution_id}"
+            ) from exc
+
+        self.completed[execution_id] = result
         self.running.pop(execution_id, None)
         self.running_sessions.pop(execution_id, None)
         self.running_working_directories.pop(execution_id, None)
-        self.journal.complete(execution_id, result)
-        self.completed[execution_id] = result
         await self._flush_completed()
 
     async def _flush_completed(self) -> None:

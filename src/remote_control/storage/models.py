@@ -58,6 +58,8 @@ class HostRecord(Base):
     status: Mapped[str] = mapped_column(String(32), index=True)
     capabilities_json: Mapped[str] = mapped_column(Text, default="[]")
     last_heartbeat: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    runner_instance_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    runner_boot_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utcnow,
@@ -74,6 +76,27 @@ class ExecutionLeaseRecord(Base):
     host_id: Mapped[str] = mapped_column(String(128), index=True)
     working_directory: Mapped[str] = mapped_column(Text)
     acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class RemoteExecutionRecord(Base):
+    __tablename__ = "remote_executions"
+
+    execution_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(64), index=True)
+    host_id: Mapped[str] = mapped_column(String(128), index=True)
+    runner_instance_id: Mapped[str] = mapped_column(String(64), index=True)
+    working_directory: Mapped[str] = mapped_column(Text)
+    session_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    state: Mapped[str] = mapped_column(String(32), index=True, default="ACTIVE")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    result_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
 
 
 class ProjectSessionRecord(Base):

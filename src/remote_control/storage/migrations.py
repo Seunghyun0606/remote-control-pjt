@@ -6,10 +6,10 @@ from datetime import datetime, timezone
 from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, inspect, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from remote_control.storage.models import Base, ExecutionLeaseRecord
+from remote_control.storage.models import Base, ExecutionLeaseRecord, RemoteExecutionRecord
 
 Migration = Callable[[AsyncConnection], Awaitable[None]]
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 4
 
 
 async def _baseline_schema(connection: AsyncConnection) -> None:
@@ -25,9 +25,36 @@ async def _execution_leases(connection: AsyncConnection) -> None:
     )
 
 
+async def _runner_identity(connection: AsyncConnection) -> None:
+    def migrate(sync_connection) -> None:
+        inspector = inspect(sync_connection)
+        columns = {column["name"] for column in inspector.get_columns("hosts")}
+        if "runner_instance_id" not in columns:
+            sync_connection.execute(
+                text("ALTER TABLE hosts ADD COLUMN runner_instance_id VARCHAR(64)")
+            )
+        if "runner_boot_id" not in columns:
+            sync_connection.execute(
+                text("ALTER TABLE hosts ADD COLUMN runner_boot_id VARCHAR(64)")
+            )
+
+    await connection.run_sync(migrate)
+
+
+async def _remote_executions(connection: AsyncConnection) -> None:
+    await connection.run_sync(
+        lambda sync_connection: RemoteExecutionRecord.__table__.create(
+            sync_connection,
+            checkfirst=True,
+        )
+    )
+
+
 MIGRATIONS: dict[int, Migration] = {
     1: _baseline_schema,
     2: _execution_leases,
+    3: _runner_identity,
+    4: _remote_executions,
 }
 
 

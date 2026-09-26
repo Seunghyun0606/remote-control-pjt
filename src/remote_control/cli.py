@@ -13,6 +13,7 @@ from remote_control.api.app import create_app
 from remote_control.approvals.registry import ApprovalRegistry
 from remote_control.controller.job_manager import JobManager
 from remote_control.controller.service import ControllerService
+from remote_control.controller_lock import ControllerRuntimeLock
 from remote_control.diagnostics import (
     collect_diagnostics,
     format_diagnostics,
@@ -46,6 +47,7 @@ from remote_control.storage.repositories import (
     ProjectSessionRepository,
     ProjectWorkRepository,
     RecoveryRepository,
+    RemoteExecutionRepository,
     SessionRepository,
     TelegramMessageBindingRepository,
     TelegramProjectTopicRepository,
@@ -139,148 +141,160 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
     logging.info("project config: %s", settings.resolved_config_path)
     logging.info("database: %s", settings.resolved_db_url)
 
-    db = Database(settings.resolved_db_url)
-    await db.init()
-    events = EventRepository(db)
-    execution_leases = ExecutionLeaseRegistry(
-        leases=ExecutionLeaseRepository(db),
-        events=events,
-    )
-    hosts = HostRegistry(
-        hosts=HostRepository(db),
-        events=events,
-        local_host_id=settings.host_id,
-        heartbeat_timeout_seconds=settings.heartbeat_timeout_seconds,
-    )
-    await hosts.register_local(
-        name="Controller Local Runner",
-        os_name=platform.system().lower(),
-        capabilities={"codex", "git", "projectctl", "long_running", "shell"},
-    )
-    sessions = SessionRegistry(
-        sessions=SessionRepository(db),
-        events=events,
-    )
-    project_sessions = ProjectSessionRegistry(
-        sessions=ProjectSessionRepository(db),
-        events=events,
-    )
-    approvals = ApprovalRegistry(
-        approvals=ApprovalRepository(db),
-        events=events,
-    )
-    recovery = RecoveryRepository(db)
-    project_work = ProjectWorkRepository(db)
-    telegram_topics = TelegramProjectTopicRepository(db)
-    telegram_bindings = TelegramMessageBindingRepository(db)
+    runtime_lock = ControllerRuntimeLock(settings.resolved_controller_lock_path)
+    runtime_lock.acquire()
+    db: Database | None = None
+    try:
+        db = Database(settings.resolved_db_url)
+        await db.init()
+        events = EventRepository(db)
+        execution_leases = ExecutionLeaseRegistry(
+            leases=ExecutionLeaseRepository(db),
+            events=events,
+        )
+        hosts = HostRegistry(
+            hosts=HostRepository(db),
+            events=events,
+            local_host_id=settings.host_id,
+            heartbeat_timeout_seconds=settings.heartbeat_timeout_seconds,
+        )
+        await hosts.register_local(
+            name="Controller Local Runner",
+            os_name=platform.system().lower(),
+            capabilities={"codex", "git", "projectctl", "long_running", "shell"},
+        )
+        sessions = SessionRegistry(
+            sessions=SessionRepository(db),
+            events=events,
+        )
+        project_sessions = ProjectSessionRegistry(
+            sessions=ProjectSessionRepository(db),
+            events=events,
+        )
+        approvals = ApprovalRegistry(
+            approvals=ApprovalRepository(db),
+            events=events,
+        )
+        recovery = RecoveryRepository(db)
+        remote_executions = RemoteExecutionRepository(db)
+        project_work = ProjectWorkRepository(db)
+        telegram_topics = TelegramProjectTopicRepository(db)
+        telegram_bindings = TelegramMessageBindingRepository(db)
 
-    local_runner = CodexRunner(
-        executable=settings.codex_executable,
-        sandbox=settings.codex_sandbox,
-        approval_policy=settings.codex_approval_policy,
-        codex_home=settings.codex_home,
-    )
-    gateway = RunnerGateway()
-    runner = HybridAgentRunner(
-        local_host_id=settings.host_id,
-        local_runner=local_runner,
-        gateway=gateway,
-    )
-    project_operations = HybridProjectOperationExecutor(
-        local_host_id=settings.host_id,
-        local=LocalProjectOperationExecutor(
-            projectctl_executable=settings.projectctl_executable,
-            git_executable=settings.git_executable,
+        local_runner = CodexRunner(
+            executable=settings.codex_executable,
+            sandbox=settings.codex_sandbox,
+            approval_policy=settings.codex_approval_policy,
+            codex_home=settings.codex_home,
+        )
+        gateway = RunnerGateway()
+        runner = HybridAgentRunner(
+            local_host_id=settings.host_id,
+            local_runner=local_runner,
+            gateway=gateway,
+        )
+        project_operations = HybridProjectOperationExecutor(
+            local_host_id=settings.host_id,
+            local=LocalProjectOperationExecutor(
+                projectctl_executable=settings.projectctl_executable,
+                git_executable=settings.git_executable,
+                timeout_seconds=settings.project_operation_timeout_seconds,
+            ),
+            gateway=gateway,
             timeout_seconds=settings.project_operation_timeout_seconds,
-        ),
-        gateway=gateway,
-        timeout_seconds=settings.project_operation_timeout_seconds,
-    )
-    project_adapters = ProjectAdapterRegistry(
-        operations=project_operations,
-        work=project_work,
-        events=events,
-    )
-    manager = JobManager(
-        projects=projects,
-        jobs=JobRepository(db),
-        events=events,
-        runner=runner,
-        local_host_id=settings.host_id,
-        hosts=hosts,
-        sessions=sessions,
-        project_sessions=project_sessions,
-        approvals=approvals,
-        recovery=recovery,
-        project_adapters=project_adapters,
-        project_work=project_work,
-        execution_leases=execution_leases,
-        progress_interval_seconds=settings.progress_interval_seconds,
-        quota_retry_initial_seconds=settings.quota_retry_initial_seconds,
-        quota_retry_max_seconds=settings.quota_retry_max_seconds,
-        quota_reset_grace_seconds=settings.quota_reset_grace_seconds,
-        restart_grace_seconds=settings.restart_grace_seconds,
-    )
-    controller = ControllerService(
-        projects=projects,
-        jobs=manager,
-        hosts=hosts,
-        diagnostics=lambda: format_diagnostics(
-            collect_diagnostics(
-                settings,
-                projects=projects,
-                run_versions=False,
+        )
+        project_adapters = ProjectAdapterRegistry(
+            operations=project_operations,
+            work=project_work,
+            events=events,
+        )
+        manager = JobManager(
+            projects=projects,
+            jobs=JobRepository(db),
+            events=events,
+            runner=runner,
+            local_host_id=settings.host_id,
+            hosts=hosts,
+            sessions=sessions,
+            project_sessions=project_sessions,
+            approvals=approvals,
+            recovery=recovery,
+            project_adapters=project_adapters,
+            project_work=project_work,
+            execution_leases=execution_leases,
+            remote_executions=remote_executions,
+            progress_interval_seconds=settings.progress_interval_seconds,
+            quota_retry_initial_seconds=settings.quota_retry_initial_seconds,
+            quota_retry_max_seconds=settings.quota_retry_max_seconds,
+            quota_reset_grace_seconds=settings.quota_reset_grace_seconds,
+            restart_grace_seconds=settings.restart_grace_seconds,
+        )
+        controller = ControllerService(
+            projects=projects,
+            jobs=manager,
+            hosts=hosts,
+            diagnostics=lambda: format_diagnostics(
+                collect_diagnostics(
+                    settings,
+                    projects=projects,
+                    run_versions=False,
+                )
+            ),
+        )
+        scheduler = RecoveryScheduler(
+            jobs=manager,
+            hosts=hosts,
+            interval_seconds=settings.scheduler_interval_seconds,
+        )
+
+        await manager.reconcile_startup()
+
+        telegram: TelegramProvider | None = None
+        if not no_telegram:
+            assert settings.telegram_bot_token is not None
+            telegram = TelegramProvider(
+                token=settings.telegram_bot_token,
+                allowed_user_ids=settings.telegram_allowed_user_ids,
+                controller=controller,
+                topics=telegram_topics,
+                bindings=telegram_bindings,
+                selection_ttl_seconds=settings.telegram_selection_ttl_seconds,
             )
-        ),
-    )
-    scheduler = RecoveryScheduler(
-        jobs=manager,
-        hosts=hosts,
-        interval_seconds=settings.scheduler_interval_seconds,
-    )
 
-    await manager.reconcile_startup()
+        slack: SlackProvider | None = None
+        if settings.slack_enabled:
+            assert settings.slack_bot_token is not None
+            assert settings.slack_app_token is not None
+            slack = SlackProvider(
+                bot_token=settings.slack_bot_token,
+                app_token=settings.slack_app_token,
+                allowed_user_ids=settings.slack_allowed_user_ids,
+                controller=controller,
+            )
 
-    telegram: TelegramProvider | None = None
-    if not no_telegram:
-        assert settings.telegram_bot_token is not None
-        telegram = TelegramProvider(
-            token=settings.telegram_bot_token,
-            allowed_user_ids=settings.telegram_allowed_user_ids,
-            controller=controller,
-            topics=telegram_topics,
-            bindings=telegram_bindings,
-            selection_ttl_seconds=settings.telegram_selection_ttl_seconds,
+        api = create_app(
+            controller,
+            runner_gateway=gateway,
+            runner_token=settings.runner_token,
+            api_token=settings.api_token,
+            api_principal=settings.api_principal,
+            web_ui_enabled=settings.web_ui_enabled,
         )
-
-    slack: SlackProvider | None = None
-    if settings.slack_enabled:
-        assert settings.slack_bot_token is not None
-        assert settings.slack_app_token is not None
-        slack = SlackProvider(
-            bot_token=settings.slack_bot_token,
-            app_token=settings.slack_app_token,
-            allowed_user_ids=settings.slack_allowed_user_ids,
-            controller=controller,
+        config = uvicorn.Config(
+            api,
+            host=settings.api_host,
+            port=settings.api_port,
+            log_level="info",
         )
+        server = uvicorn.Server(config)
+        started_providers = []
+    except BaseException:
+        if db is not None:
+            await db.close()
+        runtime_lock.release()
+        raise
 
-    api = create_app(
-        controller,
-        runner_gateway=gateway,
-        runner_token=settings.runner_token,
-        api_token=settings.api_token,
-        api_principal=settings.api_principal,
-        web_ui_enabled=settings.web_ui_enabled,
-    )
-    config = uvicorn.Config(
-        api,
-        host=settings.api_host,
-        port=settings.api_port,
-        log_level="info",
-    )
-    server = uvicorn.Server(config)
-    started_providers = []
-
+    assert db is not None
     try:
         await scheduler.start()
         if telegram is not None:
@@ -298,6 +312,7 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
             for provider in reversed(started_providers):
                 await provider.stop()
             await db.close()
+            runtime_lock.release()
 
 
 if __name__ == "__main__":

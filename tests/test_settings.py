@@ -86,3 +86,16 @@ def test_runner_state_path_is_scoped_by_host(tmp_path):
 def test_control_api_principal_defaults_to_server_namespace():
     settings = Settings(_env_file=None)
     assert settings.api_principal == "api:controller"
+
+
+
+def test_controller_lock_path_is_derived_from_sqlite_database(tmp_path):
+    settings = Settings(
+        _env_file=None,
+        REMOTE_CONTROL_HOME=str(tmp_path),
+        REMOTE_CONTROL_DB_URL="sqlite+aiosqlite:///./state/remote-control.db",
+    )
+    expected_db = tmp_path / "state" / "remote-control.db"
+    assert settings.resolved_controller_lock_path == expected_db.with_name(
+        "remote-control.db.controller.lock"
+    ).resolve()

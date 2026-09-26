@@ -156,8 +156,9 @@ class CodexRunner(AgentRunner):
         working_directory: Path,
         host_id: str | None = None,
         on_event: RunEventCallback | None = None,
+        execution_id: str | None = None,
     ) -> RunHandle:
-        del project_id, host_id
+        del project_id, host_id, execution_id
         self._validate_working_directory(working_directory)
         return await self._spawn(
             build_codex_command(
@@ -178,8 +179,9 @@ class CodexRunner(AgentRunner):
         working_directory: Path,
         host_id: str | None = None,
         on_event: RunEventCallback | None = None,
+        execution_id: str | None = None,
     ) -> RunHandle:
-        del host_id
+        del host_id, execution_id
         self._validate_working_directory(working_directory)
         return await self._spawn(
             build_codex_resume_command(

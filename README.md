@@ -2,7 +2,7 @@
 
 Telegram/Slack에서 **현재 머신의 Codex**를 실행하고, 진행 상태·추가 지시·Human Gate·사용량 제한 복구·Project OS 연동까지 관리하는 Runtime Control Plane입니다.
 
-현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.11.2**입니다.
+현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.12.0**입니다.
 
 ## 전체 개요
 
@@ -293,6 +293,8 @@ CONTROLLER_RUNNER_TOKEN=<GENERATED_RANDOM_SECRET>
 CONTROLLER_API_TOKEN=
 # API-created Job/Approval ownership은 request body가 아니라 서버 principal로 고정됩니다.
 CONTROLLER_API_PRINCIPAL=api:controller
+# 선택: 기본은 SQLite DB 옆의 .controller.lock
+REMOTE_CONTROL_CONTROLLER_LOCK_PATH=
 
 CODEX_EXECUTABLE=codex
 # Desktop Codex와 같은 thread store를 공유하려면 동일한 home을 사용합니다.
@@ -1202,7 +1204,7 @@ REMOTE_RUNNER_STATE_PATH=
 
 을 설정하고:
 
-> Remote Control 0.11.0부터 Remote Runner는 **Protocol v2**를 사용합니다. Controller와 Runner를 반드시 같은 버전으로 함께 업데이트하세요. Runner는 실행 중/완료 execution을 durable journal에 기록하며, 재시작 시 이전 process 상태를 확인하기 전에는 새 실행을 받지 않습니다.
+> Remote Control 0.12.0부터 Remote Runner는 **Protocol v3**를 사용합니다. Controller와 Runner를 반드시 같은 버전으로 함께 업데이트하세요. Runner journal에는 stable `runner_instance_id`가 저장되고 journal별 OS singleton lock을 사용합니다. 같은 `host_id`의 다른 Runner instance 또는 아직 살아 있는 다른 boot generation은 takeover할 수 없습니다. Remote execution ownership은 Controller DB에도 ACK까지 유지됩니다.
 
 
 ```powershell
@@ -1234,7 +1236,7 @@ REMOTE_RUNNER_STATE_PATH=
 - 같은 Host + working directory는 DB-backed execution lease로 단일 writer 보장
 - Codex 종료 시 wrapper PID가 아니라 process tree 종료 확인
 - Runner execution 결과는 Controller의 durable `JOB_RESULT_ACK` 전까지 journal에 유지
-- Protocol v2로 구 Controller/Runner 혼용 차단
+- Protocol v3로 stable Runner instance identity 및 구 Controller/Runner 혼용 차단
 
 ---
 
@@ -1266,6 +1268,7 @@ GET /jobs/{job_id}/project-work
 - [Runtime Hardening — P2](docs/RUNTIME_HARDENING_P2.md)
 - [Startup Preflight — P1 Closure](docs/STARTUP_PREFLIGHT_P1.md)
 - [Process Safety P0 Closure](docs/PROCESS_SAFETY_P0.md)
+- [Final Generation & Ownership Hardening — 0.12.0](docs/FINAL_HARDENING_012.md)
 - [Sessions and Feedback](docs/SESSIONS_AND_FEEDBACK.md)
 - [Human Gate](docs/HUMAN_GATE.md)
 - [Messaging](docs/MESSAGING.md)
@@ -1294,6 +1297,7 @@ Manual smoke test:
 - [x] Production hardening — quota signal/retry visibility + independent local-node guide
 - [x] Telegram Project Topics — command menu / topic scope / reply-to-job / multi-job selection
 - [x] Runtime hardening v0.9 — Windows npm Codex wrappers / doctor / FAILED retry / session history / stable runtime home / Windows CI
-- [x] Process safety v0.11 — Runner execution journal / process-tree containment / working-tree lease / durable result ACK / Protocol v2
+- [x] Process safety v0.11 — Runner execution journal / process-tree containment / working-tree lease / durable result ACK
+- [x] Generation & ownership hardening v0.12 — Controller singleton / stable Runner identity / execution ownership ledger / atomic lease assignment / Protocol v3
 
-Package version: **0.11.2**
+Package version: **0.12.0**
