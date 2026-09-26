@@ -6,11 +6,11 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 
 
 class Envelope(BaseModel):
-    protocol_version: Literal[2] = PROTOCOL_VERSION
+    protocol_version: Literal[3] = PROTOCOL_VERSION
     type: str
     id: str = Field(default_factory=lambda: uuid4().hex)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
