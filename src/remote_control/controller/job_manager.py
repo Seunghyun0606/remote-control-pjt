@@ -501,7 +501,12 @@ class JobManager:
         handle = self._handles.get(job_id)
         if handle is not None:
             await handle.cancel()
-            await self.jobs.update(job_id, pid=None)
+            await self.jobs.update(
+                job_id,
+                pid=None,
+                process_executable=None,
+                process_start_token=None,
+            )
         return await self.require(job_id)
 
     async def resume(
@@ -583,6 +588,8 @@ class JobManager:
                 stopped = await terminate_persisted_codex_process(
                     job.pid,
                     working_directory=project.path_for(self.local_host_id),
+                    expected_executable=job.process_executable,
+                    expected_start_token=job.process_start_token,
                     timeout_seconds=10,
                 )
                 if not stopped:
@@ -593,6 +600,8 @@ class JobManager:
                 await self.jobs.update(
                     job_id,
                     pid=None,
+                    process_executable=None,
+                    process_start_token=None,
                     error=(
                         "PROCESS_SAFETY_RECONCILED: persisted Codex process tree "
                         "was terminated before cancellation"
@@ -1480,6 +1489,8 @@ class JobManager:
             stopped = await terminate_persisted_codex_process(
                 job.pid,
                 working_directory=project.path_for(self.local_host_id),
+                expected_executable=job.process_executable,
+                expected_start_token=job.process_start_token,
                 timeout_seconds=10,
             )
             if not stopped:
@@ -1487,7 +1498,11 @@ class JobManager:
                     "refusing Controller startup because a previous local Codex "
                     f"process tree could not be terminated: job={job.id} pid={job.pid}"
                 )
-            changes: dict[str, object] = {"pid": None}
+            changes: dict[str, object] = {
+                "pid": None,
+                "process_executable": None,
+                "process_start_token": None,
+            }
             if (job.error or "").startswith("PROCESS_SAFETY_HOLD:"):
                 changes["error"] = (
                     "PROCESS_SAFETY_RECONCILED: previous Codex process tree "
@@ -1626,7 +1641,12 @@ class JobManager:
             if state == JobState.CANCELLING:
                 if job.assigned_host == self.local_host_id:
                     await handle.cancel()
-                    await self.jobs.update(job_id, pid=None)
+                    await self.jobs.update(
+                job_id,
+                pid=None,
+                process_executable=None,
+                process_start_token=None,
+            )
                     await self._finalize_cancellation(job_id)
                 else:
                     await self._persist_cancel_intent(job_id, handle)
@@ -1650,7 +1670,12 @@ class JobManager:
                     ),
                 )
                 await handle.cancel()
-                await self.jobs.update(job_id, pid=None)
+                await self.jobs.update(
+                job_id,
+                pid=None,
+                process_executable=None,
+                process_start_token=None,
+            )
                 await self.events.append(
                     "LOCAL_EXECUTION_STOPPED_FOR_SHUTDOWN",
                     job_id=job_id,
@@ -2511,7 +2536,11 @@ class JobManager:
 
     async def _set_handle(self, job_id: str, handle: RunHandle) -> None:
         self._handles[job_id] = handle
-        changes: dict[str, object] = {"pid": handle.pid}
+        changes: dict[str, object] = {
+            "pid": handle.pid,
+            "process_executable": handle.process_executable,
+            "process_start_token": handle.process_start_token,
+        }
         if handle.session_id:
             changes["external_session_id"] = handle.session_id
         await self.jobs.update(job_id, **changes)
@@ -2866,7 +2895,12 @@ class JobManager:
             handle = self._handles.get(job_id)
             if handle is not None:
                 await handle.cancel()
-                await self.jobs.update(job_id, pid=None)
+                await self.jobs.update(
+                job_id,
+                pid=None,
+                process_executable=None,
+                process_start_token=None,
+            )
                 return
             await asyncio.sleep(0)
 
@@ -3057,6 +3091,8 @@ class JobManager:
         await self.jobs.update(
             job_id,
             pid=exc.pid,
+            process_executable=exc.process_executable,
+            process_start_token=exc.process_start_token,
             error=f"PROCESS_SAFETY_HOLD: {exc}",
         )
         if state in {JobState.STARTING, JobState.RUNNING}:
