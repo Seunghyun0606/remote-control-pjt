@@ -111,6 +111,18 @@ This directly covers, among other boundaries:
 
 More importantly, future tests are included automatically without editing the workflow.
 
+### Windows timezone dependency discovered by full CI
+
+The first full-Windows run exposed a real platform dependency gap rather than a test-only issue: Windows does not normally ship the IANA timezone database consumed by Python `zoneinfo`.
+
+Remote Control parses named zones such as `Asia/Seoul`, so 0.13.1 now declares:
+
+```text
+tzdata>=2026.4,<2027; sys_platform == "win32"
+```
+
+and pins `tzdata==2026.4` in the cross-platform constraint snapshot. Linux continues to use its system timezone database; Windows receives the packaged IANA fallback.
+
 ## 4. CI matrix
 
 0.13.1 validates:
