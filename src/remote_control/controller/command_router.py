@@ -17,6 +17,7 @@ class Intent(StrEnum):
     PAUSE = "PAUSE"
     RESUME = "RESUME"
     STEER = "STEER"
+    REDIRECT = "REDIRECT"
     HOSTS = "HOSTS"
     RETRY = "RETRY"
     SESSIONS = "SESSIONS"
@@ -105,6 +106,8 @@ class CommandRouter:
             return Command(Intent.JOB, job_id=args[0])
         if command in {"/steer", "/send"}:
             return self._parse_steer(args)
+        if command == "/redirect":
+            return self._parse_redirect(args)
         if command == "/run":
             if not args:
                 raise CommandParseError("usage: /run <project> [--host <host-id>]")
@@ -139,6 +142,32 @@ class CommandRouter:
         if not instruction:
             raise CommandParseError("usage: /steer [--job <job-id>] <instruction>")
         return Command(Intent.STEER, job_id=job_id, instruction=instruction)
+
+    def _parse_redirect(self, args: list[str]) -> Command:
+        job_id: str | None = None
+        remaining: list[str] = []
+        index = 0
+        while index < len(args):
+            if args[index] == "--job":
+                if index + 1 >= len(args):
+                    raise CommandParseError(
+                        "usage: /redirect [--job <job-id>] <instruction>"
+                    )
+                job_id = args[index + 1]
+                index += 2
+                continue
+            remaining.append(args[index])
+            index += 1
+        instruction = " ".join(remaining).strip()
+        if not instruction:
+            raise CommandParseError(
+                "usage: /redirect [--job <job-id>] <instruction>"
+            )
+        return Command(
+            Intent.REDIRECT,
+            job_id=job_id,
+            instruction=instruction,
+        )
 
     def _parse_natural(self, text: str) -> Command:
         normalized = text.casefold().strip()

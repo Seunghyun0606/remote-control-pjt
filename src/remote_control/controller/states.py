@@ -11,6 +11,7 @@ class JobState(StrEnum):
     WAITING_AGENT = "WAITING_AGENT"
     WAITING_HUMAN = "WAITING_HUMAN"
     WAITING_HOST = "WAITING_HOST"
+    WAITING_LEASE = "WAITING_LEASE"
     WAITING_QUOTA = "WAITING_QUOTA"
     PAUSED = "PAUSED"
     CANCELLING = "CANCELLING"
@@ -22,8 +23,8 @@ class JobState(StrEnum):
 TERMINAL_STATES = {JobState.FAILED, JobState.CANCELLED, JobState.COMPLETED}
 
 _ALLOWED_TRANSITIONS: dict[JobState, set[JobState]] = {
-    JobState.QUEUED: {JobState.ASSIGNED, JobState.CANCELLING, JobState.CANCELLED, JobState.WAITING_HOST, JobState.FAILED},
-    JobState.ASSIGNED: {JobState.STARTING, JobState.CANCELLING, JobState.CANCELLED, JobState.WAITING_HOST},
+    JobState.QUEUED: {JobState.ASSIGNED, JobState.CANCELLING, JobState.CANCELLED, JobState.WAITING_HOST, JobState.WAITING_LEASE, JobState.FAILED},
+    JobState.ASSIGNED: {JobState.STARTING, JobState.CANCELLING, JobState.CANCELLED, JobState.WAITING_HOST, JobState.WAITING_LEASE},
     JobState.STARTING: {
         JobState.RUNNING,
         JobState.FAILED,
@@ -61,6 +62,7 @@ _ALLOWED_TRANSITIONS: dict[JobState, set[JobState]] = {
         JobState.CANCELLED,
     },
     JobState.WAITING_HOST: {JobState.ASSIGNED, JobState.CANCELLING, JobState.CANCELLED, JobState.FAILED},
+    JobState.WAITING_LEASE: {JobState.ASSIGNED, JobState.WAITING_HOST, JobState.CANCELLING, JobState.CANCELLED, JobState.FAILED},
     JobState.WAITING_QUOTA: {
         JobState.RUNNING,
         JobState.STARTING,

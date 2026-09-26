@@ -56,6 +56,26 @@ For `auto`, HostRouter reevaluates the configured allowed Hosts. A compatible fa
 
 Heartbeat expiry is persisted as `OFFLINE`; it is not only a presentation-time calculation.
 
+## WAITING_LEASE
+
+If the target host and repository are available but the same working tree is already owned by another non-terminal Job, the new Job enters `WAITING_LEASE` instead of failing.
+
+```text
+Job A RUNNING
+   ↓ owns working-tree lease
+Job B /run
+   ↓
+WAITING_LEASE
+   ↓ Job A terminal + lease released
+ASSIGNED → STARTING → RUNNING
+```
+
+A queued Job does **not** hold the execution lease or Project Session lock while waiting. When its turn arrives, it acquires the lease first and then reacquires the user's current Project Session so it resumes the latest Codex thread rather than a stale snapshot.
+
+Recovery records use `kind=LEASE`. The scheduler retries due lease records in durable update order, so Jobs queued on the same checkout are started oldest-first. A manual `/retry <job-id>` forces an immediate lease attempt.
+
+Controller restart rearms existing `WAITING_LEASE` records immediately. If a stale lease is found attached to a `WAITING_LEASE` Job, startup releases it because a queued Job must never reserve the checkout.
+
 ## WAITING_QUOTA
 
 Codex quota detection accepts:
@@ -190,6 +210,9 @@ Important R4 events include:
 
 - `HOST_OFFLINE`
 - `HOST_WAIT`
+- `LEASE_QUEUE_WAIT`
+- `LEASE_QUEUE_RELEASED`
+- `WAITING_LEASE_REARMED_ON_STARTUP`
 - `HOST_WAIT_RESUMED`
 - `QUOTA_WAIT`
 - `QUOTA_RESUMED`
@@ -214,14 +237,14 @@ Remote Control preserves the original FAILED Job and creates a new Job. If the o
 
 Project OS Jobs are intentionally excluded from direct retry cloning. Use `/run` so the adapter can re-read canonical Project OS task state.
 
-`WAITING_HOST` and `WAITING_QUOTA` remain automatic recovery states. Their recovery `last_error` is included in `/status` and `/job` diagnostics.
+`WAITING_HOST`, `WAITING_LEASE`, and `WAITING_QUOTA` are automatic recovery states. Their recovery `last_error` is included in `/status` and `/job` diagnostics.
 
 
 ## Working-tree execution lease
 
 Recovery keeps a DB-backed execution lease for every non-terminal Job that has an assigned host. The lease key is derived from `host_id + canonical working directory`, not from messaging user identity.
 
-This means WAITING_HOST, WAITING_QUOTA, WAITING_HUMAN, PAUSED and CANCELLING Jobs continue to reserve their checkout. Another Telegram/Slack/API identity cannot start a concurrent writer on the same host/path.
+This means WAITING_HOST, WAITING_QUOTA, WAITING_HUMAN, PAUSED and CANCELLING Jobs continue to reserve their checkout. `WAITING_LEASE` is the deliberate exception: it waits without owning a checkout lease. Another Telegram/Slack/API identity cannot start a concurrent writer on the same host/path.
 
 On startup stale leases for missing/terminal Jobs are removed and leases for non-terminal Jobs are reconstructed. If persisted active Jobs conflict on the same working tree, Controller startup fails instead of choosing one implicitly.
 

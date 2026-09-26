@@ -165,7 +165,8 @@ class ControllerService:
                     "/sessions\n/session — 현재 Project Session\n"
                     "/session new — 새 Session\n/session use <session-id> — 과거 Session 재사용\n"
                     "/pause [job-id]\n/resume [job-id]\n"
-                    "/steer [--job <job-id>] <instruction>\n/stop [job-id]\n"
+                    "/steer [--job <job-id>] <instruction>\n"
+                    "/redirect [--job <job-id>] <instruction>\n/stop [job-id]\n"
                     "일반 메시지 — active Job 1개면 추가 지시, 없으면 새 Job"
                 )
             return (
@@ -174,7 +175,8 @@ class ControllerService:
                 "/jobs\n/job <job-id>\n/retry <failed-or-waiting-job-id>\n"
                 "/sessions\n/session <session-id>\n/session use <session-id>\n/doctor\n"
                 "/pause [job-id]\n/resume [job-id]\n"
-                "/steer [--job <job-id>] <instruction>\n/stop [job-id]"
+                "/steer [--job <job-id>] <instruction>\n"
+                "/redirect [--job <job-id>] <instruction>\n/stop [job-id]"
             )
         if command.intent == Intent.PROJECTS:
             projects = self.projects.list()
@@ -433,6 +435,19 @@ class ControllerService:
                 f"↪ {job.id} 추가 지시 접수\n"
                 "현재 turn을 강제 종료하지 않고, 다음 Codex turn에서 같은 session에 적용합니다."
             )
+        if command.intent == Intent.REDIRECT:
+            assert command.instruction is not None
+            job = await self.jobs.select_for_user(
+                user_id,
+                job_id=command.job_id,
+                states={JobState.RUNNING},
+                project_id=project_id,
+            )
+            redirected = await self.jobs.redirect(job.id, command.instruction)
+            return (
+                f"↪ {redirected.id} 즉시 방향전환 요청\n"
+                "현재 Codex turn을 종료하고 같은 session에서 새 지시로 재개했습니다."
+            )
         if command.intent == Intent.STOP:
             job = await self.jobs.select_for_user(
                 user_id,
@@ -445,6 +460,13 @@ class ControllerService:
 
 
 def _job_started_text(job) -> str:
+    if job.state == JobState.WAITING_LEASE.value:
+        return (
+            f"⏳ {job.project_id} 작업 대기열 등록\n"
+            f"Job: {job.id}\n"
+            f"Host: {job.assigned_host or '-'}\n"
+            "앞선 작업이 끝나면 자동으로 시작합니다."
+        )
     return (
         f"▶ {job.project_id} 작업 시작\n"
         f"Job: {job.id}\n"
