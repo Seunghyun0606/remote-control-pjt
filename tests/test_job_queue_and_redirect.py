@@ -6,10 +6,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from remote_control.controller.job_manager import JobManager
+from remote_control.controller.states import JobState
 from remote_control.execution_leases import ExecutionLeaseRegistry
 from remote_control.recovery.models import RecoveryKind
 from remote_control.runners.fake import FakeAgentRunner
 from remote_control.sessions.project_sessions import ProjectSessionRegistry
+from remote_control.storage.models import JobRecord
 from remote_control.storage.repositories import (
     EventRepository,
     ExecutionLeaseRepository,
@@ -156,34 +158,26 @@ async def test_waiting_lease_is_rearmed_after_controller_restart(
 ):
     runner = FakeAgentRunner()
     manager = _manager(project_registry, database, runner)
-    job = await manager.create(
-        project_id="demo",
-        instruction="queued work",
-        requested_by_channel="test",
-        requested_by_user="u1",
-    )
-
-    # Simulate a durable queue state whose recovery metadata was lost before restart.
-    if job.state != "WAITING_LEASE":
-        await manager._transition(
-            job.id,
-            manager.__class__.__module__ and __import__(
-                "remote_control.controller.states",
-                fromlist=["JobState"],
-            ).JobState.WAITING_LEASE,
+    await manager.jobs.add(
+        JobRecord(
+            id="JOB-LEASE-RESTART",
+            project_id="demo",
+            requested_by_channel="test",
+            requested_by_user="u1",
+            requested_host="lightsail-main",
             assigned_host="lightsail-main",
+            instruction="queued work",
+            state=JobState.WAITING_LEASE.value,
         )
-        await manager.recovery.delete(job.id)
-        if manager.execution_leases is not None:
-            await manager.execution_leases.release_for_job(job.id)
+    )
 
     await manager.reconcile_startup(
         now=datetime.now(timezone.utc) + timedelta(seconds=1)
     )
 
-    current = await manager.require(job.id)
+    current = await manager.require("JOB-LEASE-RESTART")
     assert current.state == "WAITING_LEASE"
-    recovery = await manager.recovery.get(job.id)
+    recovery = await manager.recovery.get("JOB-LEASE-RESTART")
     assert recovery is not None
     assert recovery.kind == RecoveryKind.LEASE.value
     assert recovery.next_retry_at is not None
