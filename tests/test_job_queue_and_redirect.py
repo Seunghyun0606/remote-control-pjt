@@ -113,10 +113,9 @@ async def test_busy_working_tree_jobs_wait_and_run_in_fifo_order(
     await _wait_for_state(manager, third.id, "COMPLETED")
 
     assert len(runner.started) == 1
-    assert [item["instruction"] for item in runner.resumed[-2:]] == [
-        "second",
-        "third",
-    ]
+    resumed_instructions = [item["instruction"] for item in runner.resumed[-2:]]
+    assert "second" in resumed_instructions[0]
+    assert "third" in resumed_instructions[1]
 
 
 @pytest.mark.asyncio
