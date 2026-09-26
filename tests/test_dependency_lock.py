@@ -116,3 +116,16 @@ def test_windows_ci_runs_full_suite_instead_of_a_curated_smoke_list():
     assert "run: pytest -q" in windows_section
     assert "tests/test_r6_dashboard.py" not in windows_section
     assert "tests/test_final_hardening.py" not in windows_section
+
+
+
+def test_windows_timezone_fallback_is_declared_and_locked():
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = list(data["project"]["dependencies"])
+    assert (
+        "tzdata>=2026.4,<2027; sys_platform == 'win32'"
+        in dependencies
+    )
+
+    lock = (ROOT / "constraints" / "lock.txt").read_text(encoding="utf-8")
+    assert 'tzdata==2026.4; sys_platform == "win32"' in lock
