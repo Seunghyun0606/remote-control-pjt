@@ -86,33 +86,30 @@ A database whose recorded schema version is newer than the running binary is als
 
 ## P2-5 — dependency constraints
 
-Direct dependency intent remains documented in `constraints/runtime.txt` and `constraints/dev.txt`, while the complete transitive CI snapshot is pinned in:
+Direct dependency intent remains documented in `constraints/runtime.txt` and `constraints/dev.txt`, while the application direct/transitive version snapshot is pinned in:
 
 ```text
 constraints/lock.txt
 ```
 
-Linux Python 3.11/3.12 and Windows smoke all install with:
+Remote Control 0.13.1 additionally closes the build-toolchain gap with:
 
-```bash
-pip install -c constraints/lock.txt -e ".[dev]"
+```text
+constraints/pip.txt
+constraints/build.txt
 ```
 
-The lock contains exact pins for every resolved application direct and transitive package. Platform-only dependencies such as `colorama` are constrained but are installed only when selected by the platform resolver. Tests also verify that every declared direct dependency is present in the lock.
+The pip bootstrap and Hatchling PEP 517/660 toolchain are exact-version and SHA-256 wheel locked. CI installs them first, then installs the application with `--no-build-isolation` so a second dynamic build environment cannot resolve different backend packages.
 
-## P2-6 — broader Windows CI
+The application lock contains exact version pins for every resolved application direct and transitive package. Platform-only dependencies such as `colorama` are constrained but are installed only when selected by the platform resolver. Tests verify declared application dependencies, exact build backend ownership, hash-locked toolchain entries, and CI installation invariants.
 
-Windows CI now covers more than executable resolution and command parsing.
+See [P3 Reproducible Build & Windows Full CI](P3_REPRODUCIBLE_BUILD_WINDOWS_CI_0131.md).
 
-It includes:
+## P2-6 — Windows CI
 
-- Codex Runner framing/resume behavior;
-- RunnerGateway transport;
-- Project Session lifecycle;
-- runtime hardening/SQLite behavior;
-- settings and command routing.
+The earlier hardening release expanded Windows smoke coverage beyond executable resolution and command parsing.
 
-Linux Python 3.11/3.12 still runs the complete test suite.
+Remote Control 0.13.1 removes the curated smoke allowlist entirely: Windows now runs the same full `pytest -q` suite as Linux. New API identity, process safety, migration, lifecycle, and recovery tests therefore enter Windows CI automatically.
 
 ## P2-7 — Telegram pending selection TTL
 
