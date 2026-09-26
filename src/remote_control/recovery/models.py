@@ -5,6 +5,7 @@ from enum import StrEnum
 
 class RecoveryKind(StrEnum):
     HOST = "HOST"
+    LEASE = "LEASE"
     QUOTA = "QUOTA"
     RESTART = "RESTART"
 
