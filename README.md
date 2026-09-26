@@ -2,7 +2,7 @@
 
 Telegram/Slack에서 **현재 머신의 Codex**를 실행하고, 진행 상태·추가 지시·Human Gate·사용량 제한 복구·Project OS 연동까지 관리하는 Runtime Control Plane입니다.
 
-현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.13.1**입니다.
+현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.14.0**입니다.
 
 ## 전체 개요
 
@@ -54,7 +54,9 @@ Remote Agent Control과 Project OS의 역할도 분리됩니다.
 
 0.13.0에서는 migration v1을 immutable snapshot으로 고정하고 schema v5에서 process identity를 추가했습니다. 재시작 시 persisted PID는 숫자와 `--cd`만 보지 않고 **OS executable + process start token + working directory**가 모두 일치할 때만 종료합니다. 상세 내용은 [P2 Migration & Process Identity](docs/P2_MIGRATION_PROCESS_IDENTITY_013.md)을 참고하세요.
 
-0.13.1에서는 pip/Hatchling build toolchain을 wheel hash까지 고정하고 PEP 517/660 build isolation을 제거했습니다. Windows CI도 선택된 smoke module이 아니라 **전체 pytest suite**를 실행합니다. 상세 내용은 [P3 Reproducible Build & Windows Full CI](docs/P3_REPRODUCIBLE_BUILD_WINDOWS_CI_0131.md)을 참고하세요.
+0.14.0에서는 `/redirect`로 현재 Codex turn을 안전하게 종료하고 같은 session에서 즉시 새 지시로 전환할 수 있습니다. 같은 working tree가 사용 중인 새 Job은 실패하지 않고 `WAITING_LEASE` 대기열에 들어가며, 앞선 Job 종료 후 FIFO 순서로 자동 실행됩니다. 상세 내용은 [Redirect & Job Queue](docs/REDIRECT_AND_JOB_QUEUE_014.md)을 참고하세요.
+
+0.14.0에서는 pip/Hatchling build toolchain을 wheel hash까지 고정하고 PEP 517/660 build isolation을 제거했습니다. Windows CI도 선택된 smoke module이 아니라 **전체 pytest suite**를 실행합니다. 상세 내용은 [P3 Reproducible Build & Windows Full CI](docs/P3_REPRODUCIBLE_BUILD_WINDOWS_CI_0131.md)을 참고하세요.
 
 지원 기능:
 
@@ -62,7 +64,8 @@ Remote Agent Control과 Project OS의 역할도 분리됩니다.
 - Slack Socket Mode
 - Windows/Desktop local Codex
 - Lightsail/Linux local Codex
-- Codex session resume / steering
+- Codex session resume / steering / immediate redirect
+- working-tree Job queue (`WAITING_LEASE`)
 - Human Gate
 - Codex usage/quota 자동 재시도
 - Controller restart recovery
@@ -126,10 +129,11 @@ Resume 시 Codex가 요청한 thread와 다른 `thread.started` ID를 반환하�
 
 - `FAILED`: 기존 동작대로 새 retry Job을 생성합니다.
 - `WAITING_HOST`: 같은 Job을 즉시 다시 실행 시도합니다.
+- `WAITING_LEASE`: 앞선 작업 종료를 기다리지 않고 lease 획득을 즉시 다시 시도합니다.
 - `WAITING_QUOTA`: 예약된 retry 시각을 기다리지 않고 같은 Job을 즉시 resume 시도합니다.
 - `WAITING_HUMAN`: Human Gate 결정을 우회하지 않으며, 승인/거절 응답이 필요합니다.
 
-Controller가 재시작될 때 이미 `WAITING_HOST`였던 Job은 즉시 recovery due 상태로 다시 등록됩니다. RecoveryScheduler는 시작 직후 첫 tick을 동기적으로 실행하므로 사용 가능한 host라면 별도의 다음 scheduler interval을 기다리지 않고 재개를 시도합니다. `WAITING_QUOTA`의 미래 retry 시각은 재시작만으로 무시하지 않으며, 즉시 시도하려면 사용자가 `/retry <job-id>`를 실행합니다.
+Controller가 재시작될 때 이미 `WAITING_HOST` 또는 `WAITING_LEASE`였던 Job은 즉시 recovery due 상태로 다시 등록됩니다. RecoveryScheduler는 시작 직후 첫 tick을 동기적으로 실행하므로 사용 가능한 host라면 별도의 다음 scheduler interval을 기다리지 않고 재개를 시도합니다. `WAITING_QUOTA`의 미래 retry 시각은 재시작만으로 무시하지 않으며, 즉시 시도하려면 사용자가 `/retry <job-id>`를 실행합니다.
 
 ---
 
@@ -204,6 +208,7 @@ Remote Control은 Controller 시작 시 Telegram command menu를 자동 등록�
 /pause
 /resume
 /steer
+/redirect
 /stop
 ```
 
@@ -606,6 +611,9 @@ Project Topic 안에서는 `/run <project-id>` 대신 `/run`만 사용할 수 �
 
 ```text
 /steer 현재 구현 상태부터 확인하고 기존 변경을 중복하지 마
+
+# 현재 turn을 종료하고 같은 Codex session에서 즉시 방향전환
+/redirect DB 구조부터 다시 검토하고 그 방향으로 진행해
 ```
 
 일시정지/재개:
@@ -630,6 +638,7 @@ Project Topic 안에서는 `/run <project-id>` 대신 `/run`만 사용할 수 �
 | State | 의미 | 자동 복구 | 사용자가 할 일 |
 |---|---|---|---|
 | `WAITING_HOST` | 실행 가능한 Host를 기다리는 중 | O | Host/Controller 설정을 정상화하고 대기 |
+| `WAITING_LEASE` | 같은 working tree의 앞선 Job 종료 대기 | O | 보통 대기. 필요하면 `/retry <job-id>` |
 | `WAITING_QUOTA` | Codex usage/quota reset 대기 | O | 보통 대기만 하면 됨 |
 | `WAITING_HUMAN` | Human Gate 응답 대기 | X | Telegram 버튼/선택지로 결정 |
 | `PAUSED` | 사용자가 일시정지 | X | `/resume` |
@@ -646,7 +655,7 @@ Project Topic 안에서는 `/run <project-id>` 대신 `/run`만 사용할 수 �
 
 은 `PAUSED` Job 전용입니다. `FAILED` Job은 자동으로 재실행되지 않으며 `/retry`를 사용해야 합니다.
 
-`WAITING_HOST`와 `WAITING_QUOTA`는 recovery scheduler가 자동으로 다시 확인합니다.
+`WAITING_HOST`, `WAITING_LEASE`, `WAITING_QUOTA`는 recovery scheduler가 자동으로 다시 확인합니다.
 
 `/stop`은 원격 Runner에 요청을 보낸 즉시 `CANCELLED`로 바꾸지 않습니다. 원격 Codex 프로세스의 terminal `JOB_RESULT`를 확인할 때까지 `CANCELLING`과 Project Session lock을 유지합니다. Runner 연결이 교체되는 경우에도 이전 WebSocket의 cleanup은 새 연결을 OFFLINE 처리하지 않습니다.
 
@@ -952,6 +961,7 @@ Remote Control은 implementation handoff까지 담당하고 Project OS review/ev
 /resume [job-id]
 
 /steer [--job <job-id>] <instruction>
+/redirect [--job <job-id>] <instruction>
 /send [--job <job-id>] <instruction>
 
 /stop [job-id]
@@ -1276,7 +1286,7 @@ GET /jobs/{job_id}/project-work
 - [Process Safety P0 Closure](docs/PROCESS_SAFETY_P0.md)
 - [Final Generation & Ownership Hardening — 0.12.0](docs/FINAL_HARDENING_012.md)
 - [P2 Migration & Process Identity — 0.13.0](docs/P2_MIGRATION_PROCESS_IDENTITY_013.md)
-- [P3 Reproducible Build & Windows Full CI — 0.13.1](docs/P3_REPRODUCIBLE_BUILD_WINDOWS_CI_0131.md)
+- [P3 Reproducible Build & Windows Full CI — 0.14.0](docs/P3_REPRODUCIBLE_BUILD_WINDOWS_CI_0131.md)
 - [Sessions and Feedback](docs/SESSIONS_AND_FEEDBACK.md)
 - [Human Gate](docs/HUMAN_GATE.md)
 - [Messaging](docs/MESSAGING.md)
@@ -1308,4 +1318,4 @@ Manual smoke test:
 - [x] Process safety v0.11 — Runner execution journal / process-tree containment / working-tree lease / durable result ACK
 - [x] Generation & ownership hardening v0.12 — Controller singleton / stable Runner identity / execution ownership ledger / atomic lease assignment / Protocol v3
 
-Package version: **0.13.1**
+Package version: **0.14.0**
