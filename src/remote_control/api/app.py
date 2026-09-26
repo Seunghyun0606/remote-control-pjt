@@ -49,7 +49,7 @@ def create_app(
     ):
         raise ValueError("api_principal must be an api:... identifier without whitespace")
 
-    app = FastAPI(title="Remote Agent Control", version="0.11.2")
+    app = FastAPI(title="Remote Agent Control", version="0.12.0")
     dashboard = DashboardService(controller)
 
     if api_token:
