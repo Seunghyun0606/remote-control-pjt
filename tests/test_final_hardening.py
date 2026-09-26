@@ -9,6 +9,8 @@ from remote_control.controller.job_manager import JobManager
 from remote_control.controller_lock import (
     ControllerAlreadyRunningError,
     ControllerRuntimeLock,
+    RunnerAlreadyRunningError,
+    RunnerRuntimeLock,
 )
 from remote_control.execution_leases import ExecutionLeaseRegistry
 from remote_control.hosts.registry import HostRegistry
@@ -85,6 +87,22 @@ def test_controller_runtime_lock_rejects_second_process_owner(tmp_path: Path):
     second.release()
 
 
+def test_runner_runtime_lock_rejects_second_process_owner(tmp_path: Path):
+    path = tmp_path / "runner.json.lock"
+    first = RunnerRuntimeLock(path)
+    second = RunnerRuntimeLock(path)
+
+    first.acquire()
+    try:
+        with pytest.raises(RunnerAlreadyRunningError):
+            second.acquire()
+    finally:
+        first.release()
+
+    second.acquire()
+    second.release()
+
+
 def test_runner_journal_instance_identity_survives_restart(tmp_path: Path):
     path = tmp_path / "runner.json"
 
@@ -122,7 +140,32 @@ async def test_gateway_rejects_different_live_runner_instance():
 
 
 @pytest.mark.asyncio
-async def test_gateway_allows_same_instance_new_boot_and_stale_detach_is_safe():
+async def test_gateway_rejects_same_instance_different_live_boot():
+    gateway = RunnerGateway()
+    old = _FakeWebSocket()
+    replacement = _FakeWebSocket()
+
+    await gateway.attach(
+        "desktop-main",
+        old,
+        runner_instance_id="runner-A",
+        runner_boot_id="boot-A",
+    )
+
+    with pytest.raises(RunnerInstanceConflict):
+        await gateway.attach(
+            "desktop-main",
+            replacement,
+            runner_instance_id="runner-A",
+            runner_boot_id="boot-B",
+        )
+
+    assert old.closed == []
+    assert gateway.runner_boot_id("desktop-main") == "boot-A"
+
+
+@pytest.mark.asyncio
+async def test_gateway_same_boot_reconnect_keeps_stale_detach_safe():
     gateway = RunnerGateway()
     old = _FakeWebSocket()
     replacement = _FakeWebSocket()
@@ -137,12 +180,10 @@ async def test_gateway_allows_same_instance_new_boot_and_stale_detach_is_safe():
         "desktop-main",
         replacement,
         runner_instance_id="runner-A",
-        runner_boot_id="boot-B",
+        runner_boot_id="boot-A",
     )
 
     assert old.closed == [1012]
-    assert gateway.runner_instance_id("desktop-main") == "runner-A"
-    assert gateway.runner_boot_id("desktop-main") == "boot-B"
     assert await gateway.detach("desktop-main", old) is False
     assert gateway.is_connected("desktop-main") is True
 
