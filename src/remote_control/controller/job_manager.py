@@ -294,7 +294,7 @@ class JobManager:
             return await self.require(job.id)
 
         try:
-            await self._acquire_execution_lease(job.id, assigned_host)
+            await self._assign_execution_lease(job.id, assigned_host)
         except ExecutionLeaseBusyError as exc:
             await self.jobs.update(job.id, error=str(exc))
             await self._transition(job.id, JobState.FAILED)
@@ -307,7 +307,6 @@ class JobManager:
             )
             return await self.require(job.id)
 
-        await self._transition(job.id, JobState.ASSIGNED, assigned_host=assigned_host)
         self._start_task(job.id, self._execute_new(job.id))
         return await self.require(job.id)
 
@@ -398,7 +397,7 @@ class JobManager:
             return await self.require(retry.id)
 
         try:
-            await self._acquire_execution_lease(retry.id, assigned_host)
+            await self._assign_execution_lease(retry.id, assigned_host)
         except ExecutionLeaseBusyError as exc:
             await self.jobs.update(retry.id, error=str(exc))
             await self._transition(retry.id, JobState.FAILED)
@@ -411,11 +410,6 @@ class JobManager:
             )
             return await self.require(retry.id)
 
-        await self._transition(
-            retry.id,
-            JobState.ASSIGNED,
-            assigned_host=assigned_host,
-        )
         if original.external_session_id:
             self._start_task(retry.id, self._execute_retry(retry.id))
         else:
@@ -856,6 +850,23 @@ class JobManager:
         if self.recovery is None:
             return stale_locks + lease_repairs
         current = now or datetime.now(timezone.utc)
+
+        queued = await self.jobs.list_states({JobState.QUEUED.value})
+        for job in queued:
+            session_id = await self._external_session_id(job)
+            mode = RecoveryMode.RESUME if session_id else RecoveryMode.START
+            await self._enter_host_wait(
+                job.id,
+                mode=mode,
+                error="controller restarted before Job assignment completed",
+                assigned_host=None,
+                resume_instruction=(
+                    RESTART_RESUME_INSTRUCTION
+                    if mode == RecoveryMode.RESUME
+                    else None
+                ),
+            )
+            lease_repairs += 1
 
         cancelling = await self.jobs.list_states({JobState.CANCELLING.value})
         for job in cancelling:
@@ -1468,9 +1479,28 @@ class JobManager:
         repaired = 0
         for lease in await self.execution_leases.list():
             job = await self.jobs.get(lease.job_id)
-            if job is None or JobState(job.state) in TERMINAL_STATES:
+            if (
+                job is None
+                or JobState(job.state) in TERMINAL_STATES
+                or not job.assigned_host
+            ):
                 await self.execution_leases.release_for_job(lease.job_id)
                 repaired += 1
+                continue
+            project = self.projects.get(job.project_id)
+            expected_path = canonical_working_directory(
+                project.path_for(job.assigned_host)
+            )
+            if (
+                lease.host_id != job.assigned_host
+                or lease.working_directory != expected_path
+            ):
+                raise RuntimeError(
+                    "execution lease does not match active Job assignment; "
+                    f"refusing startup: job={job.id} lease={lease.host_id}:"
+                    f"{lease.working_directory} assigned={job.assigned_host}:"
+                    f"{expected_path}"
+                )
 
         active_states = {state.value for state in JobState if state not in TERMINAL_STATES}
         for job in await self.jobs.list_states(active_states):
@@ -1484,6 +1514,53 @@ class JobManager:
                     f"refusing startup: job={job.id}: {exc}"
                 ) from exc
         return repaired
+
+    async def _assign_execution_lease(
+        self,
+        job_id: str,
+        host_id: str,
+    ) -> JobRecord:
+        job = await self.require(job_id)
+        validate_transition(JobState(job.state), JobState.ASSIGNED)
+        if self.execution_leases is None:
+            return await self._transition(
+                job_id,
+                JobState.ASSIGNED,
+                assigned_host=host_id,
+            )
+
+        project = self.projects.get(job.project_id)
+        working_directory: str | Path = project.path_for(host_id)
+        if host_id == self.local_host_id:
+            working_directory = Path(working_directory).expanduser().resolve()
+        await self.execution_leases.assign_job(
+            job_id=job.id,
+            project_id=job.project_id,
+            host_id=host_id,
+            working_directory=working_directory,
+            expected_state=job.state,
+        )
+        updated = await self.require(job_id)
+        try:
+            await self.events.append(
+                "JOB_ASSIGNED",
+                job_id=job_id,
+                project_id=job.project_id,
+                host_id=host_id,
+                payload={
+                    "from": job.state,
+                    "to": JobState.ASSIGNED.value,
+                    "atomic_with_execution_lease": True,
+                },
+            )
+        except Exception:
+            logger.exception(
+                "JOB_ASSIGNED audit event failed after atomic assignment "
+                "job_id=%s host_id=%s",
+                job_id,
+                host_id,
+            )
+        return updated
 
     async def _acquire_execution_lease(
         self,
@@ -1686,11 +1763,9 @@ class JobManager:
             return False
 
         try:
-            await self._acquire_execution_lease(job.id, host_id)
+            await self._assign_execution_lease(job.id, host_id)
         except ExecutionLeaseBusyError:
             return False
-
-        await self._transition(job.id, JobState.ASSIGNED, assigned_host=host_id)
         if mode == RecoveryMode.START:
             await self.recovery.upsert(
                 job.id,
