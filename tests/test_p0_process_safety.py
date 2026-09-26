@@ -30,6 +30,8 @@ async def _wait_for_state(manager: JobManager, job_id: str, state: str) -> None:
     for _ in range(200):
         current = await manager.require(job_id)
         if current.state == state:
+            if state in {"COMPLETED", "FAILED", "CANCELLED"}:
+                await manager.wait_until_idle(job_id)
             return
         await asyncio.sleep(0.01)
     raise AssertionError(f"job {job_id} did not reach {state}")
