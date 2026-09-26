@@ -227,7 +227,7 @@ class ExecutionLeaseRepository:
             if job is None:
                 raise KeyError(f"unknown job: {record.job_id}")
             if job.state != expected_state:
-                raise ValueError(
+                raise RuntimeError(
                     f"job state changed during assignment: "
                     f"job={job.id} expected={expected_state} actual={job.state}"
                 )
