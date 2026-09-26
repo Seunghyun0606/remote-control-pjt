@@ -8,7 +8,9 @@ from pathlib import Path
 
 from remote_control.executables import ExecutableResolutionError, resolve_executable
 from remote_control.process_control import (
+    ProcessIdentity,
     ProcessSafetyError,
+    process_identity,
     subprocess_group_kwargs,
     terminate_process_tree,
 )
@@ -108,10 +110,13 @@ class CodexRunHandle(RunHandle):
         self,
         process: asyncio.subprocess.Process,
         reader_task: asyncio.Task[AgentRunResult],
+        identity: ProcessIdentity,
     ) -> None:
         self._process = process
         self._reader_task = reader_task
         self.pid = process.pid
+        self.process_executable = identity.executable
+        self.process_start_token = identity.start_token
         self.session_id: str | None = None
         self.execution_id: str | None = None
 
@@ -234,7 +239,15 @@ class CodexRunner(AgentRunner):
                 f"configured={command[0]!r}, resolved={resolved!r}, "
                 f"error={exc}"
             ) from exc
+        identity: ProcessIdentity | None = None
         try:
+            identity = await process_identity(process.pid)
+            if identity is None:
+                raise RuntimeError(
+                    "Codex process identity could not be established after spawn: "
+                    f"pid={process.pid}"
+                )
+
             assert process.stdin is not None
             prepared_instruction = prepare_codex_instruction(instruction)
             process.stdin.write(prepared_instruction.encode("utf-8"))
@@ -246,9 +259,10 @@ class CodexRunner(AgentRunner):
                     process,
                     on_event=on_event,
                     expected_session_id=expected_session_id,
+                    process_identity=identity,
                 )
             )
-            return CodexRunHandle(process, reader_task)
+            return CodexRunHandle(process, reader_task, identity)
         except BaseException as exc:
             stopped = await terminate_process_tree(
                 process.pid,
@@ -260,6 +274,8 @@ class CodexRunner(AgentRunner):
                     "Codex initialization failed and the spawned process tree "
                     f"could not be terminated: pid={process.pid}",
                     pid=process.pid,
+                    process_executable=identity.executable if identity else None,
+                    process_start_token=identity.start_token if identity else None,
                 ) from exc
             raise
 
@@ -269,6 +285,7 @@ class CodexRunner(AgentRunner):
         *,
         on_event: RunEventCallback | None,
         expected_session_id: str | None = None,
+        process_identity: ProcessIdentity,
     ) -> AgentRunResult:
         assert process.stdout is not None
         assert process.stderr is not None
@@ -365,6 +382,8 @@ class CodexRunner(AgentRunner):
                         "failed to terminate Codex process tree after reader failure "
                         f"pid={process.pid}",
                         pid=process.pid,
+                        process_executable=process_identity.executable,
+                        process_start_token=process_identity.start_token,
                     ) from exc
             if not stderr_task.done():
                 stderr_task.cancel()
