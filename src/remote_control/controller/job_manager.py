@@ -478,9 +478,13 @@ class JobManager:
     async def retry_waiting(self, job_id: str) -> JobRecord:
         job = await self.require(job_id)
         state = JobState(job.state)
-        if state not in {JobState.WAITING_HOST, JobState.WAITING_QUOTA}:
+        if state not in {
+            JobState.WAITING_HOST,
+            JobState.WAITING_LEASE,
+            JobState.WAITING_QUOTA,
+        }:
             raise ValueError(
-                f"job {job_id} must be WAITING_HOST or WAITING_QUOTA"
+                f"job {job_id} must be WAITING_HOST, WAITING_LEASE, or WAITING_QUOTA"
             )
         if self.recovery is None:
             raise ValueError("Recovery Registry가 활성화되지 않았습니다.")
@@ -488,7 +492,11 @@ class JobManager:
         async with self._job_locks[f"manual-retry:{job_id}"]:
             job = await self.require(job_id)
             state = JobState(job.state)
-            if state not in {JobState.WAITING_HOST, JobState.WAITING_QUOTA}:
+            if state not in {
+                JobState.WAITING_HOST,
+                JobState.WAITING_LEASE,
+                JobState.WAITING_QUOTA,
+            }:
                 return job
 
             record = await self.recovery.get(job.id)
@@ -503,7 +511,11 @@ class JobManager:
                     kind=(
                         RecoveryKind.QUOTA.value
                         if state == JobState.WAITING_QUOTA
-                        else RecoveryKind.HOST.value
+                        else (
+                            RecoveryKind.LEASE.value
+                            if state == JobState.WAITING_LEASE
+                            else RecoveryKind.HOST.value
+                        )
                     ),
                     mode=mode.value,
                     attempt_count=0,
@@ -536,6 +548,8 @@ class JobManager:
 
             if state == JobState.WAITING_QUOTA:
                 resumed = await self._retry_quota(job, record)
+            elif state == JobState.WAITING_LEASE:
+                resumed = await self._retry_lease(job, record)
             else:
                 resumed = await self._retry_host(job, record)
 
@@ -547,7 +561,11 @@ class JobManager:
                     host_id=job.assigned_host,
                     payload={
                         "state": state.value,
-                        "reason": "required host is still unavailable",
+                        "reason": (
+                            "working tree or project session is still busy"
+                            if state == JobState.WAITING_LEASE
+                            else "required host is still unavailable"
+                        ),
                     },
                 )
             return await self.require(job.id)
