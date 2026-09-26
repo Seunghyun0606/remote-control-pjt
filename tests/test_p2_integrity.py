@@ -128,6 +128,15 @@ async def test_database_migrates_v2_runtime_to_current(database):
         }
     assert {"process_executable", "process_start_token"} <= job_columns
 
+    async with database.engine.connect() as connection:
+        recovery_columns = {
+            row[1]
+            for row in (
+                await connection.execute(text("PRAGMA table_info(recovery)"))
+            ).all()
+        }
+    assert "queue_position" in recovery_columns
+
 
 @pytest.mark.asyncio
 async def test_v1_baseline_is_an_immutable_schema_snapshot(tmp_path):

@@ -160,6 +160,7 @@ class ControllerService:
                     f"Remote Agent Control — {project_id}\n"
                     "/run — 이 프로젝트 작업 시작\n"
                     "/status — 이 프로젝트 active Job\n"
+                    "/queue — 실행 중/대기 Queue 관리\n"
                     "/jobs — 이 프로젝트 최근 Job\n"
                     "/job <job-id>\n/retry <failed-or-waiting-job-id>\n"
                     "/sessions\n/session — 현재 Project Session\n"
@@ -171,7 +172,7 @@ class ControllerService:
                 )
             return (
                 "Remote Agent Control\n"
-                "/projects\n/status\n/hosts\n/run <project> [--host <host-id>]\n"
+                "/projects\n/status\n/queue\n/hosts\n/run <project> [--host <host-id>]\n"
                 "/jobs\n/job <job-id>\n/retry <failed-or-waiting-job-id>\n"
                 "/sessions\n/session <session-id>\n/session use <session-id>\n/doctor\n"
                 "/pause [job-id]\n/resume [job-id]\n"
@@ -219,6 +220,54 @@ class ControllerService:
                     f"{job.id} {job.project_id} {job.state} "
                     f"host={job.assigned_host or '-'}{_recovery_suffix(recovery)}"
                 )
+            return "\n".join(lines)
+        if command.intent == Intent.QUEUE:
+            active = await self.jobs.active_for_user(
+                user_id,
+                project_id=project_id,
+            )
+            queued = await self.jobs.queued_for_user(
+                user_id,
+                project_id=project_id,
+            )
+            current = [
+                job for job in active
+                if JobState(job.state) != JobState.WAITING_LEASE
+            ]
+            if not current and not queued:
+                return (
+                    "현재 project의 실행/대기 Job이 없습니다."
+                    if project_id is not None
+                    else "현재 실행/대기 Job이 없습니다."
+                )
+
+            title = (
+                f"🎛 {project_id} 작업 현황"
+                if project_id is not None
+                else "🎛 작업 현황"
+            )
+            lines = [title]
+            if current:
+                lines.append("\n현재")
+                for job in sorted(current, key=lambda item: item.created_at):
+                    lines.append(
+                        f"• {job.id} {job.state} host={job.assigned_host or '-'}"
+                    )
+            else:
+                lines.append("\n현재\n• 실행 중인 Job 없음")
+
+            lines.append("\n대기열")
+            if not queued:
+                lines.append("• WAITING_LEASE Job 없음")
+            else:
+                for index, job in enumerate(queued, start=1):
+                    instruction = " ".join(job.instruction.split())
+                    if len(instruction) > 70:
+                        instruction = instruction[:67] + "..."
+                    lines.append(
+                        f"{index}. {job.id} host={job.assigned_host or '-'}\n"
+                        f"   {instruction}"
+                    )
             return "\n".join(lines)
         if command.intent == Intent.RUN_PROJECT:
             assert command.project_id is not None
@@ -377,7 +426,11 @@ class ControllerService:
                     f"Host: {retried.assigned_host or '-'}\n"
                     f"Session: {retried.external_session_id or '-'}"
                 )
-            if state in {JobState.WAITING_HOST, JobState.WAITING_QUOTA}:
+            if state in {
+                JobState.WAITING_HOST,
+                JobState.WAITING_LEASE,
+                JobState.WAITING_QUOTA,
+            }:
                 retried = await self.jobs.retry_waiting(original.id)
                 return (
                     f"↻ 대기 Job 즉시 재시도 요청\n"
@@ -394,7 +447,7 @@ class ControllerService:
                 )
             raise ValueError(
                 f"job {original.id} is {state.value}; "
-                "/retry supports FAILED, WAITING_HOST, or WAITING_QUOTA"
+                "/retry supports FAILED, WAITING_HOST, WAITING_LEASE, or WAITING_QUOTA"
             )
         if command.intent == Intent.PAUSE:
             job = await self.jobs.select_for_user(

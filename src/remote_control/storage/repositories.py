@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from remote_control.storage.db import Database
@@ -675,9 +675,55 @@ class RecoveryRepository:
     async def list(self) -> list[RecoveryRecord]:
         async with self.db.sessions() as session:
             result = await session.execute(
-                select(RecoveryRecord).order_by(RecoveryRecord.updated_at)
+                select(RecoveryRecord).order_by(
+                    RecoveryRecord.queue_position.is_(None),
+                    RecoveryRecord.queue_position,
+                    RecoveryRecord.updated_at,
+                )
             )
             return list(result.scalars())
+
+    async def list_queue(self) -> list[RecoveryRecord]:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(RecoveryRecord)
+                .where(RecoveryRecord.queue_position.is_not(None))
+                .order_by(
+                    RecoveryRecord.queue_position,
+                    RecoveryRecord.created_at,
+                )
+            )
+            return list(result.scalars())
+
+    async def next_queue_position(self) -> int:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(func.coalesce(func.max(RecoveryRecord.queue_position), 0) + 1)
+            )
+            return int(result.scalar_one())
+
+    async def swap_queue_positions(
+        self,
+        first_job_id: str,
+        second_job_id: str,
+    ) -> tuple[RecoveryRecord, RecoveryRecord]:
+        async with self.db.sessions() as session:
+            first = await session.get(RecoveryRecord, first_job_id)
+            second = await session.get(RecoveryRecord, second_job_id)
+            if first is None:
+                raise KeyError(f"unknown recovery record: {first_job_id}")
+            if second is None:
+                raise KeyError(f"unknown recovery record: {second_job_id}")
+            if first.queue_position is None or second.queue_position is None:
+                raise ValueError("both jobs must be in the lease queue")
+            first.queue_position, second.queue_position = (
+                second.queue_position,
+                first.queue_position,
+            )
+            await session.commit()
+            await session.refresh(first)
+            await session.refresh(second)
+            return first, second
 
     async def upsert(self, job_id: str, **changes: Any) -> RecoveryRecord:
         async with self.db.sessions() as session:

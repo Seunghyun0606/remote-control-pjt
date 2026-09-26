@@ -12,6 +12,7 @@ class Intent(StrEnum):
     STATUS = "STATUS"
     RUN_PROJECT = "RUN_PROJECT"
     JOBS = "JOBS"
+    QUEUE = "QUEUE"
     JOB = "JOB"
     STOP = "STOP"
     PAUSE = "PAUSE"
@@ -70,6 +71,10 @@ class CommandRouter:
             return Command(Intent.STATUS)
         if command == "/jobs":
             return Command(Intent.JOBS)
+        if command == "/queue":
+            if args:
+                raise CommandParseError("usage: /queue")
+            return Command(Intent.QUEUE)
         if command == "/hosts":
             return Command(Intent.HOSTS)
         if command == "/doctor":

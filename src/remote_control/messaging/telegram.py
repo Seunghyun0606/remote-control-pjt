@@ -63,6 +63,7 @@ BOT_COMMANDS = (
     BotCommand("sync", "프로젝트별 Telegram Topic 동기화"),
     BotCommand("run", "프로젝트 Codex 작업 시작"),
     BotCommand("status", "현재 active Job 상태"),
+    BotCommand("queue", "실행 중/대기 Queue 관리"),
     BotCommand("jobs", "최근 Job 목록"),
     BotCommand("job", "특정 Job 상세 조회"),
     BotCommand("retry", "FAILED/WAITING Job 재시도"),
@@ -106,6 +107,9 @@ class TelegramProvider(MessagingProvider):
         )
         self.application.add_handler(
             CallbackQueryHandler(self._handle_job_action, pattern=r"^jobaction:")
+        )
+        self.application.add_handler(
+            CallbackQueryHandler(self._handle_queue_action, pattern=r"^queueaction:")
         )
         self.application.add_handler(MessageHandler(filters.TEXT, self._handle_update))
         self.controller.jobs.set_notifier(self.send_message)
@@ -380,11 +384,18 @@ class TelegramProvider(MessagingProvider):
             response = "명령 처리 중 오류가 발생했습니다."
 
         response_project = project_id or extract_project_id(response)
-        action_markup = (
-            build_job_action_markup(response)
-            if command in {"/job", "/session"}
-            else None
-        )
+        if command == "/queue":
+            queued_jobs = await self.controller.jobs.queued_for_user(
+                user_id,
+                project_id=project_id,
+            )
+            action_markup = build_queue_markup(queued_jobs)
+        else:
+            action_markup = (
+                build_job_action_markup(response)
+                if command in {"/job", "/session"}
+                else None
+            )
         await self._send_response(
             user_id=user_id,
             chat_id=chat_id,
@@ -515,6 +526,70 @@ class TelegramProvider(MessagingProvider):
         except Exception:
             logger.exception("telegram job selection failed")
             await query.answer("Job 선택 처리 중 오류가 발생했습니다.", show_alert=True)
+
+    async def _handle_queue_action(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        del context
+        query = update.callback_query
+        user = update.effective_user
+        if query is None or user is None or query.message is None:
+            return
+        if not is_authorized(user.id, self.allowed_user_ids):
+            await query.answer("권한이 없습니다.", show_alert=True)
+            return
+
+        try:
+            action, job_id = parse_queue_action_callback(query.data or "")
+            project_id = await self._project_for_thread(
+                chat_id=str(query.message.chat_id),
+                message_thread_id=query.message.message_thread_id,
+            )
+            user_id = str(user.id)
+
+            if action in {"up", "down"}:
+                assert job_id is not None
+                await self.controller.jobs.move_waiting_lease(
+                    job_id,
+                    user_id=user_id,
+                    direction=action,
+                    project_id=project_id,
+                )
+                await query.answer("대기 순서를 변경했습니다.")
+            elif action == "cancel":
+                assert job_id is not None
+                job = await self.controller.jobs.select_for_user(
+                    user_id,
+                    job_id=job_id,
+                    states={JobState.WAITING_LEASE},
+                    project_id=project_id,
+                )
+                await self.controller.jobs.cancel(job.id)
+                await query.answer("대기 Job을 취소했습니다.")
+            else:
+                await query.answer("Queue를 새로고침했습니다.")
+
+            response = await self.controller.handle_text(
+                "/queue",
+                channel="telegram",
+                user_id=user_id,
+                project_id=project_id,
+            )
+            queued_jobs = await self.controller.jobs.queued_for_user(
+                user_id,
+                project_id=project_id,
+            )
+            await query.edit_message_text(
+                response,
+                reply_markup=build_queue_markup(queued_jobs),
+            )
+        except (CommandParseError, KeyError, ValueError) as exc:
+            await query.answer(str(exc), show_alert=True)
+        except Exception:
+            logger.exception("telegram queue action failed")
+            await query.answer("Queue 작업 처리 중 오류가 발생했습니다.", show_alert=True)
 
     async def _handle_job_action(
         self,
@@ -765,6 +840,50 @@ def parse_approval_callback(data: str) -> tuple[str, str, str | None]:
     if action in {"details", "reject"} and len(parts) == 3:
         return approval_id, action, None
     raise ValueError("invalid approval callback")
+
+
+def build_queue_markup(jobs: list) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, job in enumerate(jobs, start=1):
+        short_id = job.id[-6:]
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"⬆ {index}·{short_id}",
+                    callback_data=f"queueaction:up:{job.id}",
+                ),
+                InlineKeyboardButton(
+                    text="⬇",
+                    callback_data=f"queueaction:down:{job.id}",
+                ),
+                InlineKeyboardButton(
+                    text="✕",
+                    callback_data=f"queueaction:cancel:{job.id}",
+                ),
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🔄 새로고침",
+                callback_data="queueaction:refresh:_",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
+def parse_queue_action_callback(data: str) -> tuple[str, str | None]:
+    parts = data.split(":", 2)
+    if len(parts) != 3 or parts[0] != "queueaction":
+        raise ValueError("invalid Telegram queue action callback")
+    action = parts[1]
+    value = parts[2]
+    if action in {"up", "down", "cancel"} and value:
+        return action, value
+    if action == "refresh" and value == "_":
+        return action, None
+    raise ValueError("invalid Telegram queue action callback")
 
 
 def build_job_action_markup(text: str) -> InlineKeyboardMarkup | None:

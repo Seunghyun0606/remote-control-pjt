@@ -224,3 +224,101 @@ async def test_host_recovery_reacquires_project_session_before_execution(
     assert project_session.locked_by_job_id == "JOB-RECOVER-SESSION"
 
     await _wait_for_state(manager, "JOB-RECOVER-SESSION", "COMPLETED")
+
+
+
+@pytest.mark.asyncio
+async def test_waiting_lease_queue_can_be_reordered_before_dispatch(
+    project_registry,
+    database,
+):
+    runner = FakeAgentRunner(delay=0.15)
+    manager = _manager(project_registry, database, runner)
+
+    first = await manager.create(
+        project_id="demo",
+        instruction="first",
+        requested_by_channel="test",
+        requested_by_user="u1",
+    )
+    await _wait_for_state(manager, first.id, "RUNNING")
+
+    second = await manager.create(
+        project_id="demo",
+        instruction="second",
+        requested_by_channel="test",
+        requested_by_user="u1",
+    )
+    third = await manager.create(
+        project_id="demo",
+        instruction="third",
+        requested_by_channel="test",
+        requested_by_user="u1",
+    )
+
+    before = await manager.queued_for_user("u1", project_id="demo")
+    assert [job.id for job in before] == [second.id, third.id]
+
+    await manager.move_waiting_lease(
+        third.id,
+        user_id="u1",
+        direction="up",
+        project_id="demo",
+    )
+    after = await manager.queued_for_user("u1", project_id="demo")
+    assert [job.id for job in after] == [third.id, second.id]
+
+    second_recovery = await manager.recovery.get(second.id)
+    third_recovery = await manager.recovery.get(third.id)
+    assert second_recovery is not None
+    assert third_recovery is not None
+    assert third_recovery.queue_position < second_recovery.queue_position
+
+    await _wait_for_state(manager, first.id, "COMPLETED")
+    now = datetime.now(timezone.utc) + timedelta(seconds=1)
+    assert await manager.recover_due(now=now) == 1
+    await _wait_for_state(manager, third.id, "RUNNING")
+    assert (await manager.require(second.id)).state == "WAITING_LEASE"
+
+    await _wait_for_state(manager, third.id, "COMPLETED")
+    assert await manager.recover_due(
+        now=datetime.now(timezone.utc) + timedelta(seconds=1)
+    ) == 1
+    await _wait_for_state(manager, second.id, "COMPLETED")
+
+    resumed_instructions = [item["instruction"] for item in runner.resumed[-2:]]
+    assert "third" in resumed_instructions[0]
+    assert "second" in resumed_instructions[1]
+
+
+@pytest.mark.asyncio
+async def test_waiting_lease_job_can_be_cancelled_without_stopping_current_job(
+    project_registry,
+    database,
+):
+    runner = FakeAgentRunner(delay=0.3)
+    manager = _manager(project_registry, database, runner)
+
+    first = await manager.create(
+        project_id="demo",
+        instruction="first",
+        requested_by_channel="test",
+        requested_by_user="u1",
+    )
+    await _wait_for_state(manager, first.id, "RUNNING")
+    queued = await manager.create(
+        project_id="demo",
+        instruction="cancel me",
+        requested_by_channel="test",
+        requested_by_user="u1",
+    )
+    assert queued.state == "WAITING_LEASE"
+
+    cancelled = await manager.cancel(queued.id)
+    assert cancelled.state == "CANCELLED"
+    assert await manager.recovery.get(queued.id) is None
+    assert await manager.queued_for_user("u1", project_id="demo") == []
+    assert (await manager.require(first.id)).state == "RUNNING"
+
+    await manager.cancel(first.id)
+    await manager.wait_until_idle(first.id)

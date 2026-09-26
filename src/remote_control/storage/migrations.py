@@ -10,7 +10,7 @@ from remote_control.storage.models import Base, ExecutionLeaseRecord, RemoteExec
 from remote_control.storage.schema_v1 import V1_METADATA
 
 Migration = Callable[[AsyncConnection], Awaitable[None]]
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 
 async def _baseline_schema(connection: AsyncConnection) -> None:
@@ -51,6 +51,18 @@ async def _remote_executions(connection: AsyncConnection) -> None:
     )
 
 
+async def _lease_queue_position(connection: AsyncConnection) -> None:
+    def migrate(sync_connection) -> None:
+        inspector = inspect(sync_connection)
+        columns = {column["name"] for column in inspector.get_columns("recovery")}
+        if "queue_position" not in columns:
+            sync_connection.execute(
+                text("ALTER TABLE recovery ADD COLUMN queue_position INTEGER")
+            )
+
+    await connection.run_sync(migrate)
+
+
 async def _process_identity(connection: AsyncConnection) -> None:
     def migrate(sync_connection) -> None:
         inspector = inspect(sync_connection)
@@ -73,6 +85,7 @@ MIGRATIONS: dict[int, Migration] = {
     3: _runner_identity,
     4: _remote_executions,
     5: _process_identity,
+    6: _lease_queue_position,
 }
 
 
