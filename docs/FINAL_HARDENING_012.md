@@ -4,7 +4,7 @@ Remote Control 0.12.0 closes the remaining controller/runner generation and cras
 
 ## Safety invariants
 
-1. Only one Controller process may own a runtime database at a time.
+1. Only one Controller process may own a runtime database at a time, and only one Runner process may own a Runner journal at a time.
 2. A remote `host_id` is not sufficient identity. A Runner has a stable `runner_instance_id` and a per-process `runner_boot_id`.
 3. A different Runner instance cannot take over a host while that host owns active Jobs, working-tree leases, or unacknowledged executions.
 4. Every new remote execution is assigned an `execution_id` and persisted to the Controller ownership ledger before it is sent to the Runner.
@@ -55,7 +55,9 @@ runner_boot_id
 
 The journal contains the stable instance id together with execution records. Reopening the same journal preserves it.
 
-A same-instance reconnect with a new boot id is a normal restart and may replace the stale WebSocket generation.
+A reconnect from the same process uses the same instance id and boot id and may replace its stale WebSocket generation.
+
+A different boot id is never allowed to replace a still-live WebSocket generation. The Runner also holds an OS-level singleton lock beside its journal before startup recovery, so a second process sharing the same journal cannot inspect/terminate the first Runner's active Codex processes.
 
 A different instance using the same `host_id` is rejected while any of these exist:
 - a non-terminal Job assigned to the host;
