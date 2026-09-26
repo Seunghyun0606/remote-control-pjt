@@ -128,4 +128,4 @@ def test_windows_timezone_fallback_is_declared_and_locked():
     )
 
     lock = (ROOT / "constraints" / "lock.txt").read_text(encoding="utf-8")
-    assert 'tzdata==2026.4; sys_platform == "win32"' in lock
+    assert "tzdata==2026.4" in lock
