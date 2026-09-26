@@ -518,32 +518,48 @@ class JobManager:
                     if job.external_session_id
                     else RecoveryMode.START
                 )
-                record = await self.recovery.upsert(
-                    job.id,
-                    kind=(
-                        RecoveryKind.QUOTA.value
-                        if state == JobState.WAITING_QUOTA
-                        else (
-                            RecoveryKind.LEASE.value
-                            if state == JobState.WAITING_LEASE
+                queue_position = None
+                if state == JobState.WAITING_LEASE:
+                    async with self._job_locks["lease-queue-order"]:
+                        queue_position = await self.recovery.next_queue_position()
+                        record = await self.recovery.upsert(
+                            job.id,
+                            kind=RecoveryKind.LEASE.value,
+                            mode=mode.value,
+                            attempt_count=0,
+                            next_retry_at=datetime.now(timezone.utc),
+                            execution_id=None,
+                            resume_instruction=(
+                                RESTART_RESUME_INSTRUCTION
+                                if mode == RecoveryMode.RESUME
+                                else job.instruction
+                            ),
+                            last_error="manual retry reconstructed missing recovery metadata",
+                            queue_position=queue_position,
+                        )
+                else:
+                    record = await self.recovery.upsert(
+                        job.id,
+                        kind=(
+                            RecoveryKind.QUOTA.value
+                            if state == JobState.WAITING_QUOTA
                             else RecoveryKind.HOST.value
-                        )
-                    ),
-                    mode=mode.value,
-                    attempt_count=0,
-                    next_retry_at=datetime.now(timezone.utc),
-                    execution_id=None,
-                    resume_instruction=(
-                        QUOTA_RESUME_INSTRUCTION
-                        if state == JobState.WAITING_QUOTA
-                        else (
-                            RESTART_RESUME_INSTRUCTION
-                            if mode == RecoveryMode.RESUME
-                            else None
-                        )
-                    ),
-                    last_error="manual retry reconstructed missing recovery metadata",
-                )
+                        ),
+                        mode=mode.value,
+                        attempt_count=0,
+                        next_retry_at=datetime.now(timezone.utc),
+                        execution_id=None,
+                        resume_instruction=(
+                            QUOTA_RESUME_INSTRUCTION
+                            if state == JobState.WAITING_QUOTA
+                            else (
+                                RESTART_RESUME_INSTRUCTION
+                                if mode == RecoveryMode.RESUME
+                                else None
+                            )
+                        ),
+                        last_error="manual retry reconstructed missing recovery metadata",
+                    )
 
             await self.events.append(
                 "WAITING_JOB_RETRY_REQUESTED",
@@ -3239,17 +3255,29 @@ class JobManager:
                         and current_record.queue_position is not None
                         else await self.recovery.next_queue_position()
                     )
-            record = await self.recovery.upsert(
-                job_id,
-                kind=RecoveryKind.LEASE.value,
-                mode=mode.value,
-                attempt_count=0,
-                next_retry_at=datetime.now(timezone.utc),
-                execution_id=None,
-                resume_instruction=resume_instruction,
-                last_error=error,
-                queue_position=queue_position,
-            )
+                    record = await self.recovery.upsert(
+                        job_id,
+                        kind=RecoveryKind.LEASE.value,
+                        mode=mode.value,
+                        attempt_count=0,
+                        next_retry_at=datetime.now(timezone.utc),
+                        execution_id=None,
+                        resume_instruction=resume_instruction,
+                        last_error=error,
+                        queue_position=queue_position,
+                    )
+            else:
+                record = await self.recovery.upsert(
+                    job_id,
+                    kind=RecoveryKind.LEASE.value,
+                    mode=mode.value,
+                    attempt_count=0,
+                    next_retry_at=datetime.now(timezone.utc),
+                    execution_id=None,
+                    resume_instruction=resume_instruction,
+                    last_error=error,
+                    queue_position=queue_position,
+                )
             await self.events.append(
                 "LEASE_QUEUE_WAIT",
                 job_id=job.id,
