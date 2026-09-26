@@ -215,6 +215,50 @@ class ExecutionLeaseRepository:
             await session.refresh(record)
             return record
 
+    async def assign_job(
+        self,
+        *,
+        record: ExecutionLeaseRecord,
+        expected_state: str,
+        assigned_host: str,
+    ) -> tuple[JobRecord, ExecutionLeaseRecord]:
+        async with self.db.sessions() as session:
+            job = await session.get(JobRecord, record.job_id)
+            if job is None:
+                raise KeyError(f"unknown job: {record.job_id}")
+            if job.state != expected_state:
+                raise ValueError(
+                    f"job state changed during assignment: "
+                    f"job={job.id} expected={expected_state} actual={job.state}"
+                )
+
+            result = await session.execute(
+                select(ExecutionLeaseRecord)
+                .where(ExecutionLeaseRecord.job_id == record.job_id)
+                .limit(1)
+            )
+            lease = result.scalar_one_or_none()
+            if lease is None:
+                session.add(record)
+                lease = record
+            elif lease.lease_key != record.lease_key:
+                raise IntegrityError(
+                    "job already owns a different execution lease",
+                    params=None,
+                    orig=None,
+                )
+
+            job.assigned_host = assigned_host
+            job.state = "ASSIGNED"
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                raise
+            await session.refresh(job)
+            await session.refresh(lease)
+            return job, lease
+
     async def get(self, lease_key: str) -> ExecutionLeaseRecord | None:
         async with self.db.sessions() as session:
             return await session.get(ExecutionLeaseRecord, lease_key)
