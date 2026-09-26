@@ -76,7 +76,7 @@ Remote Control now maintains:
 schema_migrations(version, applied_at)
 ```
 
-Schema migration tracking remains versioned and the current schema version is 2. Existing installations are brought under version tracking through idempotent migrations.
+Schema migration tracking remains versioned and the current schema version is 4. Existing installations are brought under version tracking through idempotent migrations.
 
 Future schema changes must add a numbered migration to `storage/migrations.py` rather than depending on SQLAlchemy `create_all()` to alter existing tables.
 
@@ -165,3 +165,8 @@ The migration version is checked first, then the live schema is compared with SQ
 ### Full dependency lock
 
 `constraints/lock.txt` is the reproducible CI/deployment constraint set. The older runtime/dev files remain useful as direct-dependency intent, not as a complete lock.
+
+
+## 0.12.0 generation and ownership follow-up
+
+A later lifecycle review found four crash/generation boundaries beyond the earlier P2 scope. Remote Control 0.12.0 adds Controller singleton ownership, stable Runner instance identity, the `remote_executions` ownership ledger, and atomic Job-assignment/execution-lease commits. See [Final Generation & Ownership Hardening](FINAL_HARDENING_012.md).
