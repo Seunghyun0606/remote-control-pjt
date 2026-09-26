@@ -144,8 +144,8 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
     runtime_lock.acquire()
     db: Database | None = None
     try:
-            db = Database(settings.resolved_db_url)
-            await db.init()
+        db = Database(settings.resolved_db_url)
+        await db.init()
         events = EventRepository(db)
         execution_leases = ExecutionLeaseRegistry(
             leases=ExecutionLeaseRepository(db),
