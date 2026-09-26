@@ -254,6 +254,7 @@ class RunnerGateway:
         instruction: str,
         working_directory: Path,
         on_event: RunEventCallback | None = None,
+        execution_id: str | None = None,
     ) -> RunHandle:
         return await self._start_remote_operation(
             message_type="JOB_START",
@@ -262,6 +263,7 @@ class RunnerGateway:
             working_directory=working_directory,
             on_event=on_event,
             project_id=project_id,
+            execution_id=execution_id,
         )
 
     async def resume_remote(
@@ -272,6 +274,7 @@ class RunnerGateway:
         instruction: str,
         working_directory: Path,
         on_event: RunEventCallback | None = None,
+        execution_id: str | None = None,
     ) -> RunHandle:
         return await self._start_remote_operation(
             message_type="JOB_RESUME",
@@ -280,6 +283,7 @@ class RunnerGateway:
             working_directory=working_directory,
             on_event=on_event,
             session_id=session_id,
+            execution_id=execution_id,
         )
 
     async def steer_remote(
@@ -290,6 +294,7 @@ class RunnerGateway:
         instruction: str,
         working_directory: Path,
         on_event: RunEventCallback | None = None,
+        execution_id: str | None = None,
     ) -> RunHandle:
         return await self._start_remote_operation(
             message_type="JOB_STEER",
@@ -298,6 +303,7 @@ class RunnerGateway:
             working_directory=working_directory,
             on_event=on_event,
             session_id=session_id,
+            execution_id=execution_id,
         )
 
     def adopt_remote(
@@ -337,10 +343,11 @@ class RunnerGateway:
         on_event: RunEventCallback | None,
         project_id: str | None = None,
         session_id: str | None = None,
+        execution_id: str | None = None,
     ) -> RunHandle:
         if not self.is_connected(host_id):
             raise ConnectionError(f"runner {host_id!r} is not connected")
-        execution_id = uuid4().hex
+        execution_id = execution_id or uuid4().hex
         future: asyncio.Future[AgentRunResult] = asyncio.get_running_loop().create_future()
         handle = RemoteRunHandle(
             execution_id=execution_id,
