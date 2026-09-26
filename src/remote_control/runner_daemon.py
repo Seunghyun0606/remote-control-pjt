@@ -39,12 +39,27 @@ class RunnerDaemon:
     ) -> None:
         self.settings = settings
         self.boot_id = uuid4().hex
-        self.journal = journal or RunnerExecutionJournal(settings.resolved_state_path)
-        self.instance_id = self.journal.instance_id
         lock_path = settings.resolved_state_path.with_name(
             settings.resolved_state_path.name + ".lock"
         )
         self.runtime_lock = RunnerRuntimeLock(lock_path)
+
+        # In production the runtime lock must be held before the journal is
+        # opened or initialized. Otherwise two processes starting against a
+        # brand-new journal can race while creating runner_instance_id and the
+        # losing process can still rewrite the winner's durable identity.
+        if journal is None:
+            self.runtime_lock.acquire()
+            try:
+                self.journal = RunnerExecutionJournal(settings.resolved_state_path)
+            except BaseException:
+                self.runtime_lock.release()
+                raise
+        else:
+            # Tests may inject an already-open journal. run_forever() still
+            # acquires the runtime lock before any recovery or connection work.
+            self.journal = journal
+        self.instance_id = self.journal.instance_id
         self._journal_recovered = False
         self.runner = CodexRunner(
             executable=settings.codex_executable,
