@@ -51,7 +51,7 @@ class ExecutionLeaseRegistry:
                 expected_state=expected_state,
                 assigned_host=host_id,
             )
-        except IntegrityError as exc:
+        except (IntegrityError, ValueError) as exc:
             owner = await self.leases.get(lease_key)
             detail = (
                 f"working tree is already leased by job {owner.job_id}"
