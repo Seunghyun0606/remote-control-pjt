@@ -76,7 +76,7 @@ Remote Control now maintains:
 schema_migrations(version, applied_at)
 ```
 
-Schema migration tracking remains versioned and the current schema version is 4. Existing installations are brought under version tracking through idempotent migrations.
+Schema migration tracking remains versioned. Remote Control 0.13.0 uses schema version 5. Existing installations are brought under version tracking through idempotent migrations.
 
 Future schema changes must add a numbered migration to `storage/migrations.py` rather than depending on SQLAlchemy `create_all()` to alter existing tables.
 
@@ -170,3 +170,48 @@ The migration version is checked first, then the live schema is compared with SQ
 ## 0.12.0 generation and ownership follow-up
 
 A later lifecycle review found four crash/generation boundaries beyond the earlier P2 scope. Remote Control 0.12.0 adds Controller singleton ownership, stable Runner instance identity, the `remote_executions` ownership ledger, and atomic Job-assignment/execution-lease commits. See [Final Generation & Ownership Hardening](FINAL_HARDENING_012.md).
+
+
+## 0.13.0 migration/process-identity follow-up
+
+A later review identified two remaining P2 integrity gaps.
+
+### Immutable migration v1
+
+Migration v1 no longer calls the live `Base.metadata.create_all()`. Its schema is frozen in `storage/schema_v1.py`.
+
+This means:
+
+```text
+fresh DB
+v1 snapshot → v2 → v3 → v4 → v5
+
+existing DB
+recorded version → next numbered migration → ... → v5
+```
+
+Both paths therefore traverse the same historical schema steps. Adding a future ORM model or column cannot silently change what migration v1 creates.
+
+Schema v5 adds nullable local-process identity fields to `jobs`:
+
+- `process_executable`
+- `process_start_token`
+
+### Strong persisted process identity
+
+A persisted PID is no longer sufficient together with only the expected `--cd` argument.
+
+New Codex processes capture OS identity immediately after spawn:
+
+- actual executable identity;
+- process creation/start token;
+- PID;
+- expected working directory.
+
+Crash recovery terminates a process only when all durable values match the currently live process.
+
+Linux uses `/proc/<pid>/exe` and `/proc/<pid>/stat` starttime. Windows uses `Win32_Process.ExecutablePath` and `CreationDate`.
+
+A legacy active Job or Runner journal entry without enough identity is intentionally fail-closed. Stop/inspect the process manually rather than deleting the journal or forcing recovery.
+
+See [P2 Migration & Process Identity](P2_MIGRATION_PROCESS_IDENTITY_013.md).
