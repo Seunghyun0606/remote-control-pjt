@@ -1642,11 +1642,11 @@ class JobManager:
                 if job.assigned_host == self.local_host_id:
                     await handle.cancel()
                     await self.jobs.update(
-                job_id,
-                pid=None,
-                process_executable=None,
-                process_start_token=None,
-            )
+                        job_id,
+                        pid=None,
+                        process_executable=None,
+                        process_start_token=None,
+                    )
                     await self._finalize_cancellation(job_id)
                 else:
                     await self._persist_cancel_intent(job_id, handle)
@@ -1671,11 +1671,11 @@ class JobManager:
                 )
                 await handle.cancel()
                 await self.jobs.update(
-                job_id,
-                pid=None,
-                process_executable=None,
-                process_start_token=None,
-            )
+                    job_id,
+                    pid=None,
+                    process_executable=None,
+                    process_start_token=None,
+                )
                 await self.events.append(
                     "LOCAL_EXECUTION_STOPPED_FOR_SHUTDOWN",
                     job_id=job_id,
@@ -2896,11 +2896,11 @@ class JobManager:
             if handle is not None:
                 await handle.cancel()
                 await self.jobs.update(
-                job_id,
-                pid=None,
-                process_executable=None,
-                process_start_token=None,
-            )
+                    job_id,
+                    pid=None,
+                    process_executable=None,
+                    process_start_token=None,
+                )
                 return
             await asyncio.sleep(0)
 
