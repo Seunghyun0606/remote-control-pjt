@@ -2230,13 +2230,18 @@ class JobManager:
                     job,
                     session_id=requested_session_id,
                 )
+                execution_kwargs = (
+                    {"execution_id": execution_id}
+                    if execution_id is not None
+                    else {}
+                )
                 handle = await operation(
                     session_id=requested_session_id,
                     instruction=_with_control_protocol(instruction),
                     working_directory=working_directory,
                     host_id=job.assigned_host,
                     on_event=self._event_callback(job_id),
-                    execution_id=execution_id,
+                    **execution_kwargs,
                 )
                 self._handles[job_id] = handle
                 await self._set_handle(job_id, handle)
@@ -2481,13 +2486,18 @@ class JobManager:
         assert job.assigned_host is not None
         working_directory = Path(project.path_for(job.assigned_host)).expanduser()
         execution_id = await self._reserve_remote_execution(job)
+        execution_kwargs = (
+            {"execution_id": execution_id}
+            if execution_id is not None
+            else {}
+        )
         return await self.runner.start(
             project_id=job.project_id,
             instruction=_with_control_protocol(instruction),
             working_directory=working_directory,
             host_id=job.assigned_host,
             on_event=self._event_callback(job.id),
-            execution_id=execution_id,
+            **execution_kwargs,
         )
 
     async def _set_handle(self, job_id: str, handle: RunHandle) -> None:
