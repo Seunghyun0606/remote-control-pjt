@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -317,7 +317,7 @@ class RemoteExecutionRepository:
             record.state = "RESULT_RECEIVED"
             if session_id:
                 record.session_id = session_id
-            record.result_received_at = datetime.now().astimezone()
+            record.result_received_at = datetime.now(timezone.utc)
             await session.commit()
             await session.refresh(record)
             return record
@@ -331,7 +331,7 @@ class RemoteExecutionRepository:
             if record is None:
                 return None
             record.state = "ACKNOWLEDGED"
-            record.acknowledged_at = datetime.now().astimezone()
+            record.acknowledged_at = datetime.now(timezone.utc)
             await session.commit()
             await session.refresh(record)
             return record
