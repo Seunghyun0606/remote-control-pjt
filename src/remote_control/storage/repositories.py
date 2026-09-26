@@ -179,6 +179,10 @@ class HostRepository:
                 current.status = record.status
                 current.capabilities_json = record.capabilities_json
                 current.last_heartbeat = record.last_heartbeat
+                if record.runner_instance_id is not None:
+                    current.runner_instance_id = record.runner_instance_id
+                if record.runner_boot_id is not None:
+                    current.runner_boot_id = record.runner_boot_id
                 target = current
             await session.commit()
             await session.refresh(target)
