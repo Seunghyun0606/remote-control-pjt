@@ -401,7 +401,12 @@ class RunnerDaemon:
                 )
         except ProcessSafetyError as exc:
             try:
-                self.journal.attach_pid(execution_id, exc.pid)
+                self.journal.attach_pid(
+                    execution_id,
+                    exc.pid,
+                    process_executable=exc.process_executable,
+                    process_start_token=exc.process_start_token,
+                )
             except Exception:
                 # Keep the STARTING reservation when PID persistence also fails.
                 # Startup will fail closed rather than guessing that no process exists.
@@ -435,7 +440,12 @@ class RunnerDaemon:
             )
             return
         try:
-            self.journal.attach_pid(execution_id, handle.pid)
+            self.journal.attach_pid(
+                execution_id,
+                handle.pid,
+                process_executable=handle.process_executable,
+                process_start_token=handle.process_start_token,
+            )
             if seen_session or handle.session_id:
                 self.journal.update_session(
                     execution_id,
@@ -588,6 +598,8 @@ class RunnerDaemon:
             stopped = await terminate_persisted_codex_process(
                 entry.pid,
                 working_directory=entry.working_directory,
+                expected_executable=entry.process_executable,
+                expected_start_token=entry.process_start_token,
                 timeout_seconds=10,
             )
             if not stopped:

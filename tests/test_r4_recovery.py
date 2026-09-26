@@ -497,8 +497,15 @@ async def test_controller_restart_recovers_local_session(
     project_registry,
     database,
 ):
-    async def terminate(pid, *, working_directory, timeout_seconds):
-        del pid, working_directory, timeout_seconds
+    async def terminate(
+        pid,
+        *,
+        working_directory,
+        expected_executable,
+        expected_start_token,
+        timeout_seconds,
+    ):
+        del pid, working_directory, expected_executable, expected_start_token, timeout_seconds
         return True
 
     monkeypatch.setattr(

@@ -20,6 +20,8 @@ class AgentRunResult:
 
 class RunHandle(ABC):
     pid: int | None = None
+    process_executable: str | None = None
+    process_start_token: str | None = None
     session_id: str | None = None
     execution_id: str | None = None
 

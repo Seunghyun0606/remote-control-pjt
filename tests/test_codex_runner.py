@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from remote_control.process_control import ProcessSafetyError
+from remote_control.process_control import ProcessIdentity, ProcessSafetyError
 from remote_control.runners.codex import (
     CODEX_READ_CHUNK_BYTES,
     CodexRunner,
@@ -11,6 +11,12 @@ from remote_control.runners.codex import (
     build_codex_environment,
     build_codex_resume_command,
     prepare_codex_instruction,
+)
+
+
+TEST_PROCESS_IDENTITY = ProcessIdentity(
+    executable="/test/codex",
+    start_token="test:123",
 )
 
 
@@ -140,6 +146,7 @@ async def test_resume_rejects_rebound_thread_identity(monkeypatch):
         process,
         on_event=None,
         expected_session_id="thread-old",
+        process_identity=TEST_PROCESS_IDENTITY,
     )
 
     assert process.terminated is True
@@ -216,6 +223,14 @@ async def test_post_spawn_initialization_failure_fails_closed_when_cleanup_unpro
         "remote_control.runners.codex.asyncio.create_subprocess_exec",
         fake_create_subprocess_exec,
     )
+
+    async def fake_process_identity(_pid):
+        return TEST_PROCESS_IDENTITY
+
+    monkeypatch.setattr(
+        "remote_control.runners.codex.process_identity",
+        fake_process_identity,
+    )
     monkeypatch.setattr(
         "remote_control.runners.codex.terminate_process_tree",
         cannot_terminate,
@@ -254,6 +269,14 @@ async def test_codex_spawn_uses_chunk_reader_without_large_line_limit(monkeypatc
     monkeypatch.setattr(
         "remote_control.runners.codex.asyncio.create_subprocess_exec",
         fake_create_subprocess_exec,
+    )
+
+    async def fake_process_identity(_pid):
+        return TEST_PROCESS_IDENTITY
+
+    monkeypatch.setattr(
+        "remote_control.runners.codex.process_identity",
+        fake_process_identity,
     )
 
     runner = CodexRunner()
@@ -310,6 +333,7 @@ async def test_read_result_survives_oversized_jsonl_event(monkeypatch):
     result = await CodexRunner()._read_result(
         process,
         on_event=capture,
+        process_identity=TEST_PROCESS_IDENTITY,
     )
 
     assert result.returncode == 0
@@ -341,6 +365,7 @@ async def test_reader_callback_failure_terminates_codex_process_tree(monkeypatch
         await CodexRunner()._read_result(
             process,
             on_event=fail_callback,
+            process_identity=TEST_PROCESS_IDENTITY,
         )
 
     assert terminated == [(12345, 10)]

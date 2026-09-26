@@ -7,13 +7,14 @@ from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, inspec
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from remote_control.storage.models import Base, ExecutionLeaseRecord, RemoteExecutionRecord
+from remote_control.storage.schema_v1 import V1_METADATA
 
 Migration = Callable[[AsyncConnection], Awaitable[None]]
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 
 async def _baseline_schema(connection: AsyncConnection) -> None:
-    await connection.run_sync(Base.metadata.create_all)
+    await connection.run_sync(V1_METADATA.create_all)
 
 
 async def _execution_leases(connection: AsyncConnection) -> None:
@@ -50,11 +51,28 @@ async def _remote_executions(connection: AsyncConnection) -> None:
     )
 
 
+async def _process_identity(connection: AsyncConnection) -> None:
+    def migrate(sync_connection) -> None:
+        inspector = inspect(sync_connection)
+        columns = {column["name"] for column in inspector.get_columns("jobs")}
+        if "process_executable" not in columns:
+            sync_connection.execute(
+                text("ALTER TABLE jobs ADD COLUMN process_executable TEXT")
+            )
+        if "process_start_token" not in columns:
+            sync_connection.execute(
+                text("ALTER TABLE jobs ADD COLUMN process_start_token VARCHAR(128)")
+            )
+
+    await connection.run_sync(migrate)
+
+
 MIGRATIONS: dict[int, Migration] = {
     1: _baseline_schema,
     2: _execution_leases,
     3: _runner_identity,
     4: _remote_executions,
+    5: _process_identity,
 }
 
 

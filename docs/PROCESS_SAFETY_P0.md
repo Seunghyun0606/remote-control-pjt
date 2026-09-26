@@ -7,7 +7,7 @@ This document defines the process-lifecycle safety rules introduced in Remote Co
 Remote Control now treats these as hard safety invariants:
 
 1. A Job must not release its working-tree lease while its Codex process may still be alive.
-2. A persisted PID is never killed only because the numeric PID matches; the process command must also match the expected `--cd <working-directory>`.
+2. A persisted PID is never killed only because the numeric PID matches. Remote Control 0.13.0 requires the persisted OS executable, process start/creation token, and expected `--cd <working-directory>` to match the live process.
 3. One physical working tree on one execution host may have only one non-terminal Job lease, regardless of Telegram, Slack, API, user id, or Project Session owner.
 4. A remote terminal result remains durable on the Runner until the Controller has durably processed the Job result and sends `JOB_RESULT_ACK`.
 5. If process identity or spawn state cannot be proven after a crash, startup fails closed rather than guessing that execution stopped.
@@ -44,7 +44,7 @@ It is released only when the Job reaches a terminal state.
 
 This prevents a Telegram user, Slack user, API caller, or another configured project from starting a second write-capable Codex execution against the same checkout.
 
-Database schema version 2 introduced the `execution_leases` table. Schema v4 adds stable Runner identity fields and the `remote_executions` ownership ledger.
+Database schema version 2 introduced the `execution_leases` table. Schema v4 adds stable Runner identity fields and the `remote_executions` ownership ledger. Schema v5 adds durable local process executable/start-token identity.
 
 ## Local Controller process lifecycle
 
@@ -64,7 +64,7 @@ RUNNING local Job
 
 On the next Controller startup, the Job may safely resume from the existing repository/session state.
 
-After an unclean Controller crash, a non-terminal local Job with a persisted PID is checked before recovery. Remote Control verifies the live process command contains the expected working-directory argument and terminates the entire process tree before allowing recovery.
+After an unclean Controller crash, a non-terminal local Job with a persisted PID is checked before recovery. Remote Control verifies the persisted executable and process start/creation token against the live OS process, then verifies the command contains the expected working-directory argument. Only after all checks match is the process tree terminated.
 
 If Codex was spawned but Remote Control cannot prove that cleanup succeeded, the Job enters a fail-closed process safety hold:
 
@@ -122,7 +122,7 @@ journal entry removed
 At Runner startup:
 
 - `COMPLETED` entries are retained and retransmitted.
-- `RUNNING` entries are verified against their command line and working directory, then the old process tree is terminated before reconnect.
+- `RUNNING` entries are verified against PID, OS executable, process start/creation token, command line, and working directory, then the old process tree is terminated before reconnect.
 - `STARTING` entries cause fail-closed startup because the Runner may have crashed between process spawn and durable PID attachment.
 - a live PID whose identity cannot be proven also causes fail-closed startup.
 
@@ -180,12 +180,17 @@ These original semantics were introduced with Protocol v2. Remote Control 0.12.0
 
 ## Upgrade
 
-1. Pull the same 0.12.0 code on Controller and Runner hosts.
+1. Pull the same 0.13.0 build on Controller and Runner hosts.
 2. Install/update dependencies.
 3. Stop old Controller and Runner processes.
-4. Start exactly one Controller; schema migration to v4 is automatic.
+4. Start exactly one Controller; schema migration to v5 is automatic.
 5. Start each Runner using the same Protocol v3 build and its existing journal.
 6. Verify host status and perform a short remote Job.
 7. Verify the Runner state journal path is writable.
 
 Do not manually delete a Runner journal merely to bypass a fail-closed startup. A `STARTING` entry or unverifiable live PID means process state is uncertain; inspect the host/process first.
+
+
+## 0.13.0 process identity extension
+
+The stronger PID-reuse protection and immutable migration baseline are documented in [P2 Migration & Process Identity Hardening](P2_MIGRATION_PROCESS_IDENTITY_013.md).
