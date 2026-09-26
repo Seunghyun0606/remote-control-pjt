@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from pathlib import Path
 
 from sqlalchemy.exc import IntegrityError
@@ -8,6 +9,8 @@ from sqlalchemy.exc import IntegrityError
 from remote_control.process_control import canonical_working_directory
 from remote_control.storage.models import ExecutionLeaseRecord
 from remote_control.storage.repositories import EventRepository, ExecutionLeaseRepository
+
+logger = logging.getLogger(__name__)
 
 
 class ExecutionLeaseBusyError(RuntimeError):
@@ -23,6 +26,53 @@ class ExecutionLeaseRegistry:
     ) -> None:
         self.leases = leases
         self.events = events
+
+    async def assign_job(
+        self,
+        *,
+        job_id: str,
+        project_id: str,
+        host_id: str,
+        working_directory: str | Path,
+        expected_state: str,
+    ) -> ExecutionLeaseRecord:
+        normalized = canonical_working_directory(working_directory)
+        lease_key = _lease_key(host_id, normalized)
+        record = ExecutionLeaseRecord(
+            lease_key=lease_key,
+            job_id=job_id,
+            project_id=project_id,
+            host_id=host_id,
+            working_directory=normalized,
+        )
+        try:
+            _job, stored = await self.leases.assign_job(
+                record=record,
+                expected_state=expected_state,
+                assigned_host=host_id,
+            )
+        except IntegrityError as exc:
+            owner = await self.leases.get(lease_key)
+            detail = (
+                f"working tree is already leased by job {owner.job_id}"
+                if owner is not None
+                else "working tree lease is already held"
+            )
+            raise ExecutionLeaseBusyError(
+                f"{detail}: host={host_id} path={normalized}"
+            ) from exc
+
+        await self._event_best_effort(
+            "EXECUTION_LEASE_ACQUIRED",
+            job_id=job_id,
+            project_id=project_id,
+            host_id=host_id,
+            payload={
+                "lease_key": lease_key,
+                "working_directory": normalized,
+            },
+        )
+        return stored
 
     async def acquire(
         self,
@@ -70,7 +120,7 @@ class ExecutionLeaseRegistry:
                 f"{detail}: host={host_id} path={normalized}"
             ) from exc
 
-        await self.events.append(
+        await self._event_best_effort(
             "EXECUTION_LEASE_ACQUIRED",
             job_id=job_id,
             project_id=project_id,
@@ -87,7 +137,7 @@ class ExecutionLeaseRegistry:
         if current is None:
             return
         await self.leases.delete_for_job(job_id)
-        await self.events.append(
+        await self._event_best_effort(
             "EXECUTION_LEASE_RELEASED",
             job_id=job_id,
             project_id=current.project_id,
@@ -103,6 +153,20 @@ class ExecutionLeaseRegistry:
 
     async def list(self) -> list[ExecutionLeaseRecord]:
         return await self.leases.list()
+
+    async def _event_best_effort(
+        self,
+        event_type: str,
+        **kwargs,
+    ) -> None:
+        try:
+            await self.events.append(event_type, **kwargs)
+        except Exception:
+            logger.exception(
+                "execution lease audit event failed event_type=%s job_id=%s",
+                event_type,
+                kwargs.get("job_id"),
+            )
 
 
 def _lease_key(host_id: str, working_directory: str) -> str:
