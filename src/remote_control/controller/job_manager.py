@@ -2031,6 +2031,33 @@ class JobManager:
             await self._assign_execution_lease(job.id, host_id)
         except ExecutionLeaseBusyError:
             return False
+
+        if mode != RecoveryMode.FINALIZE and self.project_sessions is not None:
+            try:
+                project_session = await self.project_sessions.acquire(
+                    project_id=job.project_id,
+                    owner_user_id=job.requested_by_user,
+                    job_id=job.id,
+                    seed_external_session_id=job.external_session_id,
+                    seed_host_id=host_id,
+                )
+            except ProjectSessionBusyError as exc:
+                if self.execution_leases is not None:
+                    await self.execution_leases.release_for_job(job.id)
+                await self._enter_lease_wait(
+                    job.id,
+                    mode=mode,
+                    error=str(exc),
+                    assigned_host=host_id,
+                    resume_instruction=record.resume_instruction,
+                )
+                return False
+            if project_session.external_session_id != job.external_session_id:
+                job = await self.jobs.update(
+                    job.id,
+                    external_session_id=project_session.external_session_id,
+                )
+
         if mode == RecoveryMode.START:
             await self.recovery.upsert(
                 job.id,
