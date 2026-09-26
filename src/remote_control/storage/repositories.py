@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from remote_control.storage.db import Database
@@ -141,20 +141,28 @@ class JobRepository:
         event_type: str,
         payload: dict[str, Any] | None = None,
     ) -> JobRecord:
+        values = dict(changes or {})
+        values["state"] = target_state
+
         async with self.db.sessions() as session:
-            job = await session.get(JobRecord, job_id)
-            if job is None:
-                raise KeyError(f"unknown job: {job_id}")
-            if job.state != expected_state:
+            result = await session.execute(
+                update(JobRecord)
+                .where(JobRecord.id == job_id)
+                .where(JobRecord.state == expected_state)
+                .values(**values)
+            )
+            if result.rowcount != 1:
+                current = await session.get(JobRecord, job_id)
+                if current is None:
+                    raise KeyError(f"unknown job: {job_id}")
                 raise RuntimeError(
                     "job state changed during lifecycle transition: "
-                    f"job={job.id} expected={expected_state} actual={job.state}"
+                    f"job={current.id} expected={expected_state} actual={current.state}"
                 )
 
-            job.state = target_state
-            for key, value in (changes or {}).items():
-                setattr(job, key, value)
-
+            job = await session.get(JobRecord, job_id)
+            if job is None:
+                raise KeyError(f"unknown job after lifecycle transition: {job_id}")
             session.add(
                 EventRecord(
                     event_type=event_type,
