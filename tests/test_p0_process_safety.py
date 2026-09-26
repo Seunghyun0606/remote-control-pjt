@@ -109,6 +109,8 @@ async def test_local_process_safety_error_holds_lease_until_pid_is_reconciled(
         raise ProcessSafetyError(
             "spawned Codex could not be terminated",
             pid=7777,
+            process_executable="/test/codex",
+            process_start_token="test:7777",
         )
 
     runner.start = unsafe_start
@@ -138,8 +140,15 @@ async def test_local_process_safety_error_holds_lease_until_pid_is_reconciled(
     with pytest.raises(ValueError, match="process safety hold"):
         await manager.resume(job.id)
 
-    async def cannot_terminate(pid, *, working_directory, timeout_seconds):
-        del pid, working_directory, timeout_seconds
+    async def cannot_terminate(
+        pid,
+        *,
+        working_directory,
+        expected_executable,
+        expected_start_token,
+        timeout_seconds,
+    ):
+        del pid, working_directory, expected_executable, expected_start_token, timeout_seconds
         return False
 
     monkeypatch.setattr(
@@ -154,8 +163,15 @@ async def test_local_process_safety_error_holds_lease_until_pid_is_reconciled(
     assert still_held.pid == 7777
     assert await leases.get_for_job(job.id) is not None
 
-    async def terminate(pid, *, working_directory, timeout_seconds):
-        del pid, working_directory, timeout_seconds
+    async def terminate(
+        pid,
+        *,
+        working_directory,
+        expected_executable,
+        expected_start_token,
+        timeout_seconds,
+    ):
+        del pid, working_directory, expected_executable, expected_start_token, timeout_seconds
         return True
 
     monkeypatch.setattr(
@@ -248,7 +264,14 @@ async def test_startup_terminates_persisted_local_process_before_recovery(
 ):
     calls = []
 
-    async def terminate(pid, *, working_directory, timeout_seconds):
+    async def terminate(
+        pid,
+        *,
+        working_directory,
+        expected_executable,
+        expected_start_token,
+        timeout_seconds,
+    ):
         calls.append((pid, str(working_directory), timeout_seconds))
         return True
 
@@ -270,6 +293,8 @@ async def test_startup_terminates_persisted_local_process_before_recovery(
             state="RUNNING",
             external_session_id="thread-local",
             pid=98765,
+            process_executable="/test/codex",
+            process_start_token="test:98765",
         )
     )
     manager = JobManager(
@@ -299,7 +324,14 @@ async def test_runner_restart_terminates_journaled_execution_and_keeps_result_un
 ):
     stopped = []
 
-    async def terminate(pid, *, working_directory, timeout_seconds):
+    async def terminate(
+        pid,
+        *,
+        working_directory,
+        expected_executable,
+        expected_start_token,
+        timeout_seconds,
+    ):
         stopped.append((pid, working_directory, timeout_seconds))
         return True
 
@@ -316,7 +348,12 @@ async def test_runner_restart_terminates_journaled_execution_and_keeps_result_un
         boot_id="old-boot",
         session_id="thread-1",
     )
-    journal.attach_pid("exec-1", 4242)
+    journal.attach_pid(
+        "exec-1",
+        4242,
+        process_executable="C:/test/codex.exe",
+        process_start_token="windows:4242",
+    )
     settings = RunnerSettings(
         _env_file=None,
         REMOTE_RUNNER_HOST_ID="desktop-main",
@@ -343,8 +380,15 @@ async def test_runner_refuses_startup_when_orphan_identity_cannot_be_proven(
     monkeypatch,
     tmp_path,
 ):
-    async def terminate(pid, *, working_directory, timeout_seconds):
-        del pid, working_directory, timeout_seconds
+    async def terminate(
+        pid,
+        *,
+        working_directory,
+        expected_executable,
+        expected_start_token,
+        timeout_seconds,
+    ):
+        del pid, working_directory, expected_executable, expected_start_token, timeout_seconds
         return False
 
     monkeypatch.setattr(
