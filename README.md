@@ -56,7 +56,7 @@ Remote Agent Control과 Project OS의 역할도 분리됩니다.
 
 0.14.0에서는 `/redirect`로 현재 Codex turn을 안전하게 종료하고 같은 session에서 즉시 새 지시로 전환할 수 있습니다. 같은 working tree가 사용 중인 새 Job은 실패하지 않고 `WAITING_LEASE` 대기열에 들어가며, 앞선 Job 종료 후 FIFO 순서로 자동 실행됩니다. 상세 내용은 [Redirect & Job Queue](docs/REDIRECT_AND_JOB_QUEUE_014.md)을 참고하세요.
 
-0.14.0에서는 pip/Hatchling build toolchain을 wheel hash까지 고정하고 PEP 517/660 build isolation을 제거했습니다. Windows CI도 선택된 smoke module이 아니라 **전체 pytest suite**를 실행합니다. 상세 내용은 [P3 Reproducible Build & Windows Full CI](docs/P3_REPRODUCIBLE_BUILD_WINDOWS_CI_0131.md)을 참고하세요.
+0.13.1에서는 pip/Hatchling build toolchain을 wheel hash까지 고정하고 PEP 517/660 build isolation을 제거했습니다. Windows CI도 선택된 smoke module이 아니라 **전체 pytest suite**를 실행합니다. 상세 내용은 [P3 Reproducible Build & Windows Full CI](docs/P3_REPRODUCIBLE_BUILD_WINDOWS_CI_0131.md)을 참고하세요.
 
 지원 기능:
 
