@@ -7,13 +7,20 @@ from remote_control.runners.base import AgentRunResult, AgentRunner, RunEventCal
 
 
 class FakeRunHandle(RunHandle):
-    def __init__(self, *, result: AgentRunResult, delay: float = 0) -> None:
+    def __init__(
+        self,
+        *,
+        result: AgentRunResult,
+        delay: float = 0,
+        execution_id: str | None = None,
+    ) -> None:
         self._result = result
         self._delay = delay
         self._cancelled = False
         self._cancel_event = asyncio.Event()
         self.pid = 4242
         self.session_id = result.session_id
+        self.execution_id = execution_id
 
     async def wait(self) -> AgentRunResult:
         if self._delay:
@@ -60,6 +67,7 @@ class FakeAgentRunner(AgentRunner):
         working_directory: Path,
         host_id: str | None = None,
         on_event: RunEventCallback | None = None,
+        execution_id: str | None = None,
     ) -> RunHandle:
         self.started.append(
             {
@@ -79,6 +87,7 @@ class FakeAgentRunner(AgentRunner):
                 final_message="fake completed" if self.returncode == 0 else "fake failed",
             ),
             delay=self.delay,
+            execution_id=execution_id,
         )
 
     async def resume(
@@ -89,6 +98,7 @@ class FakeAgentRunner(AgentRunner):
         working_directory: Path,
         host_id: str | None = None,
         on_event: RunEventCallback | None = None,
+        execution_id: str | None = None,
     ) -> RunHandle:
         self.resumed.append(
             {
@@ -121,4 +131,5 @@ class FakeAgentRunner(AgentRunner):
                 ),
             ),
             delay=self.delay,
+            execution_id=execution_id,
         )
