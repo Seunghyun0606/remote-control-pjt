@@ -341,6 +341,7 @@ def create_app(
                             running_jobs=_dict_list(envelope.payload.get("running_jobs")),
                             completed_jobs=[],
                             gateway=runner_gateway,
+                            runner_instance_id=runner_instance_id,
                             snapshot_complete=False,
                         )
                     elif envelope.type == "RUNNING_JOBS":
@@ -350,6 +351,7 @@ def create_app(
                             running_jobs=_dict_list(envelope.payload.get("running_jobs")),
                             completed_jobs=_dict_list(envelope.payload.get("completed_jobs")),
                             gateway=runner_gateway,
+                            runner_instance_id=runner_instance_id,
                             snapshot_complete=True,
                         )
                     else:
