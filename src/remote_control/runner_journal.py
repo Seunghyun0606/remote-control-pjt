@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from remote_control.runners.base import AgentRunResult
 
@@ -41,7 +42,11 @@ class RunnerExecutionEntry:
 class RunnerExecutionJournal:
     def __init__(self, path: Path) -> None:
         self.path = path
-        self._entries = self._load()
+        instance_id, entries = self._load()
+        self.instance_id = instance_id or uuid4().hex
+        self._entries = entries
+        if instance_id is None:
+            self._persist()
 
     def list(self) -> list[RunnerExecutionEntry]:
         return list(self._entries.values())
@@ -115,16 +120,24 @@ class RunnerExecutionJournal:
         if self._entries.pop(execution_id, None) is not None:
             self._persist()
 
-    def _load(self) -> dict[str, RunnerExecutionEntry]:
+    def _load(self) -> tuple[str | None, dict[str, RunnerExecutionEntry]]:
         if not self.path.exists():
-            return {}
+            return None, {}
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeError(
                 f"runner execution journal is unreadable: {self.path}: {exc}"
             ) from exc
-        items = payload.get("executions") if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"runner execution journal is invalid: {self.path}")
+        raw_instance_id = payload.get("runner_instance_id")
+        instance_id = (
+            raw_instance_id
+            if isinstance(raw_instance_id, str) and raw_instance_id.strip()
+            else None
+        )
+        items = payload.get("executions")
         if not isinstance(items, list):
             raise RuntimeError(f"runner execution journal is invalid: {self.path}")
         entries: dict[str, RunnerExecutionEntry] = {}
@@ -133,11 +146,12 @@ class RunnerExecutionJournal:
                 raise RuntimeError(f"runner execution journal is invalid: {self.path}")
             entry = _entry_from_dict(raw)
             entries[entry.execution_id] = entry
-        return entries
+        return instance_id, entries
 
     def _persist(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload: dict[str, Any] = {
+            "runner_instance_id": self.instance_id,
             "executions": [
                 asdict(entry)
                 for entry in sorted(
