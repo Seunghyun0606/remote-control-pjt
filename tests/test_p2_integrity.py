@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from types import SimpleNamespace
@@ -10,10 +11,15 @@ from sqlalchemy import text
 from remote_control.controller.job_manager import JobManager
 from remote_control.event_payloads import sanitize_agent_event
 from remote_control.messaging.telegram import TelegramProvider, _PendingSteer
+from remote_control.process_control import (
+    ProcessIdentity,
+    process_identity,
+    terminate_persisted_codex_process,
+)
 from remote_control.runners.fake import FakeAgentRunner
 from remote_control.sessions.project_sessions import ProjectSessionRegistry
 from remote_control.storage.db import Database
-from remote_control.storage.migrations import CURRENT_SCHEMA_VERSION
+from remote_control.storage.migrations import CURRENT_SCHEMA_VERSION, _baseline_schema
 from remote_control.storage.models import JobRecord
 from remote_control.storage.repositories import (
     EventRepository,
@@ -70,7 +76,7 @@ async def test_migration_baseline_rejects_incomplete_existing_schema(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_database_migrates_v2_runtime_to_v4(database):
+async def test_database_migrates_v2_runtime_to_current(database):
     async with database.engine.begin() as connection:
         await connection.execute(text("DROP TABLE remote_executions"))
         await connection.execute(
@@ -109,9 +115,188 @@ async def test_database_migrates_v2_runtime_to_v4(database):
             ).all()
         }
 
-    assert version == 4
+    assert version == CURRENT_SCHEMA_VERSION
     assert {"runner_instance_id", "runner_boot_id"} <= host_columns
     assert "remote_executions" in tables
+
+    async with database.engine.connect() as connection:
+        job_columns = {
+            row[1]
+            for row in (
+                await connection.execute(text("PRAGMA table_info(jobs)"))
+            ).all()
+        }
+    assert {"process_executable", "process_start_token"} <= job_columns
+
+
+@pytest.mark.asyncio
+async def test_v1_baseline_is_an_immutable_schema_snapshot(tmp_path):
+    path = tmp_path / "baseline-v1.db"
+    database = Database(f"sqlite+aiosqlite:///{path}")
+    try:
+        async with database.engine.begin() as connection:
+            await _baseline_schema(connection)
+            tables = {
+                row[0]
+                for row in (
+                    await connection.execute(
+                        text("SELECT name FROM sqlite_master WHERE type='table'")
+                    )
+                ).all()
+            }
+            job_columns = {
+                row[1]
+                for row in (
+                    await connection.execute(text("PRAGMA table_info(jobs)"))
+                ).all()
+            }
+            host_columns = {
+                row[1]
+                for row in (
+                    await connection.execute(text("PRAGMA table_info(hosts)"))
+                ).all()
+            }
+
+        assert "execution_leases" not in tables
+        assert "remote_executions" not in tables
+        assert "process_executable" not in job_columns
+        assert "process_start_token" not in job_columns
+        assert "runner_instance_id" not in host_columns
+        assert "runner_boot_id" not in host_columns
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_fresh_and_upgrade_databases_reach_identical_schema(tmp_path):
+    fresh = Database(f"sqlite+aiosqlite:///{tmp_path / 'fresh.db'}")
+    upgrade = Database(f"sqlite+aiosqlite:///{tmp_path / 'upgrade.db'}")
+    try:
+        await fresh.init()
+
+        async with upgrade.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "CREATE TABLE schema_migrations ("
+                    "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+                )
+            )
+            await _baseline_schema(connection)
+            await connection.execute(
+                text(
+                    "INSERT INTO schema_migrations(version, applied_at) "
+                    "VALUES (1, 'frozen-v1')"
+                )
+            )
+        await upgrade.init()
+
+        async def schema_snapshot(database):
+            async with database.engine.connect() as connection:
+                result = await connection.execute(
+                    text(
+                        "SELECT type, name, tbl_name, sql FROM sqlite_master "
+                        "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+                    )
+                )
+                return [tuple(row) for row in result.all()]
+
+        assert await schema_snapshot(fresh) == await schema_snapshot(upgrade)
+    finally:
+        await fresh.close()
+        await upgrade.close()
+
+
+@pytest.mark.asyncio
+async def test_process_identity_is_available_for_current_process():
+    identity = await process_identity(os.getpid())
+
+    assert identity is not None
+    assert identity.executable
+    assert identity.start_token
+
+
+@pytest.mark.asyncio
+async def test_persisted_process_kill_rejects_pid_reuse(monkeypatch):
+    terminated = []
+
+    monkeypatch.setattr(
+        "remote_control.process_control.process_exists",
+        lambda _pid: True,
+    )
+
+    async def identity(_pid):
+        return ProcessIdentity(
+            executable="/test/codex",
+            start_token="linux:new-process",
+        )
+
+    async def command_line(_pid):
+        raise AssertionError("command line must not be inspected after identity mismatch")
+
+    async def terminate_tree(pid, *, timeout_seconds, process=None):
+        terminated.append((pid, timeout_seconds, process))
+        return True
+
+    monkeypatch.setattr("remote_control.process_control.process_identity", identity)
+    monkeypatch.setattr(
+        "remote_control.process_control.process_command_line",
+        command_line,
+    )
+    monkeypatch.setattr(
+        "remote_control.process_control.terminate_process_tree",
+        terminate_tree,
+    )
+
+    stopped = await terminate_persisted_codex_process(
+        4242,
+        working_directory="/srv/demo",
+        expected_executable="/test/codex",
+        expected_start_token="linux:old-process",
+    )
+
+    assert stopped is False
+    assert terminated == []
+
+
+@pytest.mark.asyncio
+async def test_persisted_process_kill_requires_full_identity_and_workdir(monkeypatch):
+    terminated = []
+
+    monkeypatch.setattr(
+        "remote_control.process_control.process_exists",
+        lambda _pid: True,
+    )
+
+    async def identity(_pid):
+        return ProcessIdentity(
+            executable="/test/codex",
+            start_token="test:4242",
+        )
+
+    async def command_line(_pid):
+        return "codex exec --json --cd /srv/demo --sandbox workspace-write"
+
+    async def terminate_tree(pid, *, timeout_seconds, process=None):
+        terminated.append((pid, timeout_seconds, process))
+        return True
+
+    monkeypatch.setattr("remote_control.process_control.process_identity", identity)
+    monkeypatch.setattr(
+        "remote_control.process_control.process_command_line",
+        command_line,
+    )
+    monkeypatch.setattr(
+        "remote_control.process_control.terminate_process_tree",
+        terminate_tree,
+    )
+
+    assert await terminate_persisted_codex_process(
+        4242,
+        working_directory="/srv/demo",
+        expected_executable="/test/codex",
+        expected_start_token="test:4242",
+    )
+    assert terminated == [(4242, 10.0, None)]
 
 
 @pytest.mark.asyncio
