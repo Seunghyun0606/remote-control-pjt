@@ -242,10 +242,10 @@ class ExecutionLeaseRepository:
                 session.add(record)
                 lease = record
             elif lease.lease_key != record.lease_key:
-                raise IntegrityError(
-                    "job already owns a different execution lease",
-                    params=None,
-                    orig=None,
+                raise ValueError(
+                    "job already owns a different execution lease: "
+                    f"job={record.job_id} current={lease.lease_key} "
+                    f"requested={record.lease_key}"
                 )
 
             job.assigned_host = assigned_host
