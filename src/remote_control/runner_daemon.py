@@ -218,8 +218,14 @@ class RunnerDaemon:
                 )
         elif envelope.type == "JOB_RESULT_ACK":
             execution_id = str(envelope.payload.get("execution_id") or "")
+            try:
+                self.journal.remove(execution_id)
+            except Exception as exc:
+                raise RunnerSafetyError(
+                    "runner could not durably remove acknowledged execution "
+                    f"{execution_id!r}"
+                ) from exc
             self.completed.pop(execution_id, None)
-            self.journal.remove(execution_id)
         elif envelope.type == "PROJECT_OPERATION_REQUEST":
             await self._project_operation(websocket, envelope)
 
@@ -513,11 +519,18 @@ class RunnerDaemon:
 
         if result.session_id is None:
             result.session_id = self.running_sessions.get(execution_id)
+        try:
+            self.journal.complete(execution_id, result)
+        except Exception as exc:
+            raise RunnerSafetyError(
+                "runner could not durably persist terminal execution result; "
+                f"refusing further work: execution={execution_id}"
+            ) from exc
+
+        self.completed[execution_id] = result
         self.running.pop(execution_id, None)
         self.running_sessions.pop(execution_id, None)
         self.running_working_directories.pop(execution_id, None)
-        self.journal.complete(execution_id, result)
-        self.completed[execution_id] = result
         await self._flush_completed()
 
     async def _flush_completed(self) -> None:
