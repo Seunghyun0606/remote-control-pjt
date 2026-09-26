@@ -2044,12 +2044,17 @@ class JobManager:
             )
             try:
                 operation = self.runner.steer if steering else self.runner.resume
+                execution_id = await self._reserve_remote_execution(
+                    job,
+                    session_id=requested_session_id,
+                )
                 handle = await operation(
                     session_id=requested_session_id,
                     instruction=_with_control_protocol(instruction),
                     working_directory=working_directory,
                     host_id=job.assigned_host,
                     on_event=self._event_callback(job_id),
+                    execution_id=execution_id,
                 )
                 self._handles[job_id] = handle
                 await self._set_handle(job_id, handle)
@@ -2186,16 +2191,121 @@ class JobManager:
             return None
         return await self._await_handle(job_id, handle)
 
+    async def _reserve_remote_execution(
+        self,
+        job: JobRecord,
+        *,
+        session_id: str | None = None,
+    ) -> str | None:
+        if (
+            self.remote_executions is None
+            or not job.assigned_host
+            or job.assigned_host == self.local_host_id
+        ):
+            return None
+        if self.hosts is None:
+            raise ConnectionError("remote runner identity registry is unavailable")
+        host = await self.hosts.get(job.assigned_host)
+        if host is None or not host.runner_instance_id:
+            raise ConnectionError(
+                f"runner identity is unavailable for host {job.assigned_host!r}"
+            )
+        project = self.projects.get(job.project_id)
+        execution_id = uuid4().hex
+        await self.remote_executions.upsert(
+            execution_id,
+            job_id=job.id,
+            host_id=job.assigned_host,
+            runner_instance_id=host.runner_instance_id,
+            working_directory=canonical_working_directory(
+                project.path_for(job.assigned_host)
+            ),
+            session_id=session_id,
+            state="ACTIVE",
+            started_at=datetime.now(timezone.utc),
+        )
+        return execution_id
+
+    async def _ensure_remote_execution(
+        self,
+        job: JobRecord,
+        handle: RunHandle,
+    ) -> None:
+        execution_id = getattr(handle, "execution_id", None)
+        if (
+            self.remote_executions is None
+            or not execution_id
+            or not job.assigned_host
+            or job.assigned_host == self.local_host_id
+        ):
+            return
+        existing = await self.remote_executions.get(execution_id)
+        if existing is not None:
+            if existing.job_id != job.id or existing.host_id != job.assigned_host:
+                raise RuntimeError(
+                    "remote execution ownership conflict: "
+                    f"execution={execution_id} owner={existing.job_id}@{existing.host_id} "
+                    f"requested={job.id}@{job.assigned_host}"
+                )
+            if handle.session_id and existing.session_id != handle.session_id:
+                await self.remote_executions.upsert(
+                    execution_id,
+                    session_id=handle.session_id,
+                )
+            return
+
+        if self.hosts is None:
+            raise ConnectionError("remote runner identity registry is unavailable")
+        host = await self.hosts.get(job.assigned_host)
+        if host is None or not host.runner_instance_id:
+            raise ConnectionError(
+                f"runner identity is unavailable for host {job.assigned_host!r}"
+            )
+        project = self.projects.get(job.project_id)
+        await self.remote_executions.upsert(
+            execution_id,
+            job_id=job.id,
+            host_id=job.assigned_host,
+            runner_instance_id=host.runner_instance_id,
+            working_directory=canonical_working_directory(
+                project.path_for(job.assigned_host)
+            ),
+            session_id=handle.session_id,
+            state="ACTIVE",
+            started_at=datetime.now(timezone.utc),
+        )
+
+    async def _mark_remote_result_received(
+        self,
+        handle: RunHandle,
+        result: AgentRunResult,
+    ) -> None:
+        execution_id = getattr(handle, "execution_id", None)
+        if self.remote_executions is None or not execution_id:
+            return
+        try:
+            await self.remote_executions.mark_result_received(
+                execution_id,
+                session_id=result.session_id,
+            )
+        except Exception:
+            logger.exception(
+                "failed to mark remote result received execution_id=%s",
+                execution_id,
+            )
+
     async def _start_new_turn(self, job: JobRecord, instruction: str) -> RunHandle:
         project = self.projects.get(job.project_id)
         assert job.assigned_host is not None
         working_directory = Path(project.path_for(job.assigned_host)).expanduser()
+        execution_id = await self._reserve_remote_execution(job)
         return await self.runner.start(
             project_id=job.project_id,
             instruction=_with_control_protocol(instruction),
             working_directory=working_directory,
             host_id=job.assigned_host,
             on_event=self._event_callback(job.id),
+            execution_id=execution_id,
         )
 
     async def _set_handle(self, job_id: str, handle: RunHandle) -> None:
@@ -2204,6 +2314,8 @@ class JobManager:
         if handle.session_id:
             changes["external_session_id"] = handle.session_id
         await self.jobs.update(job_id, **changes)
+        current = await self.require(job_id)
+        await self._ensure_remote_execution(current, handle)
 
         if self.recovery is not None and handle.execution_id:
             existing = await self.recovery.get(job_id)
@@ -2253,6 +2365,8 @@ class JobManager:
                 resume_instruction=RESTART_RESUME_INSTRUCTION,
             )
             return None
+
+        await self._mark_remote_result_received(handle, result)
 
         current = await self.require(job_id)
         current_state = JobState(current.state)
@@ -2613,6 +2727,16 @@ class JobManager:
             return
         try:
             await handle.acknowledge_result()
+            execution_id = getattr(handle, "execution_id", None)
+            if self.remote_executions is not None and execution_id:
+                try:
+                    await self.remote_executions.mark_acknowledged(execution_id)
+                except Exception:
+                    logger.exception(
+                        "remote result ACK sent but ownership ledger update failed "
+                        "execution_id=%s",
+                        execution_id,
+                    )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
