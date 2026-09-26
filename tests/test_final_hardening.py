@@ -103,6 +103,27 @@ def test_runner_runtime_lock_rejects_second_process_owner(tmp_path: Path):
     second.release()
 
 
+def test_runner_daemon_locks_before_journal_initialization(tmp_path: Path):
+    state_path = tmp_path / "runner.json"
+    settings = RunnerSettings(
+        _env_file=None,
+        REMOTE_RUNNER_STATE_PATH=str(state_path),
+    )
+
+    first = RunnerDaemon(settings)
+    try:
+        first_instance_id = first.instance_id
+        persisted_before = state_path.read_text(encoding="utf-8")
+
+        with pytest.raises(RunnerAlreadyRunningError):
+            RunnerDaemon(settings)
+
+        assert state_path.read_text(encoding="utf-8") == persisted_before
+        assert RunnerExecutionJournal(state_path).instance_id == first_instance_id
+    finally:
+        first.runtime_lock.release()
+
+
 def test_runner_journal_instance_identity_survives_restart(tmp_path: Path):
     path = tmp_path / "runner.json"
 
