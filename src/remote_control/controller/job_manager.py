@@ -140,6 +140,55 @@ class JobManager:
         self._notifiers: dict[str, Notifier] = {}
         self._approval_notifiers: dict[str, ApprovalNotifier] = {}
 
+    async def validate_runner_registration(
+        self,
+        *,
+        host_id: str,
+        runner_instance_id: str,
+    ) -> None:
+        if host_id == self.local_host_id:
+            raise ValueError(
+                f"remote runner cannot reuse Controller local host id {host_id!r}"
+            )
+        if self.hosts is None:
+            return
+        existing = await self.hosts.get(host_id)
+        if (
+            existing is None
+            or existing.runner_instance_id is None
+            or existing.runner_instance_id == runner_instance_id
+        ):
+            return
+
+        active_states = {
+            state.value for state in JobState if state not in TERMINAL_STATES
+        }
+        active_jobs = [
+            job
+            for job in await self.jobs.list_states(active_states)
+            if job.assigned_host == host_id
+        ]
+        active_leases = (
+            [
+                lease
+                for lease in await self.execution_leases.list()
+                if lease.host_id == host_id
+            ]
+            if self.execution_leases is not None
+            else []
+        )
+        unacknowledged = (
+            await self.remote_executions.list_for_host(host_id)
+            if self.remote_executions is not None
+            else []
+        )
+        if active_jobs or active_leases or unacknowledged:
+            raise ValueError(
+                "runner instance takeover is unsafe while host-owned work exists: "
+                f"host={host_id} current={existing.runner_instance_id} "
+                f"requested={runner_instance_id}"
+            )
+
     def set_notifier(
         self,
         notifier: Notifier | None,
