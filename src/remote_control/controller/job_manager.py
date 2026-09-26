@@ -40,7 +40,10 @@ from remote_control.recovery.quota import (
 )
 from remote_control.runners.base import AgentRunResult, AgentRunner, RunHandle
 from remote_control.runners.codex import extract_session_id
-from remote_control.sessions.project_sessions import ProjectSessionRegistry
+from remote_control.sessions.project_sessions import (
+    ProjectSessionBusyError,
+    ProjectSessionRegistry,
+)
 from remote_control.sessions.registry import SessionRegistry, SessionStatus
 from remote_control.storage.models import ApprovalRecord, JobRecord, ProjectWorkRecord, RecoveryRecord
 from remote_control.storage.repositories import (
