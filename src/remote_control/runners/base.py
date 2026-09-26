@@ -46,6 +46,7 @@ class AgentRunner(ABC):
         working_directory: Path,
         host_id: str | None = None,
         on_event: RunEventCallback | None = None,
+        execution_id: str | None = None,
     ) -> RunHandle:
         raise NotImplementedError
 
@@ -57,6 +58,7 @@ class AgentRunner(ABC):
         working_directory: Path,
         host_id: str | None = None,
         on_event: RunEventCallback | None = None,
+        execution_id: str | None = None,
     ) -> RunHandle:
         raise NotImplementedError("session resume is not supported by this runner")
 
@@ -68,6 +70,7 @@ class AgentRunner(ABC):
         working_directory: Path,
         host_id: str | None = None,
         on_event: RunEventCallback | None = None,
+        execution_id: str | None = None,
     ) -> RunHandle:
         return await self.resume(
             session_id=session_id,
@@ -75,4 +78,5 @@ class AgentRunner(ABC):
             working_directory=working_directory,
             host_id=host_id,
             on_event=on_event,
+            execution_id=execution_id,
         )
