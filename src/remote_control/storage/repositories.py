@@ -317,6 +317,22 @@ class ExecutionLeaseRepository:
 
             job.assigned_host = assigned_host
             job.state = "ASSIGNED"
+            session.add(
+                EventRecord(
+                    event_type="JOB_ASSIGNED",
+                    job_id=job.id,
+                    project_id=job.project_id,
+                    host_id=assigned_host,
+                    payload_json=json.dumps(
+                        {
+                            "from": expected_state,
+                            "to": "ASSIGNED",
+                            "atomic_with_execution_lease": True,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            )
             try:
                 await session.commit()
             except IntegrityError:
