@@ -8,7 +8,7 @@ import pytest
 from remote_control.controller.job_manager import JobManager
 from remote_control.controller.states import JobState
 from remote_control.execution_leases import ExecutionLeaseRegistry
-from remote_control.recovery.models import RecoveryKind
+from remote_control.recovery.models import RecoveryKind, RecoveryMode
 from remote_control.runners.fake import FakeAgentRunner
 from remote_control.sessions.project_sessions import ProjectSessionRegistry
 from remote_control.storage.models import JobRecord
@@ -180,3 +180,47 @@ async def test_waiting_lease_is_rearmed_after_controller_restart(
     assert recovery is not None
     assert recovery.kind == RecoveryKind.LEASE.value
     assert recovery.next_retry_at is not None
+
+
+@pytest.mark.asyncio
+async def test_host_recovery_reacquires_project_session_before_execution(
+    project_registry,
+    database,
+):
+    runner = FakeAgentRunner(delay=0.15)
+    manager = _manager(project_registry, database, runner)
+    await manager.jobs.add(
+        JobRecord(
+            id="JOB-RECOVER-SESSION",
+            project_id="demo",
+            requested_by_channel="test",
+            requested_by_user="u1",
+            requested_host="lightsail-main",
+            assigned_host="lightsail-main",
+            instruction="recover safely",
+            state=JobState.WAITING_HOST.value,
+            external_session_id="fake-session",
+        )
+    )
+    await manager.recovery.upsert(
+        "JOB-RECOVER-SESSION",
+        kind=RecoveryKind.RESTART.value,
+        mode=RecoveryMode.START.value,
+        attempt_count=0,
+        next_retry_at=datetime.now(timezone.utc),
+        execution_id=None,
+        resume_instruction=None,
+        last_error="restart after lease assignment",
+    )
+
+    recovered = await manager.recover_due(
+        now=datetime.now(timezone.utc) + timedelta(seconds=1)
+    )
+    assert recovered == 1
+    await _wait_for_state(manager, "JOB-RECOVER-SESSION", "RUNNING")
+
+    project_session = await manager.project_sessions.active_for("demo", "u1")
+    assert project_session is not None
+    assert project_session.locked_by_job_id == "JOB-RECOVER-SESSION"
+
+    await _wait_for_state(manager, "JOB-RECOVER-SESSION", "COMPLETED")
