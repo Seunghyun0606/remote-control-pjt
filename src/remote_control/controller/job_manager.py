@@ -1569,27 +1569,7 @@ class JobManager:
             working_directory=working_directory,
             expected_state=job.state,
         )
-        updated = await self.require(job_id)
-        try:
-            await self.events.append(
-                "JOB_ASSIGNED",
-                job_id=job_id,
-                project_id=job.project_id,
-                host_id=host_id,
-                payload={
-                    "from": job.state,
-                    "to": JobState.ASSIGNED.value,
-                    "atomic_with_execution_lease": True,
-                },
-            )
-        except Exception:
-            logger.exception(
-                "JOB_ASSIGNED audit event failed after atomic assignment "
-                "job_id=%s host_id=%s",
-                job_id,
-                host_id,
-            )
-        return updated
+        return await self.require(job_id)
 
     async def _acquire_execution_lease(
         self,
