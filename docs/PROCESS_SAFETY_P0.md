@@ -1,6 +1,6 @@
 # Process Safety P0 Closure
 
-This document defines the process-lifecycle safety rules introduced in Remote Control 0.11.0 / Runner Protocol v2.
+This document defines the process-lifecycle safety rules introduced in Remote Control 0.11.0. Remote Control 0.12.0 extends them with generation/ownership rules in [Final Generation & Ownership Hardening](FINAL_HARDENING_012.md).
 
 ## Safety invariants
 
@@ -11,7 +11,7 @@ Remote Control now treats these as hard safety invariants:
 3. One physical working tree on one execution host may have only one non-terminal Job lease, regardless of Telegram, Slack, API, user id, or Project Session owner.
 4. A remote terminal result remains durable on the Runner until the Controller has durably processed the Job result and sends `JOB_RESULT_ACK`.
 5. If process identity or spawn state cannot be proven after a crash, startup fails closed rather than guessing that execution stopped.
-6. Controller and Runner must use Runner Protocol v2 together. Protocol v1 is rejected.
+6. Controller and Runner must use a compatible Runner Protocol together. Remote Control 0.12.0 requires Protocol v3; v1/v2 peers are rejected.
 
 ## Working-tree execution lease
 
@@ -44,7 +44,7 @@ It is released only when the Job reaches a terminal state.
 
 This prevents a Telegram user, Slack user, API caller, or another configured project from starting a second write-capable Codex execution against the same checkout.
 
-Database schema version 2 adds the `execution_leases` table.
+Database schema version 2 introduced the `execution_leases` table. Schema v4 adds stable Runner identity fields and the `remote_executions` ownership ledger.
 
 ## Local Controller process lifecycle
 
@@ -176,17 +176,15 @@ If the Controller dies before the ACK, the Runner keeps the result in its journa
 
 ## Protocol compatibility
 
-These semantics require Runner Protocol v2.
-
-A v1 Runner and v2 Controller, or a v2 Runner and v1 Controller, are intentionally incompatible. Upgrade the Controller and all Remote Runners together.
+These original semantics were introduced with Protocol v2. Remote Control 0.12.0 requires Protocol v3 for stable Runner instance identity and durable Controller-side execution ownership. v1/v2 peers are intentionally rejected. Upgrade the Controller and all Remote Runners together.
 
 ## Upgrade
 
-1. Pull the same 0.11.0 code on Controller and Runner hosts.
+1. Pull the same 0.12.0 code on Controller and Runner hosts.
 2. Install/update dependencies.
 3. Stop old Controller and Runner processes.
-4. Start the Controller; schema migration v2 is automatic.
-5. Start each Runner using the same v2 build.
+4. Start exactly one Controller; schema migration to v4 is automatic.
+5. Start each Runner using the same Protocol v3 build and its existing journal.
 6. Verify host status and perform a short remote Job.
 7. Verify the Runner state journal path is writable.
 
