@@ -48,6 +48,7 @@ from remote_control.storage.repositories import (
     JobRepository,
     ProjectWorkRepository,
     RecoveryRepository,
+    RemoteExecutionRepository,
 )
 from remote_control.transport.runner_ws import RunnerGateway
 
@@ -101,6 +102,7 @@ class JobManager:
         project_adapters: ProjectAdapterRegistry | None = None,
         project_work: ProjectWorkRepository | None = None,
         execution_leases: ExecutionLeaseRegistry | None = None,
+        remote_executions: RemoteExecutionRepository | None = None,
         progress_interval_seconds: int = 300,
         quota_retry_initial_seconds: int = 1800,
         quota_retry_max_seconds: int = 7200,
@@ -120,6 +122,7 @@ class JobManager:
         self.project_adapters = project_adapters
         self.project_work = project_work
         self.execution_leases = execution_leases
+        self.remote_executions = remote_executions
         self.host_router = HostRouter(hosts) if hosts is not None else None
         self.feedback_policy = FeedbackPolicy()
         self.feedback_throttler = FeedbackThrottler(progress_interval_seconds)
