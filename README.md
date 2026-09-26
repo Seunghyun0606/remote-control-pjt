@@ -1204,7 +1204,7 @@ REMOTE_RUNNER_STATE_PATH=
 
 을 설정하고:
 
-> Remote Control 0.12.0부터 Remote Runner는 **Protocol v3**를 사용합니다. Controller와 Runner를 반드시 같은 버전으로 함께 업데이트하세요. Runner journal에는 stable `runner_instance_id`가 저장되며, 같은 `host_id`의 다른 Runner instance는 기존 host-owned work가 남아 있는 동안 takeover할 수 없습니다. Remote execution ownership은 Controller DB에도 ACK까지 유지됩니다.
+> Remote Control 0.12.0부터 Remote Runner는 **Protocol v3**를 사용합니다. Controller와 Runner를 반드시 같은 버전으로 함께 업데이트하세요. Runner journal에는 stable `runner_instance_id`가 저장되고 journal별 OS singleton lock을 사용합니다. 같은 `host_id`의 다른 Runner instance 또는 아직 살아 있는 다른 boot generation은 takeover할 수 없습니다. Remote execution ownership은 Controller DB에도 ACK까지 유지됩니다.
 
 
 ```powershell
