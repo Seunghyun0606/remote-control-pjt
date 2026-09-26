@@ -39,6 +39,7 @@ class RunnerDaemon:
         self.settings = settings
         self.boot_id = uuid4().hex
         self.journal = journal or RunnerExecutionJournal(settings.resolved_state_path)
+        self.instance_id = self.journal.instance_id
         self._journal_recovered = False
         self.runner = CodexRunner(
             executable=settings.codex_executable,
@@ -98,6 +99,7 @@ class RunnerDaemon:
                     name=self.settings.name,
                     os=self.settings.os_name,
                     capabilities=sorted(self.settings.capabilities),
+                    runner_instance_id=self.instance_id,
                     runner_boot_id=self.boot_id,
                 ),
             )
@@ -106,6 +108,8 @@ class RunnerDaemon:
                 message(
                     "RUNNING_JOBS",
                     host_id=self.settings.host_id,
+                    runner_instance_id=self.instance_id,
+                    runner_boot_id=self.boot_id,
                     running_jobs=self._running_snapshot(),
                     completed_jobs=self._completed_snapshot(),
                 ),
@@ -151,6 +155,8 @@ class RunnerDaemon:
                 message(
                     "HEARTBEAT",
                     host_id=self.settings.host_id,
+                    runner_instance_id=self.instance_id,
+                    runner_boot_id=self.boot_id,
                     running_jobs=self._running_snapshot(),
                 ),
             )
