@@ -329,6 +329,10 @@ class JobManager:
                     owner_user_id=requested_by_user,
                     job_id=job.id,
                 )
+            if self.recovery is None:
+                await self.jobs.update(job.id, error=str(exc))
+                await self._transition(job.id, JobState.FAILED)
+                return await self.require(job.id)
             await self._enter_lease_wait(
                 job.id,
                 mode=RecoveryMode.START,
@@ -460,6 +464,10 @@ class JobManager:
                     owner_user_id=retry.requested_by_user,
                     job_id=retry.id,
                 )
+            if self.recovery is None:
+                await self.jobs.update(retry.id, error=str(exc))
+                await self._transition(retry.id, JobState.FAILED)
+                return await self.require(retry.id)
             await self._enter_lease_wait(
                 retry.id,
                 mode=mode,
