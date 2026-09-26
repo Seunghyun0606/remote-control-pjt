@@ -18,6 +18,8 @@ class RunnerExecutionEntry:
     working_directory: str
     state: str
     boot_id: str
+    process_executable: str | None = None
+    process_start_token: str | None = None
     session_id: str | None = None
     returncode: int | None = None
     final_message: str | None = None
@@ -80,6 +82,9 @@ class RunnerExecutionJournal:
         self,
         execution_id: str,
         pid: int,
+        *,
+        process_executable: str | None = None,
+        process_start_token: str | None = None,
     ) -> RunnerExecutionEntry:
         entry = self._entries.get(execution_id)
         if entry is None:
@@ -87,6 +92,8 @@ class RunnerExecutionJournal:
         if pid <= 0:
             raise ValueError("runner execution pid must be positive")
         entry.pid = pid
+        entry.process_executable = process_executable
+        entry.process_start_token = process_start_token
         entry.state = "RUNNING"
         self._persist()
         return entry
@@ -192,6 +199,8 @@ def _entry_from_dict(raw: dict[str, Any]) -> RunnerExecutionEntry:
         working_directory=working_directory,
         state=state,
         boot_id=boot_id,
+        process_executable=_optional_str(raw.get("process_executable")),
+        process_start_token=_optional_str(raw.get("process_start_token")),
         session_id=_optional_str(raw.get("session_id")),
         returncode=raw.get("returncode") if isinstance(raw.get("returncode"), int) else None,
         final_message=_optional_str(raw.get("final_message")),
