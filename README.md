@@ -2,7 +2,7 @@
 
 Telegram/Slack에서 **현재 머신의 Codex**를 실행하고, 진행 상태·추가 지시·Human Gate·사용량 제한 복구·Project OS 연동까지 관리하는 Runtime Control Plane입니다.
 
-현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.12.0**입니다.
+현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.12.1**입니다.
 
 ## 전체 개요
 
@@ -49,6 +49,8 @@ Remote Agent Control과 Project OS의 역할도 분리됩니다.
   - Recovery
   - ProjectWork binding
 - **Codex**: 실제 코드 수정과 구현 수행
+
+0.12.1에서는 `JOB_CREATED`/`JOB_RETRY_CREATED`와 모든 `JOB_<STATE>` lifecycle event를 해당 Job mutation과 같은 DB transaction에서 커밋합니다. 따라서 상태만 변경되고 lifecycle event가 누락되는 partial state를 만들지 않습니다. Lease/diagnostic audit event는 authoritative state와 분리된 best-effort telemetry입니다. 상세 내용은 [Lifecycle Atomicity P1](docs/LIFECYCLE_ATOMICITY_P1.md)을 참고하세요.
 
 지원 기능:
 

@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from remote_control.controller.job_manager import JobManager
 from remote_control.controller_lock import (
@@ -22,7 +24,7 @@ from remote_control.runner_journal import RunnerExecutionJournal
 from remote_control.runners.base import AgentRunResult
 from remote_control.runners.fake import FakeAgentRunner, FakeRunHandle
 from remote_control.settings import RunnerSettings
-from remote_control.storage.models import JobRecord
+from remote_control.storage.models import EventRecord, JobRecord
 from remote_control.storage.repositories import (
     EventRepository,
     ExecutionLeaseRepository,
@@ -551,6 +553,109 @@ async def test_atomic_assignment_survives_audit_event_failure(
     assert assigned.state == "ASSIGNED"
     assert assigned.assigned_host == "lightsail-main"
     assert await leases.get_for_job("JOB-ATOMIC") is not None
+    async with database.sessions() as session:
+        result = await session.execute(
+            select(EventRecord).where(
+                EventRecord.job_id == "JOB-ATOMIC",
+                EventRecord.event_type == "JOB_ASSIGNED",
+            )
+        )
+        events = list(result.scalars())
+    assert len(events) == 1
+
+
+@pytest.mark.asyncio
+async def test_job_lifecycle_transition_and_event_commit_atomically(database):
+    jobs = JobRepository(database)
+    await jobs.add(
+        JobRecord(
+            id="JOB-LIFECYCLE-ATOMIC",
+            project_id="demo",
+            requested_by_channel="test",
+            requested_by_user="100",
+            requested_host="auto",
+            assigned_host=None,
+            instruction="atomic",
+            state="QUEUED",
+        )
+    )
+
+    updated = await jobs.transition_with_event(
+        "JOB-LIFECYCLE-ATOMIC",
+        expected_state="QUEUED",
+        target_state="WAITING_HOST",
+        changes={"error": "host unavailable"},
+        event_type="JOB_WAITING_HOST",
+        payload={"from": "QUEUED", "to": "WAITING_HOST"},
+    )
+
+    assert updated.state == "WAITING_HOST"
+    assert updated.error == "host unavailable"
+    async with database.sessions() as session:
+        result = await session.execute(
+            select(EventRecord).where(
+                EventRecord.job_id == "JOB-LIFECYCLE-ATOMIC",
+                EventRecord.event_type == "JOB_WAITING_HOST",
+            )
+        )
+        events = list(result.scalars())
+    assert len(events) == 1
+
+
+@pytest.mark.asyncio
+async def test_job_lifecycle_transition_rolls_back_when_event_insert_fails(database):
+    jobs = JobRepository(database)
+    await jobs.add(
+        JobRecord(
+            id="JOB-LIFECYCLE-ROLLBACK",
+            project_id="demo",
+            requested_by_channel="test",
+            requested_by_user="100",
+            requested_host="auto",
+            assigned_host=None,
+            instruction="rollback",
+            state="QUEUED",
+        )
+    )
+
+    with pytest.raises(IntegrityError):
+        await jobs.transition_with_event(
+            "JOB-LIFECYCLE-ROLLBACK",
+            expected_state="QUEUED",
+            target_state="WAITING_HOST",
+            changes={"error": "must rollback"},
+            event_type=None,
+            payload={"from": "QUEUED", "to": "WAITING_HOST"},
+        )
+
+    persisted = await jobs.get("JOB-LIFECYCLE-ROLLBACK")
+    assert persisted is not None
+    assert persisted.state == "QUEUED"
+    assert persisted.error is None
+
+
+@pytest.mark.asyncio
+async def test_job_creation_rolls_back_when_lifecycle_event_insert_fails(database):
+    jobs = JobRepository(database)
+    job = JobRecord(
+        id="JOB-CREATE-ROLLBACK",
+        project_id="demo",
+        requested_by_channel="test",
+        requested_by_user="100",
+        requested_host="auto",
+        assigned_host=None,
+        instruction="rollback create",
+        state="QUEUED",
+    )
+
+    with pytest.raises(IntegrityError):
+        await jobs.add_with_event(
+            job,
+            event_type=None,
+            payload={"requested_host": "auto"},
+        )
+
+    assert await jobs.get("JOB-CREATE-ROLLBACK") is None
 
 
 @pytest.mark.asyncio

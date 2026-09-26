@@ -253,7 +253,17 @@ class JobManager:
             external_session_id=external_session_id,
         )
         try:
-            await self.jobs.add(job)
+            await self.jobs.add_with_event(
+                job,
+                event_type="JOB_CREATED",
+                payload={
+                    "requested_host": requested_host,
+                    "project_session_id": (
+                        project_session.id if project_session else None
+                    ),
+                    "external_session_id": external_session_id,
+                },
+            )
         except Exception:
             if self.project_sessions is not None and project_session is not None:
                 await self.project_sessions.release_for_job(
@@ -262,16 +272,6 @@ class JobManager:
                     job_id=job_id,
                 )
             raise
-        await self.events.append(
-            "JOB_CREATED",
-            job_id=job.id,
-            project_id=project.id,
-            payload={
-                "requested_host": requested_host,
-                "project_session_id": project_session.id if project_session else None,
-                "external_session_id": external_session_id,
-            },
-        )
 
         effective_host = requested_host
         if (
@@ -349,7 +349,14 @@ class JobManager:
             external_session_id=external_session_id,
         )
         try:
-            await self.jobs.add(retry)
+            await self.jobs.add_with_event(
+                retry,
+                event_type="JOB_RETRY_CREATED",
+                payload={
+                    "retry_of": original.id,
+                    "external_session_id": original.external_session_id,
+                },
+            )
         except Exception:
             if self.project_sessions is not None and project_session is not None:
                 await self.project_sessions.release_for_job(
@@ -358,15 +365,6 @@ class JobManager:
                     job_id=retry_id,
                 )
             raise
-        await self.events.append(
-            "JOB_RETRY_CREATED",
-            job_id=retry.id,
-            project_id=retry.project_id,
-            payload={
-                "retry_of": original.id,
-                "external_session_id": original.external_session_id,
-            },
-        )
 
         mode = (
             RecoveryMode.RESUME
@@ -1571,27 +1569,7 @@ class JobManager:
             working_directory=working_directory,
             expected_state=job.state,
         )
-        updated = await self.require(job_id)
-        try:
-            await self.events.append(
-                "JOB_ASSIGNED",
-                job_id=job_id,
-                project_id=job.project_id,
-                host_id=host_id,
-                payload={
-                    "from": job.state,
-                    "to": JobState.ASSIGNED.value,
-                    "atomic_with_execution_lease": True,
-                },
-            )
-        except Exception:
-            logger.exception(
-                "JOB_ASSIGNED audit event failed after atomic assignment "
-                "job_id=%s host_id=%s",
-                job_id,
-                host_id,
-            )
-        return updated
+        return await self.require(job_id)
 
     async def _acquire_execution_lease(
         self,
@@ -3194,22 +3172,14 @@ class JobManager:
         job = await self.require(job_id)
         current = JobState(job.state)
         validate_transition(current, target)
-        updated = await self.jobs.update(job_id, state=target.value, **changes)
-        try:
-            await self.events.append(
-                f"JOB_{target.value}",
-                job_id=job_id,
-                project_id=job.project_id,
-                host_id=updated.assigned_host,
-                payload={"from": current.value, "to": target.value},
-            )
-        except Exception:
-            logger.exception(
-                "Job transition audit event failed job_id=%s from=%s to=%s",
-                job_id,
-                current.value,
-                target.value,
-            )
+        updated = await self.jobs.transition_with_event(
+            job_id,
+            expected_state=current.value,
+            target_state=target.value,
+            changes=dict(changes),
+            event_type=f"JOB_{target.value}",
+            payload={"from": current.value, "to": target.value},
+        )
 
         if target in TERMINAL_STATES:
             release_error: Exception | None = None

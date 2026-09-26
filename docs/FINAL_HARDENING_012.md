@@ -10,7 +10,7 @@ Remote Control 0.12.0 closes the remaining controller/runner generation and cras
 4. Every new remote execution is assigned an `execution_id` and persisted to the Controller ownership ledger before it is sent to the Runner.
 5. A remote result is ACKed only after the Controller has durably associated it with its owning Job.
 6. Job assignment and working-tree lease acquisition commit in one database transaction.
-7. Audit-event failure must not turn a committed lifecycle mutation into an apparent failure.
+7. Authoritative Job lifecycle mutations and `JOB_*` lifecycle events are atomic as of 0.12.1; supplemental audit telemetry remains best-effort.
 8. Runner terminal-result journal failures are safety-fatal and stop automatic reconnect/new work.
 
 ## 1. Controller singleton
@@ -128,7 +128,7 @@ Startup also repairs legacy states:
 - active Job/lease host or working-directory mismatch → fail closed;
 - persisted `QUEUED` Job → `WAITING_HOST` with recovery metadata.
 
-Lease and Job lifecycle audit events are best-effort telemetry after the authoritative state mutation. Their failure is logged but does not strand a successfully committed lease or prevent terminal resource cleanup.
+`JOB_ASSIGNED` is committed in the same transaction as the Job assignment and execution lease as of 0.12.1. Other authoritative `JOB_*` lifecycle events are likewise committed atomically with their Job mutation. Supplemental execution-lease/diagnostic audit events remain best-effort telemetry, so their failure cannot strand a successfully committed lease or prevent terminal resource cleanup. See [Lifecycle Atomicity P1](LIFECYCLE_ATOMICITY_P1.md).
 
 ## Runner terminal journal failure
 

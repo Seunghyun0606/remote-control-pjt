@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from remote_control.storage.db import Database
@@ -36,6 +36,32 @@ class JobRepository:
         async with self.db.sessions() as session:
             session.add(job)
             await session.commit()
+            await session.refresh(job)
+            return job
+
+    async def add_with_event(
+        self,
+        job: JobRecord,
+        *,
+        event_type: str,
+        host_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> JobRecord:
+        record = EventRecord(
+            event_type=event_type,
+            job_id=job.id,
+            project_id=job.project_id,
+            host_id=host_id,
+            payload_json=json.dumps(payload or {}, ensure_ascii=False),
+        )
+        async with self.db.sessions() as session:
+            session.add(job)
+            session.add(record)
+            try:
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
             await session.refresh(job)
             return job
 
@@ -102,6 +128,55 @@ class JobRepository:
             for key, value in changes.items():
                 setattr(job, key, value)
             await session.commit()
+            await session.refresh(job)
+            return job
+
+    async def transition_with_event(
+        self,
+        job_id: str,
+        *,
+        expected_state: str,
+        target_state: str,
+        changes: dict[str, Any] | None = None,
+        event_type: str,
+        payload: dict[str, Any] | None = None,
+    ) -> JobRecord:
+        values = dict(changes or {})
+        values["state"] = target_state
+
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                update(JobRecord)
+                .where(JobRecord.id == job_id)
+                .where(JobRecord.state == expected_state)
+                .values(**values)
+            )
+            if result.rowcount != 1:
+                current = await session.get(JobRecord, job_id)
+                if current is None:
+                    raise KeyError(f"unknown job: {job_id}")
+                raise RuntimeError(
+                    "job state changed during lifecycle transition: "
+                    f"job={current.id} expected={expected_state} actual={current.state}"
+                )
+
+            job = await session.get(JobRecord, job_id)
+            if job is None:
+                raise KeyError(f"unknown job after lifecycle transition: {job_id}")
+            session.add(
+                EventRecord(
+                    event_type=event_type,
+                    job_id=job.id,
+                    project_id=job.project_id,
+                    host_id=job.assigned_host,
+                    payload_json=json.dumps(payload or {}, ensure_ascii=False),
+                )
+            )
+            try:
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
             await session.refresh(job)
             return job
 
@@ -250,9 +325,25 @@ class ExecutionLeaseRepository:
 
             job.assigned_host = assigned_host
             job.state = "ASSIGNED"
+            session.add(
+                EventRecord(
+                    event_type="JOB_ASSIGNED",
+                    job_id=job.id,
+                    project_id=job.project_id,
+                    host_id=assigned_host,
+                    payload_json=json.dumps(
+                        {
+                            "from": expected_state,
+                            "to": "ASSIGNED",
+                            "atomic_with_execution_lease": True,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            )
             try:
                 await session.commit()
-            except IntegrityError:
+            except Exception:
                 await session.rollback()
                 raise
             await session.refresh(job)
