@@ -227,22 +227,33 @@ class JobManager:
         self._validate_requested_host(project_id, requested_host)
         job_id = _job_id()
         project_session = None
+        session_hint = None
+        session_busy_error: ProjectSessionBusyError | None = None
         external_session_id = None
         if self.project_sessions is not None:
             legacy = await self.jobs.latest_for_user_project(
                 requested_by_user,
                 project.id,
             )
-            project_session = await self.project_sessions.acquire(
-                project_id=project.id,
-                owner_user_id=requested_by_user,
-                job_id=job_id,
-                seed_external_session_id=(
-                    legacy.external_session_id if legacy is not None else None
-                ),
-                seed_host_id=legacy.assigned_host if legacy is not None else None,
-            )
-            external_session_id = project_session.external_session_id
+            try:
+                project_session = await self.project_sessions.acquire(
+                    project_id=project.id,
+                    owner_user_id=requested_by_user,
+                    job_id=job_id,
+                    seed_external_session_id=(
+                        legacy.external_session_id if legacy is not None else None
+                    ),
+                    seed_host_id=legacy.assigned_host if legacy is not None else None,
+                )
+                external_session_id = project_session.external_session_id
+            except ProjectSessionBusyError as exc:
+                session_busy_error = exc
+                session_hint = await self.project_sessions.active_for(
+                    project.id,
+                    requested_by_user,
+                )
+                if session_hint is not None:
+                    external_session_id = session_hint.external_session_id
 
         job = JobRecord(
             id=job_id,
@@ -277,13 +288,14 @@ class JobManager:
             raise
 
         effective_host = requested_host
+        session_for_host = project_session or session_hint
         if (
             requested_host == "auto"
-            and project_session is not None
-            and project_session.external_session_id
-            and project_session.host_id
+            and session_for_host is not None
+            and session_for_host.external_session_id
+            and session_for_host.host_id
         ):
-            effective_host = project_session.host_id
+            effective_host = session_for_host.host_id
 
         try:
             assigned_host = await self._resolve_host(project_id, effective_host)
@@ -296,17 +308,31 @@ class JobManager:
             )
             return await self.require(job.id)
 
+        if session_busy_error is not None:
+            await self._enter_lease_wait(
+                job.id,
+                mode=RecoveryMode.START,
+                error=str(session_busy_error),
+                assigned_host=assigned_host,
+                resume_instruction=instruction,
+            )
+            return await self.require(job.id)
+
         try:
             await self._assign_execution_lease(job.id, assigned_host)
         except ExecutionLeaseBusyError as exc:
-            await self.jobs.update(job.id, error=str(exc))
-            await self._transition(job.id, JobState.FAILED)
-            await self.events.append(
-                "EXECUTION_LEASE_BLOCKED",
-                job_id=job.id,
-                project_id=job.project_id,
-                host_id=assigned_host,
-                payload={"error": str(exc)},
+            if self.project_sessions is not None and project_session is not None:
+                await self.project_sessions.release_for_job(
+                    project_id=project.id,
+                    owner_user_id=requested_by_user,
+                    job_id=job.id,
+                )
+            await self._enter_lease_wait(
+                job.id,
+                mode=RecoveryMode.START,
+                error=str(exc),
+                assigned_host=assigned_host,
+                resume_instruction=instruction,
             )
             return await self.require(job.id)
 
@@ -327,18 +353,28 @@ class JobManager:
 
         retry_id = _job_id()
         project_session = None
+        session_busy_error: ProjectSessionBusyError | None = None
         external_session_id = original.external_session_id
         if self.project_sessions is not None:
-            project_session = await self.project_sessions.acquire(
-                project_id=original.project_id,
-                owner_user_id=original.requested_by_user,
-                job_id=retry_id,
-                seed_external_session_id=original.external_session_id,
-                seed_host_id=original.assigned_host,
-            )
-            external_session_id = (
-                project_session.external_session_id or original.external_session_id
-            )
+            try:
+                project_session = await self.project_sessions.acquire(
+                    project_id=original.project_id,
+                    owner_user_id=original.requested_by_user,
+                    job_id=retry_id,
+                    seed_external_session_id=original.external_session_id,
+                    seed_host_id=original.assigned_host,
+                )
+                external_session_id = (
+                    project_session.external_session_id or original.external_session_id
+                )
+            except ProjectSessionBusyError as exc:
+                session_busy_error = exc
+                session_hint = await self.project_sessions.active_for(
+                    original.project_id,
+                    original.requested_by_user,
+                )
+                if session_hint is not None and session_hint.external_session_id:
+                    external_session_id = session_hint.external_session_id
 
         retry = JobRecord(
             id=retry_id,
@@ -397,17 +433,39 @@ class JobManager:
             )
             return await self.require(retry.id)
 
+        if session_busy_error is not None:
+            await self._enter_lease_wait(
+                retry.id,
+                mode=mode,
+                error=str(session_busy_error),
+                assigned_host=assigned_host,
+                resume_instruction=(
+                    RETRY_RESUME_INSTRUCTION
+                    if mode == RecoveryMode.RESUME
+                    else None
+                ),
+            )
+            return await self.require(retry.id)
+
         try:
             await self._assign_execution_lease(retry.id, assigned_host)
         except ExecutionLeaseBusyError as exc:
-            await self.jobs.update(retry.id, error=str(exc))
-            await self._transition(retry.id, JobState.FAILED)
-            await self.events.append(
-                "EXECUTION_LEASE_BLOCKED",
-                job_id=retry.id,
-                project_id=retry.project_id,
-                host_id=assigned_host,
-                payload={"error": str(exc)},
+            if self.project_sessions is not None and project_session is not None:
+                await self.project_sessions.release_for_job(
+                    project_id=retry.project_id,
+                    owner_user_id=retry.requested_by_user,
+                    job_id=retry.id,
+                )
+            await self._enter_lease_wait(
+                retry.id,
+                mode=mode,
+                error=str(exc),
+                assigned_host=assigned_host,
+                resume_instruction=(
+                    RETRY_RESUME_INSTRUCTION
+                    if mode == RecoveryMode.RESUME
+                    else None
+                ),
             )
             return await self.require(retry.id)
 
