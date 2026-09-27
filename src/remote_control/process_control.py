@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
-import json
 import ntpath
 import os
 import posixpath
@@ -65,10 +64,56 @@ async def terminate_persisted_codex_process(
     command_line = await process_command_line(pid)
     if not command_line:
         return False
+    if not command_line_matches_working_directory(
+        command_line,
+        working_directory,
+    ):
+        return False
+    return await terminate_process_tree(
+        pid,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+async def legacy_persisted_process_is_gone_or_reused(
+    pid: int | None,
+    *,
+    working_directory: str | Path,
+) -> bool:
+    """Safely reconcile pre-identity persisted PIDs.
+
+    Legacy rows created before executable/start-token persistence cannot prove
+    ownership of a live PID. They may still be cleared when the PID is gone or
+    when the currently running process command line demonstrably does not target
+    the persisted working directory. Matching or unreadable command lines remain
+    fail-closed.
+    """
+    if pid is None or pid <= 0 or not process_exists(pid):
+        return True
+
+    command_line = await process_command_line(pid)
+    if not command_line:
+        return False
+    return not command_line_matches_working_directory(
+        command_line,
+        working_directory,
+    )
+
+
+def command_line_matches_working_directory(
+    command_line: str,
+    working_directory: str | Path,
+) -> bool:
     normalized_command = command_line.strip().replace("\\", "/")
     normalized_directory = canonical_working_directory(working_directory)
-    if os.name == "nt":
+    windows_like = (
+        (len(normalized_directory) >= 2 and normalized_directory[1] == ":")
+        or normalized_directory.startswith("//")
+    )
+    if os.name == "nt" or windows_like:
         normalized_command = normalized_command.casefold()
+        normalized_directory = normalized_directory.casefold()
+
     plain = f"--cd {normalized_directory}"
     quoted = (
         f'--cd "{normalized_directory}"',
@@ -79,12 +124,7 @@ async def terminate_persisted_codex_process(
         or f"{plain} " in normalized_command
     )
     quoted_match = any(pattern in normalized_command for pattern in quoted)
-    if not plain_match and not quoted_match:
-        return False
-    return await terminate_process_tree(
-        pid,
-        timeout_seconds=timeout_seconds,
-    )
+    return plain_match or quoted_match
 
 
 async def process_identity(pid: int) -> ProcessIdentity | None:
@@ -187,49 +227,91 @@ async def terminate_process_tree(
 
 
 async def _windows_process_identity(pid: int) -> ProcessIdentity | None:
-    script = (
-        "$p = Get-CimInstance Win32_Process -Filter 'ProcessId = "
-        + str(pid)
-        + "' -ErrorAction SilentlyContinue; "
-        "if ($null -ne $p -and $null -ne $p.CreationDate "
-        "-and -not [string]::IsNullOrWhiteSpace([string]$p.ExecutablePath)) { "
-        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
-        "$o = [pscustomobject]@{ executable = [string]$p.ExecutablePath; "
-        "start_token = $p.CreationDate.ToUniversalTime().Ticks.ToString() }; "
-        "$o | ConvertTo-Json -Compress }"
+    if pid <= 0:
+        return None
+
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+    dotnet_ticks_at_filetime_epoch = 504_911_232_000_000_000
+
+    class FileTime(ctypes.Structure):
+        _fields_ = [
+            ("dwLowDateTime", wintypes.DWORD),
+            ("dwHighDateTime", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    open_process.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    query_image = kernel32.QueryFullProcessImageNameW
+    query_image.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    query_image.restype = wintypes.BOOL
+    get_process_times = kernel32.GetProcessTimes
+    get_process_times.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(FileTime),
+        ctypes.POINTER(FileTime),
+        ctypes.POINTER(FileTime),
+        ctypes.POINTER(FileTime),
+    ]
+    get_process_times.restype = wintypes.BOOL
+
+    handle = open_process(
+        process_query_limited_information,
+        False,
+        pid,
     )
+    if not handle:
+        return None
+
     try:
-        process = await asyncio.create_subprocess_exec(
-            "powershell.exe",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            script,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+        size = wintypes.DWORD(32768)
+        image_buffer = ctypes.create_unicode_buffer(size.value)
+        if not query_image(handle, 0, image_buffer, ctypes.byref(size)):
+            return None
+        executable = image_buffer.value.strip()
+        if not executable:
+            return None
+
+        creation = FileTime()
+        exit_time = FileTime()
+        kernel_time = FileTime()
+        user_time = FileTime()
+        if not get_process_times(
+            handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel_time),
+            ctypes.byref(user_time),
+        ):
+            return None
+
+        filetime_ticks = (
+            int(creation.dwHighDateTime) << 32
+        ) | int(creation.dwLowDateTime)
+        if filetime_ticks <= 0:
+            return None
+
+        # Preserve the existing persisted token format produced by
+        # PowerShell's DateTime.ToUniversalTime().Ticks: 100 ns ticks since
+        # 0001-01-01, while FILETIME starts at 1601-01-01.
+        start_ticks = filetime_ticks + dotnet_ticks_at_filetime_epoch
+        return ProcessIdentity(
+            executable=_normalize_executable(executable),
+            start_token=f"windows:{start_ticks}",
         )
-        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=5)
-    except (OSError, TimeoutError):
-        return None
-    if process.returncode != 0:
-        return None
-    raw = stdout.decode("utf-8", errors="replace").strip()
-    if not raw:
-        return None
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    executable = payload.get("executable")
-    start_token = payload.get("start_token")
-    if not isinstance(executable, str) or not executable.strip():
-        return None
-    if not isinstance(start_token, str) or not start_token.strip():
-        return None
-    return ProcessIdentity(
-        executable=_normalize_executable(executable),
-        start_token=f"windows:{start_token.strip()}",
-    )
+    finally:
+        close_handle(handle)
 
 
 async def _windows_process_command_line(pid: int) -> str | None:

@@ -625,3 +625,106 @@ async def test_runner_safety_error_stops_reconnect_loop(tmp_path):
 
     with pytest.raises(RunnerSafetyError, match="journal safety failed"):
         await daemon.run_forever()
+
+
+
+@pytest.mark.asyncio
+async def test_startup_clears_legacy_pid_when_current_process_is_proven_reused(
+    monkeypatch,
+    project_registry,
+    database,
+):
+    jobs = JobRepository(database)
+    await jobs.add(
+        JobRecord(
+            id="JOB-LEGACY-PID-REUSED",
+            project_id="demo",
+            requested_by_channel="test",
+            requested_by_user="100",
+            requested_host="lightsail-main",
+            assigned_host="lightsail-main",
+            instruction="legacy unfinished",
+            state="RUNNING",
+            external_session_id="thread-legacy",
+            pid=35416,
+            process_executable=None,
+            process_start_token=None,
+        )
+    )
+
+    async def legacy_reused(pid, *, working_directory):
+        assert pid == 35416
+        assert str(working_directory) == str(
+            project_registry.get("demo").path_for("lightsail-main")
+        )
+        return True
+
+    monkeypatch.setattr(
+        "remote_control.controller.job_manager.legacy_persisted_process_is_gone_or_reused",
+        legacy_reused,
+    )
+
+    manager = JobManager(
+        projects=project_registry,
+        jobs=jobs,
+        events=EventRepository(database),
+        runner=FakeAgentRunner(),
+        local_host_id="lightsail-main",
+        recovery=RecoveryRepository(database),
+        restart_grace_seconds=0,
+    )
+
+    await manager.reconcile_startup()
+
+    current = await manager.require("JOB-LEGACY-PID-REUSED")
+    assert current.pid is None
+    assert current.process_executable is None
+    assert current.process_start_token is None
+    assert current.state == "WAITING_HOST"
+
+
+@pytest.mark.asyncio
+async def test_startup_refuses_legacy_pid_when_process_cannot_be_disambiguated(
+    monkeypatch,
+    project_registry,
+    database,
+):
+    jobs = JobRepository(database)
+    await jobs.add(
+        JobRecord(
+            id="JOB-LEGACY-PID-UNVERIFIED",
+            project_id="demo",
+            requested_by_channel="test",
+            requested_by_user="100",
+            requested_host="lightsail-main",
+            assigned_host="lightsail-main",
+            instruction="legacy unfinished",
+            state="RUNNING",
+            external_session_id="thread-legacy",
+            pid=35416,
+            process_executable=None,
+            process_start_token=None,
+        )
+    )
+
+    async def cannot_prove_reuse(pid, *, working_directory):
+        del pid, working_directory
+        return False
+
+    monkeypatch.setattr(
+        "remote_control.controller.job_manager.legacy_persisted_process_is_gone_or_reused",
+        cannot_prove_reuse,
+    )
+
+    manager = JobManager(
+        projects=project_registry,
+        jobs=jobs,
+        events=EventRepository(database),
+        runner=FakeAgentRunner(),
+        local_host_id="lightsail-main",
+        recovery=RecoveryRepository(database),
+        restart_grace_seconds=0,
+    )
+
+    with pytest.raises(RuntimeError, match="legacy local Job"):
+        await manager.reconcile_startup()

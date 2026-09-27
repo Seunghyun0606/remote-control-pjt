@@ -2,7 +2,7 @@
 
 Telegram/Slack에서 **현재 머신의 Codex**를 실행하고, 진행 상태·추가 지시·Human Gate·사용량 제한 복구·Project OS 연동까지 관리하는 Runtime Control Plane입니다.
 
-현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.15.1**입니다.
+현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.15.2**입니다.
 
 ## 전체 개요
 
@@ -59,6 +59,8 @@ Remote Agent Control과 Project OS의 역할도 분리됩니다.
 0.15.0에서는 `/queue`로 현재 실행 Job과 `WAITING_LEASE` 대기열을 한 화면에서 확인할 수 있고, Telegram inline 버튼으로 대기 Job의 순서를 위/아래로 이동하거나 취소할 수 있습니다. 순서는 schema v6의 `recovery.queue_position`에 저장되어 Controller 재시작 후에도 유지됩니다. 상세 내용은 [Telegram Queue Management](docs/TELEGRAM_QUEUE_MANAGEMENT_015.md)을 참고하세요.
 
 0.15.1에서는 Windows Controller 재시작 시 stale PID 확인에 Unix식 `os.kill(pid, 0)`을 사용하지 않고 Win32 `OpenProcess` 기반 liveness probe를 사용합니다. Python 3.13에서도 `WinError 87`로 Controller 시작이 중단되지 않으며 Windows CI에 Python 3.13을 추가했습니다.
+
+0.15.2에서는 process identity 도입 이전에 저장된 legacy Job의 PID가 다른 프로세스로 재사용된 것이 command line으로 명백하면 stale PID를 안전하게 해제하고 startup recovery를 계속합니다. 현재 PID가 동일 working directory의 Codex처럼 보이거나 확인할 수 없으면 기존처럼 fail-closed로 중단합니다. 또한 `remote-control --version`을 정식 지원합니다.
 
 0.13.1에서는 pip/Hatchling build toolchain을 wheel hash까지 고정하고 PEP 517/660 build isolation을 제거했습니다. Windows CI도 선택된 smoke module이 아니라 **전체 pytest suite**를 실행합니다. 상세 내용은 [P3 Reproducible Build & Windows Full CI](docs/P3_REPRODUCIBLE_BUILD_WINDOWS_CI_0131.md)을 참고하세요.
 
@@ -1324,4 +1326,4 @@ Manual smoke test:
 - [x] Process safety v0.11 — Runner execution journal / process-tree containment / working-tree lease / durable result ACK
 - [x] Generation & ownership hardening v0.12 — Controller singleton / stable Runner identity / execution ownership ledger / atomic lease assignment / Protocol v3
 
-Package version: **0.15.1**
+Package version: **0.15.2**

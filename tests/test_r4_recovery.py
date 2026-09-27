@@ -530,6 +530,8 @@ async def test_controller_restart_recovers_local_session(
         state="RUNNING",
         external_session_id="thread-old",
         pid=4242,
+        process_executable="C:/test/codex.exe",
+        process_start_token="windows:4242",
     )
     await manager.jobs.add(job)
     await sessions.record(
