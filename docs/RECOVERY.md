@@ -108,6 +108,15 @@ REMOTE_CONTROL_QUOTA_RESET_GRACE_SECONDS=600
 
 The attempt count survives retries and resets only when the Job completes/cancels/fails.
 
+사용자에게 표시되는 quota reset/retry 시각은 `Asia/Seoul` 기준 KST로 변환합니다. 내부 DB, scheduler, event timestamp는 UTC를 유지합니다.
+
+예:
+
+```text
+재시작 가능: 2026-09-27 17:37:00 KST
+자동 재시도: 2026-09-27 17:47:00 KST
+```
+
 Messenger observability:
 
 ```text

@@ -1,6 +1,6 @@
 # Remote Control User Guide
 
-이 문서는 **Remote Control 0.15.4** 기준의 실사용 가이드입니다.
+이 문서는 **Remote Control 0.15.5** 기준의 실사용 가이드입니다.
 
 목표는 설치 세부사항보다 다음 흐름을 빠르게 이해하는 것입니다.
 
@@ -407,6 +407,15 @@ RUNNING
 → reset/retry 시각 도달
 → 동일 Codex Session resume
 ```
+
+사용자에게 보이는 reset/retry 시각은 모두 한국 시간(KST)으로 표시됩니다.
+
+```text
+재시작 가능: 2026-09-27 17:37:00 KST
+자동 재시도: 2026-09-27 17:47:00 KST
+```
+
+내부 DB, event, scheduler 계산은 UTC를 그대로 사용합니다.
 
 reset 시각을 알 수 없으면 기본 backoff를 사용합니다.
 
