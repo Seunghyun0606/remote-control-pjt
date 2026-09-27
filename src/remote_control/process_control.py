@@ -441,43 +441,44 @@ def process_exists(pid: int) -> bool:
 
 
 def _windows_process_exists(pid: int) -> bool:
-    """Check PID liveness without using the POSIX-only os.kill(pid, 0) idiom."""
+    """Check PID liveness from the system's active process enumeration."""
     if pid <= 0:
         return False
 
-    process_query_limited_information = 0x1000
-    error_access_denied = 5
-    error_invalid_parameter = 87
+    from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    open_process = kernel32.OpenProcess
-    open_process.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
-    open_process.restype = ctypes.c_void_p
-    close_handle = kernel32.CloseHandle
-    close_handle.argtypes = [ctypes.c_void_p]
-    close_handle.restype = ctypes.c_int
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    enum_processes = psapi.EnumProcesses
+    enum_processes.argtypes = [
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    enum_processes.restype = wintypes.BOOL
 
-    ctypes.set_last_error(0)
-    handle = open_process(
-        process_query_limited_information,
-        False,
-        pid,
-    )
-    if handle:
-        close_handle(handle)
-        return True
+    capacity = 4096
+    while capacity <= 65536:
+        process_ids = (wintypes.DWORD * capacity)()
+        bytes_returned = wintypes.DWORD()
+        buffer_size = ctypes.sizeof(process_ids)
 
-    error = ctypes.get_last_error()
-    if error == error_invalid_parameter:
-        return False
-    if error == error_access_denied:
-        # Access restrictions prove that a process object exists, even though
-        # this user cannot open it with query rights.
-        return True
+        if not enum_processes(
+            process_ids,
+            buffer_size,
+            ctypes.byref(bytes_returned),
+        ):
+            # Enumeration failure is unusual. Preserve fail-closed behavior
+            # rather than claiming a potentially live process is gone.
+            return True
 
-    # Unknown Win32 failures are treated as "possibly alive". Callers that
-    # perform destructive recovery will then require the stronger persisted
-    # executable/start-token identity before taking any action.
+        count = bytes_returned.value // ctypes.sizeof(wintypes.DWORD)
+        if bytes_returned.value < buffer_size:
+            return pid in process_ids[:count]
+
+        capacity *= 2
+
+    # If the process table unexpectedly exceeds the maximum buffer, remain
+    # fail-closed instead of declaring the PID absent.
     return True
 
 
