@@ -107,8 +107,13 @@ def command_line_matches_working_directory(
 ) -> bool:
     normalized_command = command_line.strip().replace("\\", "/")
     normalized_directory = canonical_working_directory(working_directory)
-    if os.name == "nt":
+    windows_like = (
+        (len(normalized_directory) >= 2 and normalized_directory[1] == ":")
+        or normalized_directory.startswith("//")
+    )
+    if os.name == "nt" or windows_like:
         normalized_command = normalized_command.casefold()
+        normalized_directory = normalized_directory.casefold()
 
     plain = f"--cd {normalized_directory}"
     quoted = (
