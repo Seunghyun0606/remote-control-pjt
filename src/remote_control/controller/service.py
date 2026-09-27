@@ -8,6 +8,7 @@ from remote_control.controller.states import JobState
 from remote_control.hosts.registry import HostRegistry
 from remote_control.projects.registry import ProjectRegistry
 from remote_control.storage.models import RecoveryRecord
+from remote_control.time_display import format_korea_datetime
 
 
 DEFAULT_INSTRUCTION = (
@@ -543,14 +544,14 @@ def _recovery_suffix(record: RecoveryRecord | None) -> str:
         reason = " ".join(record.last_error.split())
         parts.append(f"reason={reason[:160]}")
     if record.next_retry_at is not None:
-        parts.append(f"retry_at={record.next_retry_at.isoformat()}")
+        parts.append(f"retry_at={format_korea_datetime(record.next_retry_at)}")
     return " " + " ".join(parts)
 
 
 def _recovery_detail(record: RecoveryRecord | None) -> str:
     if record is None:
         return ""
-    next_retry = record.next_retry_at.isoformat() if record.next_retry_at else "-"
+    next_retry = format_korea_datetime(record.next_retry_at)
     return (
         f"\nRecovery: {record.kind}"
         f"\nRecovery mode: {record.mode}"
