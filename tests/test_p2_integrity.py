@@ -13,6 +13,7 @@ from remote_control.event_payloads import sanitize_agent_event
 from remote_control.messaging.telegram import TelegramProvider, _PendingSteer
 from remote_control.process_control import (
     ProcessIdentity,
+    legacy_persisted_process_is_gone_or_reused,
     process_exists,
     process_identity,
     terminate_persisted_codex_process,
@@ -253,6 +254,50 @@ async def test_fresh_and_upgrade_databases_reach_identical_schema(tmp_path):
     finally:
         await fresh.close()
         await upgrade.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_pid_reuse_is_proven_by_mismatched_command_line(monkeypatch):
+    monkeypatch.setattr(
+        "remote_control.process_control.process_exists",
+        lambda pid: pid == 35416,
+    )
+
+    async def command_line(pid):
+        assert pid == 35416
+        return "python.exe unrelated.py"
+
+    monkeypatch.setattr(
+        "remote_control.process_control.process_command_line",
+        command_line,
+    )
+
+    assert await legacy_persisted_process_is_gone_or_reused(
+        35416,
+        working_directory="C:/dev/demo",
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_pid_matching_workdir_remains_fail_closed(monkeypatch):
+    monkeypatch.setattr(
+        "remote_control.process_control.process_exists",
+        lambda pid: pid == 35416,
+    )
+
+    async def command_line(pid):
+        assert pid == 35416
+        return 'codex.cmd exec --cd "C:/dev/demo"'
+
+    monkeypatch.setattr(
+        "remote_control.process_control.process_command_line",
+        command_line,
+    )
+
+    assert not await legacy_persisted_process_is_gone_or_reused(
+        35416,
+        working_directory="C:/dev/demo",
+    )
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows-specific PID liveness")
