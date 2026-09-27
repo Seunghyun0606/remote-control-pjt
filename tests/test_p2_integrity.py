@@ -13,6 +13,7 @@ from remote_control.event_payloads import sanitize_agent_event
 from remote_control.messaging.telegram import TelegramProvider, _PendingSteer
 from remote_control.process_control import (
     ProcessIdentity,
+    process_exists,
     process_identity,
     terminate_persisted_codex_process,
 )
@@ -252,6 +253,12 @@ async def test_fresh_and_upgrade_databases_reach_identical_schema(tmp_path):
     finally:
         await fresh.close()
         await upgrade.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-specific PID liveness")
+def test_windows_process_exists_handles_live_and_missing_pids():
+    assert process_exists(os.getpid()) is True
+    assert process_exists(0xFFFFFFFE) is False
 
 
 @pytest.mark.asyncio
