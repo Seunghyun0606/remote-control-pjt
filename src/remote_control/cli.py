@@ -9,6 +9,7 @@ from typing import Annotated
 import typer
 import uvicorn
 
+from remote_control import __version__
 from remote_control.api.app import create_app
 from remote_control.approvals.registry import ApprovalRegistry
 from remote_control.controller.job_manager import JobManager
@@ -54,11 +55,33 @@ from remote_control.storage.repositories import (
 )
 from remote_control.transport.runner_ws import RunnerGateway
 
-app = typer.Typer(help="Remote Agent Control")
+app = typer.Typer(help="Remote Agent Control", no_args_is_help=True)
 controller_app = typer.Typer(help="Controller commands")
 project_app = typer.Typer(help="Project registry commands")
 app.add_typer(controller_app, name="controller")
 app.add_typer(project_app, name="project")
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(__version__)
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=_version_callback,
+            is_eager=True,
+            help="Show the Remote Control version and exit.",
+        ),
+    ] = False,
+) -> None:
+    """Remote Agent Control."""
+    del version
 
 
 @app.command("doctor")
