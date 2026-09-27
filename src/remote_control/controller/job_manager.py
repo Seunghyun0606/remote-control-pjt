@@ -27,6 +27,7 @@ from remote_control.human_gate import (
 from remote_control.process_control import (
     ProcessSafetyError,
     canonical_working_directory,
+    legacy_persisted_process_is_gone_or_reused,
     terminate_persisted_codex_process,
 )
 from remote_control.projects.adapters import NoProjectWork, ProjectAdapterRegistry
@@ -1755,18 +1756,38 @@ class JobManager:
                     )
                 continue
             project = self.projects.get(job.project_id)
-            stopped = await terminate_persisted_codex_process(
-                job.pid,
-                working_directory=project.path_for(self.local_host_id),
-                expected_executable=job.process_executable,
-                expected_start_token=job.process_start_token,
-                timeout_seconds=10,
+            working_directory = project.path_for(self.local_host_id)
+            legacy_identity = (
+                not job.process_executable
+                or not job.process_start_token
             )
-            if not stopped:
-                raise RuntimeError(
-                    "refusing Controller startup because a previous local Codex "
-                    f"process tree could not be terminated: job={job.id} pid={job.pid}"
+            if legacy_identity:
+                reconciled = await legacy_persisted_process_is_gone_or_reused(
+                    job.pid,
+                    working_directory=working_directory,
                 )
+                if not reconciled:
+                    raise RuntimeError(
+                        "refusing Controller startup because a legacy local Job "
+                        "has a live or unverifiable PID but no durable process identity: "
+                        f"job={job.id} pid={job.pid}. Inspect that PID manually; "
+                        "if it is the old Codex process, terminate it and retry startup."
+                    )
+                stopped = True
+            else:
+                stopped = await terminate_persisted_codex_process(
+                    job.pid,
+                    working_directory=working_directory,
+                    expected_executable=job.process_executable,
+                    expected_start_token=job.process_start_token,
+                    timeout_seconds=10,
+                )
+                if not stopped:
+                    raise RuntimeError(
+                        "refusing Controller startup because a previous local Codex "
+                        f"process tree could not be terminated: job={job.id} pid={job.pid}"
+                    )
+
             changes: dict[str, object] = {
                 "pid": None,
                 "process_executable": None,
@@ -1779,11 +1800,18 @@ class JobManager:
                 )
             await self.jobs.update(job.id, **changes)
             await self.events.append(
-                "LOCAL_ORPHAN_TERMINATED_ON_STARTUP",
+                (
+                    "LEGACY_LOCAL_PID_RECONCILED_ON_STARTUP"
+                    if legacy_identity
+                    else "LOCAL_ORPHAN_TERMINATED_ON_STARTUP"
+                ),
                 job_id=job.id,
                 project_id=job.project_id,
                 host_id=job.assigned_host,
-                payload={"pid": job.pid},
+                payload={
+                    "pid": job.pid,
+                    "legacy_identity": legacy_identity,
+                },
             )
 
     async def _reconcile_execution_leases(self) -> int:
