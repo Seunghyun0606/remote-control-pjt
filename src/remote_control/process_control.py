@@ -65,10 +65,51 @@ async def terminate_persisted_codex_process(
     command_line = await process_command_line(pid)
     if not command_line:
         return False
+    if not command_line_matches_working_directory(
+        command_line,
+        working_directory,
+    ):
+        return False
+    return await terminate_process_tree(
+        pid,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+async def legacy_persisted_process_is_gone_or_reused(
+    pid: int | None,
+    *,
+    working_directory: str | Path,
+) -> bool:
+    """Safely reconcile pre-identity persisted PIDs.
+
+    Legacy rows created before executable/start-token persistence cannot prove
+    ownership of a live PID. They may still be cleared when the PID is gone or
+    when the currently running process command line demonstrably does not target
+    the persisted working directory. Matching or unreadable command lines remain
+    fail-closed.
+    """
+    if pid is None or pid <= 0 or not process_exists(pid):
+        return True
+
+    command_line = await process_command_line(pid)
+    if not command_line:
+        return False
+    return not command_line_matches_working_directory(
+        command_line,
+        working_directory,
+    )
+
+
+def command_line_matches_working_directory(
+    command_line: str,
+    working_directory: str | Path,
+) -> bool:
     normalized_command = command_line.strip().replace("\\", "/")
     normalized_directory = canonical_working_directory(working_directory)
     if os.name == "nt":
         normalized_command = normalized_command.casefold()
+
     plain = f"--cd {normalized_directory}"
     quoted = (
         f'--cd "{normalized_directory}"',
@@ -79,12 +120,7 @@ async def terminate_persisted_codex_process(
         or f"{plain} " in normalized_command
     )
     quoted_match = any(pattern in normalized_command for pattern in quoted)
-    if not plain_match and not quoted_match:
-        return False
-    return await terminate_process_tree(
-        pid,
-        timeout_seconds=timeout_seconds,
-    )
+    return plain_match or quoted_match
 
 
 async def process_identity(pid: int) -> ProcessIdentity | None:
