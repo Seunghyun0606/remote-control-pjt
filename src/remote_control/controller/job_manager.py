@@ -1765,6 +1765,7 @@ class JobManager:
                 reconciled = await legacy_persisted_process_is_gone_or_reused(
                     job.pid,
                     working_directory=working_directory,
+                    persisted_at=job.updated_at or job.created_at,
                 )
                 if not reconciled:
                     raise RuntimeError(

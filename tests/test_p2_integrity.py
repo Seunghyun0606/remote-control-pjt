@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import time
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +17,7 @@ from remote_control.process_control import (
     legacy_persisted_process_is_gone_or_reused,
     process_exists,
     process_identity,
+    process_started_at,
     terminate_persisted_codex_process,
 )
 from remote_control.runners.fake import FakeAgentRunner
@@ -257,6 +259,38 @@ async def test_fresh_and_upgrade_databases_reach_identical_schema(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_legacy_pid_reuse_is_proven_by_later_process_start(monkeypatch):
+    monkeypatch.setattr(
+        "remote_control.process_control.process_exists",
+        lambda pid: pid == 35416,
+    )
+
+    async def started_at(pid):
+        assert pid == 35416
+        return datetime(2026, 9, 27, 8, 0, tzinfo=timezone.utc)
+
+    async def command_line(_pid):
+        raise AssertionError(
+            "command line is unnecessary after start time proves PID reuse"
+        )
+
+    monkeypatch.setattr(
+        "remote_control.process_control.process_started_at",
+        started_at,
+    )
+    monkeypatch.setattr(
+        "remote_control.process_control.process_command_line",
+        command_line,
+    )
+
+    assert await legacy_persisted_process_is_gone_or_reused(
+        35416,
+        working_directory="C:/dev/demo",
+        persisted_at=datetime(2026, 9, 24, 8, 0, tzinfo=timezone.utc),
+    )
+
+
+@pytest.mark.asyncio
 async def test_legacy_pid_reuse_is_proven_by_mismatched_command_line(monkeypatch):
     monkeypatch.setattr(
         "remote_control.process_control.process_exists",
@@ -304,6 +338,17 @@ async def test_legacy_pid_matching_workdir_remains_fail_closed(monkeypatch):
 def test_windows_process_exists_handles_live_and_missing_pids():
     assert process_exists(os.getpid()) is True
     assert process_exists(0xFFFFFFFE) is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-specific process start time")
+@pytest.mark.asyncio
+async def test_windows_process_start_time_is_available_for_current_process():
+    started_at = await process_started_at(os.getpid())
+
+    assert started_at is not None
+    now = datetime.now(timezone.utc)
+    assert started_at <= now
+    assert started_at > now - timedelta(days=1)
 
 
 @pytest.mark.asyncio

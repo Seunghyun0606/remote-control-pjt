@@ -652,8 +652,9 @@ async def test_startup_clears_legacy_pid_when_current_process_is_proven_reused(
         )
     )
 
-    async def legacy_reused(pid, *, working_directory):
+    async def legacy_reused(pid, *, working_directory, persisted_at):
         assert pid == 35416
+        assert persisted_at is not None
         assert str(working_directory) == str(
             project_registry.get("demo").path_for("lightsail-main")
         )
@@ -707,8 +708,9 @@ async def test_startup_refuses_legacy_pid_when_process_cannot_be_disambiguated(
         )
     )
 
-    async def cannot_prove_reuse(pid, *, working_directory):
+    async def cannot_prove_reuse(pid, *, working_directory, persisted_at):
         del pid, working_directory
+        assert persisted_at is not None
         return False
 
     monkeypatch.setattr(
