@@ -61,7 +61,7 @@ Bot
 └─ Project C Topic
 ```
 
-`/start` and `/sync` reconcile `config/projects.yaml` with persisted Telegram topic mappings.
+`/start` and `/sync` reconcile `config/projects.yaml` with persisted Telegram topic mappings. Existing mappings are also validated against Telegram; if a mapped Topic was deleted, sync recreates it and replaces the stale `message_thread_id` automatically.
 
 The Controller stores:
 

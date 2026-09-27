@@ -12,7 +12,7 @@ from telegram import (
     InlineKeyboardMarkup,
     Update,
 )
-from telegram.error import TelegramError
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -197,6 +197,7 @@ class TelegramProvider(MessagingProvider):
             )
 
         created = 0
+        recreated = 0
         updated = 0
         failed: list[str] = []
         for project in self.controller.projects.list():
@@ -221,12 +222,33 @@ class TelegramProvider(MessagingProvider):
                     created += 1
                     continue
 
-                if existing.topic_name != topic_name:
+                try:
                     await self.application.bot.edit_forum_topic(
                         chat_id=int(chat_id),
                         message_thread_id=existing.message_thread_id,
                         name=topic_name,
                     )
+                except BadRequest as exc:
+                    if _is_topic_not_modified_error(exc):
+                        pass
+                    elif _is_missing_topic_error(exc):
+                        topic = await self.application.bot.create_forum_topic(
+                            chat_id=int(chat_id),
+                            name=topic_name,
+                        )
+                        await self.topics.upsert(
+                            user_id=user_id,
+                            project_id=project.id,
+                            chat_id=chat_id,
+                            message_thread_id=topic.message_thread_id,
+                            topic_name=topic_name,
+                        )
+                        recreated += 1
+                        continue
+                    else:
+                        raise
+
+                if existing.topic_name != topic_name:
                     await self.topics.upsert(
                         user_id=user_id,
                         project_id=project.id,
@@ -244,7 +266,10 @@ class TelegramProvider(MessagingProvider):
                 )
                 failed.append(project.id)
 
-        summary = f"Project Topic 동기화 완료: 생성 {created}, 이름갱신 {updated}"
+        summary = (
+            "Project Topic 동기화 완료: "
+            f"생성 {created}, 재생성 {recreated}, 이름갱신 {updated}"
+        )
         if failed:
             summary += "\n실패: " + ", ".join(failed)
         return summary
@@ -840,6 +865,24 @@ def parse_approval_callback(data: str) -> tuple[str, str, str | None]:
     if action in {"details", "reject"} and len(parts) == 3:
         return approval_id, action, None
     raise ValueError("invalid approval callback")
+
+
+def _is_missing_topic_error(exc: TelegramError) -> bool:
+    message = str(exc).casefold()
+    return any(
+        marker in message
+        for marker in (
+            "message thread not found",
+            "forum topic not found",
+            "topic not found",
+            "message to edit not found",
+        )
+    )
+
+
+def _is_topic_not_modified_error(exc: TelegramError) -> bool:
+    message = str(exc).casefold()
+    return "not modified" in message or "topic_not_modified" in message
 
 
 def build_queue_markup(jobs: list) -> InlineKeyboardMarkup:

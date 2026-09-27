@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
+from telegram.error import BadRequest
 
 from remote_control.controller.job_manager import JobManager
 from remote_control.controller.service import ControllerService
@@ -214,6 +215,94 @@ async def test_sync_project_topics_creates_mapping(project_registry, database):
     assert topic is not None
     assert topic.topic_name == "Demo Project"
     assert topic.message_thread_id == 101
+
+
+@pytest.mark.asyncio
+async def test_sync_project_topics_recreates_deleted_mapping(project_registry, database):
+    manager = JobManager(
+        projects=project_registry,
+        jobs=JobRepository(database),
+        events=EventRepository(database),
+        runner=FakeAgentRunner(),
+        local_host_id="lightsail-main",
+    )
+    controller = ControllerService(projects=project_registry, jobs=manager)
+    topics = TelegramProjectTopicRepository(database)
+    bindings = TelegramMessageBindingRepository(database)
+
+    class _DeletedTopicBot(_FakeBot):
+        async def edit_forum_topic(self, **kwargs):
+            self.calls.append({"edit_forum_topic": kwargs})
+            raise BadRequest("Message thread not found")
+
+    bot = _DeletedTopicBot()
+    provider = _provider(
+        controller=controller,
+        topics=topics,
+        bindings=bindings,
+        bot=bot,
+    )
+
+    await topics.upsert(
+        user_id="100",
+        project_id="demo",
+        chat_id="100",
+        message_thread_id=42,
+        topic_name="Demo Project",
+    )
+
+    result = await provider.sync_project_topics(user_id="100", chat_id="100")
+
+    assert "재생성 1" in result
+    topic = await topics.get(user_id="100", project_id="demo")
+    assert topic is not None
+    assert topic.message_thread_id == 101
+    assert any("create_forum_topic" in call for call in bot.calls)
+
+
+@pytest.mark.asyncio
+async def test_sync_project_topics_accepts_unchanged_existing_topic(
+    project_registry,
+    database,
+):
+    manager = JobManager(
+        projects=project_registry,
+        jobs=JobRepository(database),
+        events=EventRepository(database),
+        runner=FakeAgentRunner(),
+        local_host_id="lightsail-main",
+    )
+    controller = ControllerService(projects=project_registry, jobs=manager)
+    topics = TelegramProjectTopicRepository(database)
+    bindings = TelegramMessageBindingRepository(database)
+
+    class _UnchangedTopicBot(_FakeBot):
+        async def edit_forum_topic(self, **kwargs):
+            self.calls.append({"edit_forum_topic": kwargs})
+            raise BadRequest("Topic not modified")
+
+    bot = _UnchangedTopicBot()
+    provider = _provider(
+        controller=controller,
+        topics=topics,
+        bindings=bindings,
+        bot=bot,
+    )
+    await topics.upsert(
+        user_id="100",
+        project_id="demo",
+        chat_id="100",
+        message_thread_id=42,
+        topic_name="Demo Project",
+    )
+
+    result = await provider.sync_project_topics(user_id="100", chat_id="100")
+
+    assert "재생성 0" in result
+    assert "실패:" not in result
+    topic = await topics.get(user_id="100", project_id="demo")
+    assert topic is not None
+    assert topic.message_thread_id == 42
 
 
 @pytest.mark.asyncio
