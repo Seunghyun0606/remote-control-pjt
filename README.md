@@ -68,6 +68,8 @@ Remote Agent Control과 Project OS의 역할도 분리됩니다.
 
 0.13.1에서는 pip/Hatchling build toolchain을 wheel hash까지 고정하고 PEP 517/660 build isolation을 제거했습니다. Windows CI도 선택된 smoke module이 아니라 **전체 pytest suite**를 실행합니다. 상세 내용은 [P3 Reproducible Build & Windows Full CI](docs/P3_REPRODUCIBLE_BUILD_WINDOWS_CI_0131.md)을 참고하세요.
 
+실제 사용 방법만 빠르게 보려면 [Remote Control User Guide](docs/USER_GUIDE.md)를 먼저 참고하세요.
+
 지원 기능:
 
 - Telegram polling
@@ -210,6 +212,7 @@ Remote Control은 Controller 시작 시 Telegram command menu를 자동 등록�
 /sync
 /run
 /status
+/queue
 /jobs
 /job
 /retry
@@ -1288,6 +1291,7 @@ GET /jobs/{job_id}/project-work
 
 ## 상세 문서
 
+- [Remote Control User Guide](docs/USER_GUIDE.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Project Adapters](docs/PROJECT_ADAPTERS.md)
 - [Recovery & Scheduler](docs/RECOVERY.md)
@@ -1298,7 +1302,7 @@ GET /jobs/{job_id}/project-work
 - [Process Safety P0 Closure](docs/PROCESS_SAFETY_P0.md)
 - [Final Generation & Ownership Hardening — 0.12.0](docs/FINAL_HARDENING_012.md)
 - [P2 Migration & Process Identity — 0.13.0](docs/P2_MIGRATION_PROCESS_IDENTITY_013.md)
-- [P3 Reproducible Build & Windows Full CI — 0.14.0](docs/P3_REPRODUCIBLE_BUILD_WINDOWS_CI_0131.md)
+- [P3 Reproducible Build & Windows Full CI — 0.13.1](docs/P3_REPRODUCIBLE_BUILD_WINDOWS_CI_0131.md)
 - [Sessions and Feedback](docs/SESSIONS_AND_FEEDBACK.md)
 - [Human Gate](docs/HUMAN_GATE.md)
 - [Messaging](docs/MESSAGING.md)
