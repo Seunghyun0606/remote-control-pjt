@@ -55,6 +55,7 @@ from remote_control.storage.repositories import (
     RemoteExecutionRepository,
 )
 from remote_control.transport.runner_ws import RunnerGateway
+from remote_control.time_display import format_korea_datetime
 
 Notifier = Callable[[str, str], Awaitable[None]]
 ApprovalNotifier = Callable[[str, ApprovalPrompt], Awaitable[None]]
@@ -3241,7 +3242,7 @@ class JobManager:
         await self._notify(
             job_id,
             "⏸ Codex 사용량 제한으로 대기합니다. "
-            f"시도 {attempt}, 자동 재시도: {next_retry.isoformat()}{grace_text}",
+            f"시도 {attempt}, 자동 재시도: {format_korea_datetime(next_retry)}{grace_text}",
         )
         asyncio.create_task(self._stop_active_turn(job_id), name=f"quota-stop:{job_id}")
         return record
