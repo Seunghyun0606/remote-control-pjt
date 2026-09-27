@@ -1,6 +1,6 @@
 # Remote Control User Guide
 
-이 문서는 **Remote Control 0.15.5** 기준의 실사용 가이드입니다.
+이 문서는 **Remote Control 0.15.6** 기준의 실사용 가이드입니다.
 
 목표는 설치 세부사항보다 다음 흐름을 빠르게 이해하는 것입니다.
 
@@ -53,6 +53,14 @@ Telegram Bot에서 최초 확인:
 ```
 
 Project Topic을 사용하는 경우 `/sync` 후 각 프로젝트별 Topic이 생성되거나 기존 mapping이 갱신됩니다.
+
+Telegram에서 실수로 Project Topic을 삭제했다면 기본 대화에서 다시:
+
+```text
+/sync
+```
+
+를 실행합니다. 0.15.6부터 `/sync`는 저장된 thread ID가 Telegram에 실제로 존재하는지 검증하고, 삭제된 Topic이면 새 Topic을 만든 뒤 DB mapping을 새 thread ID로 자동 교체합니다. `/start`도 내부적으로 같은 sync를 수행합니다.
 
 ---
 
