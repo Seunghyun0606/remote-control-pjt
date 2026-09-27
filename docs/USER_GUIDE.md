@@ -1,6 +1,6 @@
 # Remote Control User Guide
 
-이 문서는 **Remote Control 0.15.6** 기준의 실사용 가이드입니다.
+이 문서는 **Remote Control 0.15.7** 기준의 실사용 가이드입니다.
 
 목표는 설치 세부사항보다 다음 흐름을 빠르게 이해하는 것입니다.
 

@@ -876,6 +876,8 @@ def _is_missing_topic_error(exc: TelegramError) -> bool:
             "forum topic not found",
             "topic not found",
             "message to edit not found",
+            "topic_id_invalid",
+            "topic id invalid",
         )
     )
 

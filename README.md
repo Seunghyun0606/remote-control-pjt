@@ -2,7 +2,7 @@
 
 Telegram/Slack에서 **현재 머신의 Codex**를 실행하고, 진행 상태·추가 지시·Human Gate·사용량 제한 복구·Project OS 연동까지 관리하는 Runtime Control Plane입니다.
 
-현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.15.6**입니다.
+현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.15.7**입니다.
 
 ## 전체 개요
 
@@ -69,6 +69,8 @@ Remote Agent Control과 Project OS의 역할도 분리됩니다.
 0.15.5에서는 quota/usage-limit의 사용자 표시 시각을 `Asia/Seoul` 기준 KST로 통일했습니다. 내부 DB, event, scheduler 계산은 UTC를 유지하고 Telegram 알림, `/status`, `/job`의 재시도 시각만 `YYYY-MM-DD HH:mm:ss KST`로 표시합니다.
 
 0.15.6에서는 `/sync`와 `/start`가 기존 Telegram Project Topic mapping의 실제 thread 존재 여부까지 검증합니다. 사용자가 Topic을 삭제한 경우 새 Topic을 자동 생성하고 `message_thread_id` mapping을 교체합니다.
+
+0.15.7에서는 Telegram이 삭제된 Topic에 대해 반환할 수 있는 `TOPIC_ID_INVALID` 오류도 stale Topic으로 인식해 자동 재생성합니다.
 
 0.13.1에서는 pip/Hatchling build toolchain을 wheel hash까지 고정하고 PEP 517/660 build isolation을 제거했습니다. Windows CI도 선택된 smoke module이 아니라 **전체 pytest suite**를 실행합니다. 상세 내용은 [P3 Reproducible Build & Windows Full CI](docs/P3_REPRODUCIBLE_BUILD_WINDOWS_CI_0131.md)을 참고하세요.
 
@@ -1338,4 +1340,4 @@ Manual smoke test:
 - [x] Process safety v0.11 — Runner execution journal / process-tree containment / working-tree lease / durable result ACK
 - [x] Generation & ownership hardening v0.12 — Controller singleton / stable Runner identity / execution ownership ledger / atomic lease assignment / Protocol v3
 
-Package version: **0.15.6**
+Package version: **0.15.7**

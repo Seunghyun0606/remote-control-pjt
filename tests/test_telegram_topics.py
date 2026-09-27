@@ -261,6 +261,50 @@ async def test_sync_project_topics_recreates_deleted_mapping(project_registry, d
 
 
 @pytest.mark.asyncio
+async def test_sync_project_topics_recreates_topic_id_invalid(
+    project_registry,
+    database,
+):
+    manager = JobManager(
+        projects=project_registry,
+        jobs=JobRepository(database),
+        events=EventRepository(database),
+        runner=FakeAgentRunner(),
+        local_host_id="lightsail-main",
+    )
+    controller = ControllerService(projects=project_registry, jobs=manager)
+    topics = TelegramProjectTopicRepository(database)
+    bindings = TelegramMessageBindingRepository(database)
+
+    class _InvalidTopicBot(_FakeBot):
+        async def edit_forum_topic(self, **kwargs):
+            self.calls.append({"edit_forum_topic": kwargs})
+            raise BadRequest("TOPIC_ID_INVALID")
+
+    bot = _InvalidTopicBot()
+    provider = _provider(
+        controller=controller,
+        topics=topics,
+        bindings=bindings,
+        bot=bot,
+    )
+    await topics.upsert(
+        user_id="100",
+        project_id="demo",
+        chat_id="100",
+        message_thread_id=42,
+        topic_name="Demo Project",
+    )
+
+    result = await provider.sync_project_topics(user_id="100", chat_id="100")
+
+    assert "재생성 1" in result
+    topic = await topics.get(user_id="100", project_id="demo")
+    assert topic is not None
+    assert topic.message_thread_id == 101
+
+
+@pytest.mark.asyncio
 async def test_sync_project_topics_accepts_unchanged_existing_topic(
     project_registry,
     database,
