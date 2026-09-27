@@ -8,6 +8,7 @@ import posixpath
 import signal
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -79,17 +80,28 @@ async def legacy_persisted_process_is_gone_or_reused(
     pid: int | None,
     *,
     working_directory: str | Path,
+    persisted_at: datetime | None = None,
 ) -> bool:
     """Safely reconcile pre-identity persisted PIDs.
 
     Legacy rows created before executable/start-token persistence cannot prove
-    ownership of a live PID. They may still be cleared when the PID is gone or
-    when the currently running process command line demonstrably does not target
-    the persisted working directory. Matching or unreadable command lines remain
-    fail-closed.
+    ownership of a live PID. They may still be cleared when the PID is gone,
+    when the current process provably started after the legacy row was last
+    persisted, or when its command line demonstrably targets another working
+    directory. Ambiguous cases remain fail-closed.
     """
     if pid is None or pid <= 0 or not process_exists(pid):
         return True
+
+    if persisted_at is not None:
+        started_at = await process_started_at(pid)
+        if started_at is not None:
+            persisted_utc = _as_utc(persisted_at)
+            # The original process is spawned before its PID is persisted on
+            # the Job row. A process that started materially later therefore
+            # cannot be that original Codex process; the numeric PID was reused.
+            if started_at > persisted_utc + timedelta(seconds=1):
+                return True
 
     command_line = await process_command_line(pid)
     if not command_line:
@@ -98,6 +110,28 @@ async def legacy_persisted_process_is_gone_or_reused(
         command_line,
         working_directory,
     )
+
+
+async def process_started_at(pid: int) -> datetime | None:
+    identity = await process_identity(pid)
+    if identity is None or not identity.start_token.startswith("windows:"):
+        return None
+    try:
+        ticks = int(identity.start_token.split(":", 1)[1])
+    except (ValueError, IndexError):
+        return None
+    if ticks <= 0:
+        return None
+    # .NET DateTime ticks are 100 ns intervals since 0001-01-01 UTC.
+    return datetime(1, 1, 1, tzinfo=timezone.utc) + timedelta(
+        microseconds=ticks // 10
+    )
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def command_line_matches_working_directory(
