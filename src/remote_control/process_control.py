@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import json
 import ntpath
 import os
@@ -310,6 +311,8 @@ async def _wait_stopped(
 def process_exists(pid: int) -> bool:
     if pid <= 0:
         return False
+    if os.name == "nt":
+        return _windows_process_exists(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -318,6 +321,47 @@ def process_exists(pid: int) -> bool:
         return True
     except OSError:
         return False
+    return True
+
+
+def _windows_process_exists(pid: int) -> bool:
+    """Check PID liveness without using the POSIX-only os.kill(pid, 0) idiom."""
+    if pid <= 0:
+        return False
+
+    process_query_limited_information = 0x1000
+    error_access_denied = 5
+    error_invalid_parameter = 87
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    open_process.restype = ctypes.c_void_p
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+
+    ctypes.set_last_error(0)
+    handle = open_process(
+        process_query_limited_information,
+        False,
+        pid,
+    )
+    if handle:
+        close_handle(handle)
+        return True
+
+    error = ctypes.get_last_error()
+    if error == error_invalid_parameter:
+        return False
+    if error == error_access_denied:
+        # Access restrictions prove that a process object exists, even though
+        # this user cannot open it with query rights.
+        return True
+
+    # Unknown Win32 failures are treated as "possibly alive". Callers that
+    # perform destructive recovery will then require the stronger persisted
+    # executable/start-token identity before taking any action.
     return True
 
 
