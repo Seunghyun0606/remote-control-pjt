@@ -66,6 +66,7 @@ BOT_COMMANDS = (
     BotCommand("sync", "프로젝트별 Telegram Topic 동기화"),
     BotCommand("run", "프로젝트 Codex 작업 시작"),
     BotCommand("status", "현재 active Job 상태"),
+    BotCommand("qa", "최근 QA 상태 / QA 재실행"),
     BotCommand("queue", "실행 중/대기 Queue 관리"),
     BotCommand("jobs", "최근 Job 목록"),
     BotCommand("job", "특정 Job 상세 조회"),
