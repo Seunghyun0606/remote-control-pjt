@@ -32,6 +32,7 @@ from remote_control.projects.operations import (
     LocalProjectOperationExecutor,
 )
 from remote_control.projects.registry import ProjectRegistry
+from remote_control.qa import QAOrchestrator
 from remote_control.recovery.scheduler import RecoveryScheduler
 from remote_control.runners.codex import CodexRunner
 from remote_control.runners.hybrid import HybridAgentRunner
@@ -46,6 +47,7 @@ from remote_control.storage.repositories import (
     HostRepository,
     JobRepository,
     ProjectSessionRepository,
+    QARunRepository,
     ProjectWorkRepository,
     RecoveryRepository,
     RemoteExecutionRepository,
@@ -201,6 +203,7 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
         recovery = RecoveryRepository(db)
         remote_executions = RemoteExecutionRepository(db)
         project_work = ProjectWorkRepository(db)
+        qa_runs = QARunRepository(db)
         telegram_topics = TelegramProjectTopicRepository(db)
         telegram_bindings = TelegramMessageBindingRepository(db)
 
@@ -231,6 +234,16 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
             work=project_work,
             events=events,
         )
+        qa = QAOrchestrator(
+            runs=qa_runs,
+            events=events,
+            operations=project_operations,
+            enabled=settings.qa_enabled,
+            timeout_seconds=settings.qa_timeout_seconds,
+            screenshot_enabled=settings.qa_telegram_screenshots,
+            max_screenshots=settings.qa_telegram_max_screenshots,
+            artifact_max_bytes=settings.qa_artifact_max_bytes,
+        )
         manager = JobManager(
             projects=projects,
             jobs=JobRepository(db),
@@ -246,6 +259,7 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
             project_work=project_work,
             execution_leases=execution_leases,
             remote_executions=remote_executions,
+            qa=qa,
             progress_interval_seconds=settings.progress_interval_seconds,
             quota_retry_initial_seconds=settings.quota_retry_initial_seconds,
             quota_retry_max_seconds=settings.quota_retry_max_seconds,
