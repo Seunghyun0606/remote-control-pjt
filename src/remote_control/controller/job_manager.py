@@ -19,6 +19,7 @@ from remote_control.feedback import FeedbackPolicy, FeedbackThrottler
 from remote_control.hosts.registry import HostRegistry
 from remote_control.hosts.router import HostRouter, HostUnavailable
 from remote_control.human_gate import (
+    ApprovalOption,
     HumanGateRequest,
     extract_human_gate,
     extract_human_gate_from_text,
@@ -32,6 +33,7 @@ from remote_control.process_control import (
 )
 from remote_control.projects.adapters import NoProjectWork, ProjectAdapterRegistry
 from remote_control.projects.registry import ProjectRegistry
+from remote_control.qa import QAContractError, QAOrchestrator, QAOutcome
 from remote_control.recovery.models import RecoveryKind, RecoveryMode
 from remote_control.recovery.quota import (
     QuotaSignal,
@@ -59,6 +61,7 @@ from remote_control.transport.runner_ws import RunnerGateway
 
 Notifier = Callable[[str, str], Awaitable[None]]
 ApprovalNotifier = Callable[[str, ApprovalPrompt], Awaitable[None]]
+QAArtifactNotifier = Callable[[str, dict], Awaitable[None]]
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +111,7 @@ class JobManager:
         project_work: ProjectWorkRepository | None = None,
         execution_leases: ExecutionLeaseRegistry | None = None,
         remote_executions: RemoteExecutionRepository | None = None,
+        qa: QAOrchestrator | None = None,
         progress_interval_seconds: int = 300,
         quota_retry_initial_seconds: int = 1800,
         quota_retry_max_seconds: int = 7200,
@@ -128,6 +132,7 @@ class JobManager:
         self.project_work = project_work
         self.execution_leases = execution_leases
         self.remote_executions = remote_executions
+        self.qa = qa
         self.host_router = HostRouter(hosts) if hosts is not None else None
         self.feedback_policy = FeedbackPolicy()
         self.feedback_throttler = FeedbackThrottler(progress_interval_seconds)
@@ -144,6 +149,7 @@ class JobManager:
         self._job_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._notifiers: dict[str, Notifier] = {}
         self._approval_notifiers: dict[str, ApprovalNotifier] = {}
+        self._qa_artifact_notifiers: dict[str, QAArtifactNotifier] = {}
 
     async def validate_runner_registration(
         self,
@@ -215,6 +221,17 @@ class JobManager:
             self._approval_notifiers.pop(channel, None)
             return
         self._approval_notifiers[channel] = notifier
+
+    def set_qa_artifact_notifier(
+        self,
+        notifier: QAArtifactNotifier | None,
+        *,
+        channel: str = "telegram",
+    ) -> None:
+        if notifier is None:
+            self._qa_artifact_notifiers.pop(channel, None)
+            return
+        self._qa_artifact_notifiers[channel] = notifier
 
     async def create(
         self,
@@ -934,6 +951,11 @@ class JobManager:
             return None
         return await self.recovery.get(job_id)
 
+    async def qa_for(self, job_id: str):
+        if self.qa is None:
+            return None
+        return await self.qa.latest_for_job(job_id)
+
     async def pending_approvals_for_user(
         self,
         user_id: str,
@@ -1029,6 +1051,32 @@ class JobManager:
         previous_task = self._tasks.get(job.id)
         if previous_task is not None and not previous_task.done():
             await asyncio.shield(previous_task)
+
+        if prompt.approval_type == "qa_ui_review":
+            qa_run = await self.qa.latest_for_job(job.id) if self.qa is not None else None
+            rejected_ui = rejected or resolved.selected_option == "REJECT"
+            if qa_run is not None:
+                await self.qa.runs.update(
+                    qa_run.run_id,
+                    review_status="UI_REJECTED" if rejected_ui else "UI_APPROVED",
+                )
+            if rejected_ui:
+                await self.jobs.update(job.id, error="UI QA review rejected")
+                if self.sessions is not None:
+                    await self.sessions.mark(job.id, SessionStatus.IDLE)
+                await self._transition(job.id, JobState.FAILED)
+                if self.recovery is not None:
+                    await self.recovery.delete(job.id)
+                await self._notify(job.id, "❌ UI QA 검수가 거절되어 Job을 실패 처리했습니다.")
+                return resolved
+            await self._transition(job.id, JobState.RUNNING)
+            if self.sessions is not None:
+                await self.sessions.mark(job.id, SessionStatus.ACTIVE)
+            self._start_task(
+                job.id,
+                self._complete_after_qa(job.id, job.result),
+            )
+            return resolved
 
         instruction = _approval_instruction(
             prompt,
@@ -2565,8 +2613,7 @@ class JobManager:
                 )
                 return
 
-            completed = False
-            finalize_project_os = False
+            ready_to_finalize = False
             async with self._job_locks[job_id]:
                 current = await self.require(job_id)
                 if JobState(current.state) in {
@@ -2577,32 +2624,12 @@ class JobManager:
                     return
                 steering = self._drain_steering(job_id)
                 if steering is None:
-                    project = self.projects.get(current.project_id)
-                    adapter = (
-                        self.project_adapters.get(project)
-                        if self.project_adapters is not None
-                        else None
+                    await self.jobs.update(
+                        job_id,
+                        result=current_result.final_message,
+                        error=None,
                     )
-                    if adapter is not None and adapter.requires_submission:
-                        await self.jobs.update(
-                            job_id,
-                            result=current_result.final_message,
-                            error=None,
-                        )
-                        await self._transition(job_id, JobState.WAITING_AGENT)
-                        finalize_project_os = True
-                    else:
-                        await self.jobs.update(
-                            job_id,
-                            result=current_result.final_message,
-                            error=None,
-                        )
-                        if self.sessions is not None:
-                            await self.sessions.mark(job_id, SessionStatus.IDLE)
-                        await self._transition(job_id, JobState.COMPLETED)
-                        if self.recovery is not None:
-                            await self.recovery.delete(job_id)
-                        completed = True
+                    ready_to_finalize = True
                 else:
                     job = await self.require(job_id)
                     await self.events.append(
@@ -2613,20 +2640,11 @@ class JobManager:
                         payload={"instruction": steering},
                     )
 
-            if finalize_project_os:
+            if ready_to_finalize:
                 await self._ack_result_handle(job_id, result_handle)
-                await self._finalize_project_adapter(
+                await self._run_qa_then_finalize(
                     job_id,
                     current_result.final_message,
-                )
-                return
-
-            if completed:
-                await self._ack_result_handle(job_id, result_handle)
-                await self._notify(
-                    job_id,
-                    "✅ 작업이 완료되었습니다."
-                    + _optional_detail(current_result.final_message),
                 )
                 return
 
@@ -2641,6 +2659,186 @@ class JobManager:
             if next_result is None:
                 return
             current_result = next_result
+
+    async def _run_qa_then_finalize(
+        self,
+        job_id: str,
+        final_message: str | None,
+        *,
+        collect_only: bool = False,
+        reuse_run_id: str | None = None,
+    ) -> None:
+        job = await self.require(job_id)
+        if JobState(job.state) != JobState.RUNNING:
+            return
+        project = self.projects.get(job.project_id)
+        if job.assigned_host is None:
+            raise RuntimeError("QA execution requires an assigned host")
+
+        outcome: QAOutcome | None = None
+        if self.qa is not None:
+            if reuse_run_id is None and not collect_only:
+                await self._notify(job_id, "🧪 Automated QA started")
+            try:
+                outcome = await self.qa.execute(
+                    job_id=job.id,
+                    project_id=job.project_id,
+                    host_id=job.assigned_host,
+                    working_directory=Path(project.path_for(job.assigned_host)).expanduser(),
+                    reuse_run_id=reuse_run_id,
+                    collect_only=collect_only,
+                )
+            except ConnectionError as exc:
+                if self.recovery is None:
+                    await self._fail_qa(job_id, exc)
+                    return
+                await self._enter_host_wait(
+                    job_id,
+                    mode=RecoveryMode.QA,
+                    error=str(exc),
+                    assigned_host=job.assigned_host,
+                    resume_instruction=None,
+                )
+                return
+            except (QAContractError, Exception) as exc:
+                await self._fail_qa(job_id, exc)
+                return
+
+        if outcome is not None and outcome.supported and outcome.result is not None:
+            await self._report_qa(job_id, outcome)
+            status = outcome.result["status"]
+            if status == "FAIL":
+                detail = self._qa_failure_detail(outcome.result)
+                await self.jobs.update(job_id, error=detail)
+                if self.sessions is not None:
+                    await self.sessions.mark(job_id, SessionStatus.IDLE)
+                await self._transition(job_id, JobState.FAILED)
+                if self.recovery is not None:
+                    await self.recovery.delete(job_id)
+                return
+            if status == "UI_REVIEW_REQUIRED":
+                request = HumanGateRequest(
+                    approval_type="qa_ui_review",
+                    question="자동 QA는 통과했지만 UI 시각 검수가 필요합니다.",
+                    details=(
+                        f"QA Run: {outcome.run.run_id if outcome.run else '-'}\n"
+                        "Telegram으로 전송된 screenshot을 확인한 뒤 승인 또는 거절하세요."
+                    ),
+                    options=(
+                        ApprovalOption("APPROVE", "UI 승인"),
+                        ApprovalOption("REJECT", "UI 거절"),
+                    ),
+                )
+                await self._enter_human_gate(job_id, request)
+                return
+
+        await self._complete_after_qa(job_id, final_message)
+
+    async def _complete_after_qa(
+        self,
+        job_id: str,
+        final_message: str | None,
+    ) -> None:
+        current = await self.require(job_id)
+        project = self.projects.get(current.project_id)
+        adapter = (
+            self.project_adapters.get(project)
+            if self.project_adapters is not None
+            else None
+        )
+        if adapter is not None and adapter.requires_submission:
+            if JobState(current.state) == JobState.RUNNING:
+                await self._transition(job_id, JobState.WAITING_AGENT)
+            await self._finalize_project_adapter(job_id, final_message)
+            return
+
+        if self.sessions is not None:
+            await self.sessions.mark(job_id, SessionStatus.IDLE)
+        if JobState(current.state) == JobState.WAITING_HUMAN:
+            await self._transition(job_id, JobState.RUNNING)
+        await self._transition(job_id, JobState.COMPLETED)
+        if self.recovery is not None:
+            await self.recovery.delete(job_id)
+        await self._notify(
+            job_id,
+            "✅ 작업이 완료되었습니다." + _optional_detail(final_message),
+        )
+
+    async def _fail_qa(self, job_id: str, exc: Exception) -> None:
+        await self.jobs.update(job_id, error=f"Automated QA failed: {exc}")
+        if self.sessions is not None:
+            await self.sessions.mark(job_id, SessionStatus.IDLE)
+        current = await self.require(job_id)
+        if JobState(current.state) == JobState.WAITING_HUMAN:
+            await self._transition(job_id, JobState.RUNNING)
+        await self._transition(job_id, JobState.FAILED)
+        if self.recovery is not None:
+            await self.recovery.delete(job_id)
+        await self._notify(job_id, f"❌ Automated QA orchestration failed\n\n{exc}")
+
+    async def _report_qa(self, job_id: str, outcome: QAOutcome) -> None:
+        assert outcome.result is not None
+        result = outcome.result
+        run = outcome.run
+        if run is not None and run.report_sent_at is None:
+            icon = {"PASS": "✅", "FAIL": "❌", "UI_REVIEW_REQUIRED": "👀"}[result["status"]]
+            message = (
+                f"{icon} Automated QA {result['status']}\n\n"
+                f"Run: {result['run_id']}\n"
+                f"Preflight: {result['preflight']}\n"
+                f"Build: {result['build']}\n"
+                f"Launch: {result['launch']}\n"
+                f"Smoke: {result['smoke']}\n"
+                f"Functional: {result['functional']}\n"
+                f"UI: {result['ui']}\n"
+                f"Artifacts: {len(result['artifacts'])}"
+            )
+            await self._notify(job_id, message)
+            await self.qa.runs.update(
+                run.run_id,
+                report_sent_at=datetime.now(timezone.utc),
+            )
+
+        if (
+            run is not None
+            and run.artifacts_sent_at is None
+            and outcome.screenshots
+        ):
+            notifier = self._qa_artifact_notifiers.get(
+                (await self.require(job_id)).requested_by_channel
+            )
+            if notifier is not None:
+                job = await self.require(job_id)
+                payload = {
+                    "job_id": job.id,
+                    "project_id": job.project_id,
+                    "run_id": result["run_id"],
+                    "status": result["status"],
+                    "artifacts": list(outcome.screenshots),
+                }
+                async def send() -> None:
+                    await notifier(job.requested_by_user, payload)
+                delivered = await self._deliver_notification(
+                    job,
+                    notification_type="qa_artifacts",
+                    send=send,
+                )
+                if delivered:
+                    await self.qa.runs.update(
+                        run.run_id,
+                        artifacts_sent_at=datetime.now(timezone.utc),
+                    )
+
+    @staticmethod
+    def _qa_failure_detail(result: dict) -> str:
+        errors = result.get("errors") or []
+        if not errors:
+            return "Automated QA failed"
+        first = errors[0] if isinstance(errors[0], dict) else {}
+        code = first.get("code") or "QA_FAILED"
+        message = first.get("message") or "Automated QA failed"
+        stage = first.get("stage") or "unknown"
+        return f"{code} at {stage}: {message}"
 
     async def _resume_or_fallback(
         self,
