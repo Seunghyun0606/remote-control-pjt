@@ -33,7 +33,7 @@ from remote_control.process_control import (
 )
 from remote_control.projects.adapters import NoProjectWork, ProjectAdapterRegistry
 from remote_control.projects.registry import ProjectRegistry
-from remote_control.qa import QAContractError, QAOrchestrator, QAOutcome
+from remote_control.qa import QAOrchestrator, QAOutcome
 from remote_control.recovery.models import RecoveryKind, RecoveryMode
 from remote_control.recovery.quota import (
     QuotaSignal,
