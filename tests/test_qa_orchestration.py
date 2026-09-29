@@ -21,6 +21,56 @@ from remote_control.storage.repositories import (
 
 
 def _result(run_id: str, *, status: str = "PASS") -> dict:
+    warnings = 1 if status == "PASS_WITH_WARNINGS" else 0
+    failed = 1 if status == "FAIL" else 0
+    gates = 1 if status == "HUMAN_GATE_REQUIRED" else 0
+    scenario_status = (
+        "FAIL" if status == "FAIL"
+        else "WARN" if status == "PASS_WITH_WARNINGS"
+        else "HUMAN_GATE_REQUIRED" if status == "HUMAN_GATE_REQUIRED"
+        else "PASS"
+    )
+    result = {
+        "schemaVersion": "2.0",
+        "runId": run_id,
+        "project": {"id": "demo", "name": "Demo"},
+        "status": status,
+        "startedAt": "2026-09-29T00:00:00Z",
+        "finishedAt": "2026-09-29T00:00:01Z",
+        "summary": {
+            "total": 1,
+            "passed": 1 if status == "PASS" else 0,
+            "failed": failed,
+            "warnings": warnings,
+            "skipped": 0,
+            "humanGates": gates,
+        },
+        "stages": [{"id": "functional", "status": scenario_status}],
+        "scenarios": [{"id": "main-flow", "status": scenario_status, "required": True}],
+        "artifacts": [],
+        "visualReviews": [],
+        "errors": [],
+        "nextAction": {
+            "PASS": "NONE",
+            "PASS_WITH_WARNINGS": "REVIEW_WARNINGS",
+            "FAIL": "FIX_AND_RETRY",
+            "HUMAN_GATE_REQUIRED": "HUMAN_GATE",
+        }[status],
+    }
+    if status == "FAIL":
+        result["errors"] = [
+            {
+                "code": "ASSERTION_FAILED",
+                "message": "expected work state",
+                "stage": "functional",
+                "kind": "test",
+                "retryable": True,
+            }
+        ]
+    return result
+
+
+def _legacy_result(run_id: str, *, status: str = "PASS") -> dict:
     result = {
         "schema_version": "1.0",
         "run_id": run_id,
@@ -43,19 +93,12 @@ def _result(run_id: str, *, status: str = "PASS") -> dict:
     if status == "FAIL":
         result["functional"] = "FAIL"
         result["next_action"] = "FIX_AND_RETRY"
-        result["errors"] = [
-            {
-                "code": "ASSERTION_FAILED",
-                "message": "expected work state",
-                "stage": "functional",
-                "kind": "test",
-                "retryable": True,
-            }
-        ]
+        result["errors"] = [{"code": "ASSERTION_FAILED", "message": "failed", "stage": "functional"}]
     elif status == "UI_REVIEW_REQUIRED":
         result["ui"] = "REVIEW_REQUIRED"
         result["next_action"] = "REQUEST_UI_REVIEW"
     return result
+
 
 
 def test_validate_project_os_qa_contract() -> None:
@@ -66,7 +109,14 @@ def test_validate_project_os_qa_contract() -> None:
 def test_validate_rejects_unsafe_artifact_path() -> None:
     payload = _result("QA-test-002")
     payload["artifacts"] = [
-        {"type": "screenshot", "name": "bad", "path": "../secret.png"}
+        {
+            "type": "screenshot",
+            "name": "bad",
+            "path": "../secret.png",
+            "caption": "bad",
+            "kind": "failure",
+            "priority": "failure",
+        }
     ]
     with pytest.raises(QAContractError, match="unsafe QA artifact path"):
         validate_result(payload, expected_run_id="QA-test-002")
@@ -81,7 +131,7 @@ async def test_local_qa_collect_reads_only_registered_artifacts(tmp_path: Path) 
     screenshot_dir.mkdir(parents=True)
     image_bytes = b"not-a-real-png-but-a-file"
     (screenshot_dir / "main.png").write_bytes(image_bytes)
-    payload = _result(run_id)
+    payload = _legacy_result(run_id)
     payload["artifacts"] = [
         {
             "type": "screenshot",
@@ -111,7 +161,7 @@ async def test_local_qa_collect_rejects_workspace_escape(tmp_path: Path) -> None
     run_id = "QA-local-002"
     run_dir = root / ".qa" / "runs" / run_id
     run_dir.mkdir(parents=True)
-    payload = _result(run_id)
+    payload = _legacy_result(run_id)
     payload["artifacts"] = [
         {"type": "screenshot", "name": "escape", "path": "../escape.png"}
     ]
@@ -145,8 +195,9 @@ class _FakeQAOperations:
         if operation == "qa_contract":
             return {
                 "supported": True,
-                "entrypoint": "scripts/qa.ps1",
-                "schema_version": "1.0",
+                "entrypoint": ".qa/manifest.yaml",
+                "schema_version": "2.0",
+                "contract_version": "2.0",
             }
         assert payload is not None
         run_id = str(payload["run_id"])
@@ -155,7 +206,12 @@ class _FakeQAOperations:
             "result": result,
             "screenshots": [],
             "result_path": f".qa/runs/{run_id}/result.json",
-            "exit_code": {"PASS": 0, "FAIL": 1, "UI_REVIEW_REQUIRED": 2}[self.status],
+            "exit_code": {
+                "PASS": 0,
+                "PASS_WITH_WARNINGS": 0,
+                "FAIL": 1,
+                "HUMAN_GATE_REQUIRED": 2,
+            }[self.status],
         }
 
 
@@ -196,6 +252,46 @@ async def test_job_completion_waits_for_qa_pass(project_registry, database) -> N
     assert qa_run is not None
     assert qa_run.status == "PASS"
     assert qa_run.phase == "QA_DONE"
+
+
+@pytest.mark.asyncio
+async def test_pass_with_warnings_completes_job_and_persists_warning_count(
+    project_registry,
+    database,
+) -> None:
+    events = EventRepository(database)
+    qa_runs = QARunRepository(database)
+    qa = QAOrchestrator(
+        runs=qa_runs,
+        events=events,
+        operations=_FakeQAOperations("PASS_WITH_WARNINGS"),
+    )
+    manager = JobManager(
+        projects=project_registry,
+        jobs=JobRepository(database),
+        events=events,
+        runner=FakeAgentRunner(),
+        local_host_id="lightsail-main",
+        qa=qa,
+    )
+    job = await manager.create(
+        project_id="demo",
+        instruction="do the work",
+        requested_by_channel="test",
+        requested_by_user="u1",
+    )
+    for _ in range(200):
+        current = await manager.require(job.id)
+        if current.state in {"COMPLETED", "FAILED"}:
+            await manager.wait_until_idle(job.id)
+            break
+        await asyncio.sleep(0.01)
+    current = await manager.require(job.id)
+    qa_run = await qa_runs.latest_for_job(job.id)
+    assert current.state == "COMPLETED"
+    assert qa_run is not None
+    assert qa_run.status == "PASS_WITH_WARNINGS"
+    assert qa_run.warning_count == 1
 
 
 @pytest.mark.asyncio
@@ -254,8 +350,10 @@ async def test_qa_contract_is_optional_without_entrypoint(tmp_path: Path) -> Non
     )
     assert contract == {
         "supported": False,
+        "contract_version": None,
+        "schema_version": None,
         "entrypoint": None,
-        "schema_version": "1.0",
+        "manifest": None,
     }
 
 
@@ -326,7 +424,7 @@ async def test_ui_review_uses_existing_human_gate_and_approval(
     qa = QAOrchestrator(
         runs=qa_runs,
         events=events,
-        operations=_FakeQAOperations("UI_REVIEW_REQUIRED"),
+        operations=_FakeQAOperations("HUMAN_GATE_REQUIRED"),
     )
     approvals = ApprovalRegistry(
         approvals=ApprovalRepository(database),
@@ -357,7 +455,7 @@ async def test_ui_review_uses_existing_human_gate_and_approval(
         await asyncio.sleep(0.01)
 
     assert approval is not None
-    assert approval.approval_type == "qa_ui_review"
+    assert approval.approval_type == "qa_human_gate"
     await manager.respond_approval(
         approval.id,
         user_id="u1",
@@ -374,7 +472,7 @@ async def test_ui_review_uses_existing_human_gate_and_approval(
     qa_run = await qa_runs.latest_for_job(job.id)
     assert current.state == "COMPLETED"
     assert qa_run is not None
-    assert qa_run.status == "UI_REVIEW_REQUIRED"
+    assert qa_run.status == "HUMAN_GATE_REQUIRED"
     assert qa_run.review_status == "UI_APPROVED"
 
 
@@ -385,7 +483,7 @@ async def test_ui_review_rejection_fails_job(project_registry, database) -> None
     qa = QAOrchestrator(
         runs=qa_runs,
         events=events,
-        operations=_FakeQAOperations("UI_REVIEW_REQUIRED"),
+        operations=_FakeQAOperations("HUMAN_GATE_REQUIRED"),
     )
     approvals = ApprovalRegistry(
         approvals=ApprovalRepository(database),
