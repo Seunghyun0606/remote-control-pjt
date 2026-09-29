@@ -399,12 +399,23 @@ class ControllerService:
             )
             work = await self.jobs.project_work_for(job.id)
             recovery = await self.jobs.recovery_for(job.id)
+            qa_run = await self.jobs.qa_for(job.id)
             task_line = f"\nTask: {work.task_id}" if work and work.task_id else ""
             adapter_line = f"\nAdapter: {work.adapter}" if work else ""
+            qa_line = ""
+            if qa_run is not None:
+                qa_line = (
+                    f"\nQA status: {qa_run.status or qa_run.phase}"
+                    f"\nQA run: {qa_run.run_id}"
+                    f"\nQA warnings: {qa_run.warning_count}"
+                    f"\nQA artifacts: {qa_run.artifact_count}"
+                    f"\nQA result: {qa_run.result_path or '-'}"
+                    f"\nQA review: {qa_run.review_status or '-'}"
+                )
             return (
                 f"{job.id}\nProject: {job.project_id}\nState: {job.state}\n"
                 f"Host: {job.assigned_host or '-'}\nSession: {job.external_session_id or '-'}"
-                f"{adapter_line}{task_line}"
+                f"{adapter_line}{task_line}{qa_line}"
                 f"\nError: {job.error or '-'}"
                 f"{_recovery_detail(recovery)}"
             )
