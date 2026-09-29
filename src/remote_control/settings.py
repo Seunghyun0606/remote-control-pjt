@@ -125,6 +125,34 @@ class Settings(_BaseSettings):
         default=True,
         validation_alias="REMOTE_CONTROL_WEB_UI_ENABLED",
     )
+    qa_enabled: bool = Field(
+        default=True,
+        validation_alias="QA_ENABLED",
+    )
+    qa_timeout_seconds: int = Field(
+        default=900,
+        validation_alias="QA_TIMEOUT_SECONDS",
+    )
+    qa_telegram_screenshots: bool = Field(
+        default=True,
+        validation_alias="QA_TELEGRAM_SCREENSHOTS",
+    )
+    qa_telegram_max_screenshots: int = Field(
+        default=6,
+        validation_alias="QA_TELEGRAM_MAX_SCREENSHOTS",
+    )
+    qa_artifact_max_bytes: int = Field(
+        default=8388608,
+        validation_alias="QA_ARTIFACT_MAX_BYTES",
+    )
+    qa_auto_fix: bool = Field(
+        default=False,
+        validation_alias="QA_AUTO_FIX",
+    )
+    qa_auto_fix_max_attempts: int = Field(
+        default=2,
+        validation_alias="QA_AUTO_FIX_MAX_ATTEMPTS",
+    )
 
     @property
     def resolved_home_path(self) -> Path:
