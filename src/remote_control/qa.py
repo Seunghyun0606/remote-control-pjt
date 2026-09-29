@@ -15,8 +15,6 @@ from remote_control.storage.repositories import EventRepository, QARunRepository
 
 QA_SCHEMA_VERSION = "1.0"
 _RUN_ID = re.compile(r"^QA-[A-Za-z0-9][A-Za-z0-9._-]*$")
-_TERMINAL_PHASES = {"QA_DONE", "QA_FAILED", "QA_REVIEWING"}
-
 
 class QAContractError(RuntimeError):
     pass
@@ -53,29 +51,80 @@ def validate_result(payload: object, *, expected_run_id: str) -> dict[str, Any]:
         )
     if payload.get("run_id") != expected_run_id or not _RUN_ID.fullmatch(expected_run_id):
         raise QAContractError("QA result run_id does not match requested run")
+    project = payload.get("project")
+    if not isinstance(project, str) or not project.strip():
+        raise QAContractError("QA result project must be a non-empty string")
+    for field in ("started_at", "finished_at"):
+        value = payload.get(field)
+        if not isinstance(value, str):
+            raise QAContractError(f"QA result {field} must be an ISO timestamp")
+        try:
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise QAContractError(f"QA result {field} must be an ISO timestamp") from exc
+
     status = payload.get("status")
     if status not in {"PASS", "FAIL", "UI_REVIEW_REQUIRED"}:
         raise QAContractError(f"invalid QA status: {status!r}")
+    next_action = payload.get("next_action")
+    if next_action not in {"NONE", "FIX_AND_RETRY", "REQUEST_UI_REVIEW"}:
+        raise QAContractError(f"invalid QA next_action: {next_action!r}")
+
+    automated_fields = (
+        "preflight", "build", "launch", "smoke", "functional",
+        "artifact_collection", "cleanup",
+    )
     automated = {"PASS", "FAIL", "SKIPPED"}
-    for field in ("preflight", "build", "launch", "smoke", "functional", "artifact_collection", "cleanup"):
+    for field in automated_fields:
         if payload.get(field) not in automated:
             raise QAContractError(f"invalid QA stage {field}: {payload.get(field)!r}")
     if payload.get("ui") not in {"PASS", "FAIL", "SKIPPED", "REVIEW_REQUIRED"}:
         raise QAContractError(f"invalid QA ui stage: {payload.get('ui')!r}")
-    if not isinstance(payload.get("errors"), list) or not isinstance(payload.get("artifacts"), list):
+
+    errors = payload.get("errors")
+    artifacts = payload.get("artifacts")
+    if not isinstance(errors, list) or not isinstance(artifacts, list):
         raise QAContractError("QA errors/artifacts must be arrays")
-    if status == "FAIL" and not payload["errors"]:
+    for error in errors:
+        _validate_error(error)
+    for artifact in artifacts:
+        _validate_artifact(artifact)
+
+    if status == "FAIL" and not errors:
         raise QAContractError("FAIL result must contain at least one error")
     if status == "PASS":
-        failed = [field for field in (*tuple(f for f in ("preflight","build","launch","smoke","functional","artifact_collection","cleanup")), "ui") if payload.get(field) in {"FAIL", "REVIEW_REQUIRED"}]
+        failed = [
+            field
+            for field in (*automated_fields, "ui")
+            if payload.get(field) in {"FAIL", "REVIEW_REQUIRED"}
+        ]
         if failed:
             raise QAContractError(f"PASS result contains non-passing stages: {failed}")
+        if next_action != "NONE":
+            raise QAContractError("PASS result requires next_action=NONE")
     if status == "UI_REVIEW_REQUIRED":
-        if payload.get("ui") != "REVIEW_REQUIRED" or payload.get("next_action") != "REQUEST_UI_REVIEW":
-            raise QAContractError("UI_REVIEW_REQUIRED requires ui=REVIEW_REQUIRED and next_action=REQUEST_UI_REVIEW")
-    for artifact in payload["artifacts"]:
-        _validate_artifact(artifact)
+        if payload.get("ui") != "REVIEW_REQUIRED" or next_action != "REQUEST_UI_REVIEW":
+            raise QAContractError(
+                "UI_REVIEW_REQUIRED requires ui=REVIEW_REQUIRED "
+                "and next_action=REQUEST_UI_REVIEW"
+            )
     return payload
+
+
+def _validate_error(error: object) -> None:
+    if not isinstance(error, dict):
+        raise QAContractError("QA error must be an object")
+    for field in ("code", "message", "stage"):
+        if not isinstance(error.get(field), str) or not error[field]:
+            raise QAContractError(f"QA error {field} is required")
+    kind = error.get("kind")
+    if kind is not None and kind not in {
+        "test", "environment", "tooling", "configuration", "unknown"
+    }:
+        raise QAContractError(f"invalid QA error kind: {kind!r}")
+    retryable = error.get("retryable")
+    if retryable is not None and not isinstance(retryable, bool):
+        raise QAContractError("QA error retryable must be boolean")
 
 
 def _validate_artifact(artifact: object) -> None:
@@ -106,6 +155,7 @@ class QAOrchestrator:
         screenshot_enabled: bool = True,
         max_screenshots: int = 6,
         artifact_max_bytes: int = 8 * 1024 * 1024,
+        artifact_total_max_bytes: int = 8 * 1024 * 1024,
     ) -> None:
         self.runs = runs
         self.events = events
@@ -115,6 +165,7 @@ class QAOrchestrator:
         self.screenshot_enabled = screenshot_enabled
         self.max_screenshots = max(max_screenshots, 0)
         self.artifact_max_bytes = max(artifact_max_bytes, 1)
+        self.artifact_total_max_bytes = max(artifact_total_max_bytes, 1)
 
     async def latest_for_job(self, job_id: str) -> QARunRecord | None:
         return await self.runs.latest_for_job(job_id)
@@ -178,6 +229,7 @@ class QAOrchestrator:
                 "timeout_seconds": self.timeout_seconds,
                 "max_screenshots": self.max_screenshots if self.screenshot_enabled else 0,
                 "artifact_max_bytes": self.artifact_max_bytes,
+                "artifact_total_max_bytes": self.artifact_total_max_bytes,
             },
         )
         result = validate_result(response.get("result"), expected_run_id=run_id)
