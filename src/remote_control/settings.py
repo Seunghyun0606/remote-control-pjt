@@ -145,6 +145,10 @@ class Settings(_BaseSettings):
         default=8388608,
         validation_alias="QA_ARTIFACT_MAX_BYTES",
     )
+    qa_artifact_total_max_bytes: int = Field(
+        default=8388608,
+        validation_alias="QA_ARTIFACT_TOTAL_MAX_BYTES",
+    )
     qa_auto_fix: bool = Field(
         default=False,
         validation_alias="QA_AUTO_FIX",
