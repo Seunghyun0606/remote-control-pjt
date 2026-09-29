@@ -191,6 +191,34 @@ class ProjectWorkRecord(Base):
     )
 
 
+class QARunRecord(Base):
+    __tablename__ = "qa_runs"
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(64), index=True)
+    project_id: Mapped[str] = mapped_column(String(128), index=True)
+    host_id: Mapped[str] = mapped_column(String(128), index=True)
+    phase: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    result_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failed_scenarios_json: Mapped[str] = mapped_column(Text, default="[]")
+    warning_count: Mapped[int] = mapped_column(Integer, default=0)
+    artifact_count: Mapped[int] = mapped_column(Integer, default=0)
+    artifacts_json: Mapped[str] = mapped_column(Text, default="[]")
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    report_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    artifacts_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
 class TelegramProjectTopicRecord(Base):
     __tablename__ = "telegram_project_topics"
 
