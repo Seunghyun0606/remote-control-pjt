@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import re
+import shlex
 import tempfile
 from pathlib import Path
 from typing import Any, Protocol
@@ -115,47 +116,89 @@ class LocalProjectOperationExecutor:
         raise ProjectOperationError(f"unsupported project operation: {operation}")
 
     def _qa_contract(self, root: Path) -> dict[str, Any]:
+        manifest_path = root / ".qa" / "manifest.yaml"
+        if manifest_path.is_file():
+            manifest = _load_qa_manifest(manifest_path)
+            return {
+                "supported": True,
+                "contract_version": "2.0",
+                "schema_version": "2.0",
+                "entrypoint": ".qa/manifest.yaml",
+                "manifest": manifest,
+            }
+
         entrypoint = root / "scripts" / "qa.ps1"
         return {
             "supported": entrypoint.is_file(),
+            "contract_version": "1.0" if entrypoint.is_file() else None,
+            "schema_version": "1.0" if entrypoint.is_file() else None,
             "entrypoint": "scripts/qa.ps1" if entrypoint.is_file() else None,
-            "schema_version": "1.0",
+            "manifest": None,
         }
 
     async def _qa_execute(self, root: Path, data: dict[str, Any]) -> dict[str, Any]:
         run_id = _qa_run_id(data.get("run_id"))
-        timeout_seconds = _positive_int(data.get("timeout_seconds"), "timeout_seconds", 900)
-        entrypoint = root / "scripts" / "qa.ps1"
-        if not entrypoint.is_file():
-            raise ProjectOperationError("Project OS QA entrypoint not found: scripts/qa.ps1")
+        contract = self._qa_contract(root)
+        if not contract["supported"]:
+            raise ProjectOperationError("Project OS QA contract not found")
 
-        shell_name = "powershell.exe" if os.name == "nt" else "pwsh"
-        try:
-            resolution = resolve_executable(shell_name)
-        except ExecutableResolutionError:
-            if os.name != "nt":
-                try:
-                    resolution = resolve_executable("powershell")
-                except ExecutableResolutionError as exc:
-                    raise ProjectOperationError(
-                        "PowerShell is required to run Project OS scripts/qa.ps1"
-                    ) from exc
-            else:
-                raise
-        args = [
-            "-NoProfile",
-            "-NonInteractive",
-        ]
-        if os.name == "nt":
-            args.extend(["-ExecutionPolicy", "Bypass"])
-        args.extend(["-File", str(entrypoint), "-RunId", run_id])
-        process = await asyncio.create_subprocess_exec(
-            *resolution.build_command(args),
-            cwd=str(root),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            **subprocess_group_kwargs(),
-        )
+        if contract["contract_version"] == "2.0":
+            manifest = contract["manifest"]
+            assert isinstance(manifest, dict)
+            qa = manifest["qa"]
+            commands = qa["command"]
+            command = commands.get("windows" if os.name == "nt" else "unix")
+            if not isinstance(command, str) or not command.strip():
+                raise ProjectOperationError(
+                    f"QA manifest does not define a command for {'windows' if os.name == 'nt' else 'unix'}"
+                )
+            manifest_timeout = qa.get("timeoutSeconds")
+            requested_timeout = _positive_int(
+                data.get("timeout_seconds"), "timeout_seconds", 900
+            )
+            timeout_seconds = (
+                min(requested_timeout, manifest_timeout)
+                if isinstance(manifest_timeout, int) and manifest_timeout > 0
+                else requested_timeout
+            )
+            argv = _manifest_command_argv(root, command, run_id=run_id)
+            process = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=str(root),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                **subprocess_group_kwargs(),
+            )
+        else:
+            timeout_seconds = _positive_int(
+                data.get("timeout_seconds"), "timeout_seconds", 900
+            )
+            entrypoint = root / "scripts" / "qa.ps1"
+            shell_name = "powershell.exe" if os.name == "nt" else "pwsh"
+            try:
+                resolution = resolve_executable(shell_name)
+            except ExecutableResolutionError:
+                if os.name != "nt":
+                    try:
+                        resolution = resolve_executable("powershell")
+                    except ExecutableResolutionError as exc:
+                        raise ProjectOperationError(
+                            "PowerShell is required to run legacy Project OS scripts/qa.ps1"
+                        ) from exc
+                else:
+                    raise
+            args = ["-NoProfile", "-NonInteractive"]
+            if os.name == "nt":
+                args.extend(["-ExecutionPolicy", "Bypass"])
+            args.extend(["-File", str(entrypoint), "-RunId", run_id])
+            process = await asyncio.create_subprocess_exec(
+                *resolution.build_command(args),
+                cwd=str(root),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                **subprocess_group_kwargs(),
+            )
+
         try:
             stdout_raw, stderr_raw = await asyncio.wait_for(
                 process.communicate(), timeout=timeout_seconds
@@ -188,11 +231,25 @@ class LocalProjectOperationExecutor:
             "artifact_total_max_bytes",
             8 * 1024 * 1024,
         )
-        run_dir = (root / ".qa" / "runs" / run_id).resolve()
-        result_path = run_dir / "result.json"
+        contract = self._qa_contract(root)
+        if not contract["supported"]:
+            raise ProjectOperationError("Project OS QA contract not found")
+
+        if contract["contract_version"] == "2.0":
+            manifest = contract["manifest"]
+            assert isinstance(manifest, dict)
+            result_template = manifest["artifacts"]["result"]
+            result_relative = _substitute_run_id(result_template, run_id)
+            result_path = _safe_workspace_relative_path(root, result_relative)
+            schema_version = "2.0"
+        else:
+            result_relative = f".qa/runs/{run_id}/result.json"
+            result_path = _safe_workspace_relative_path(root, result_relative)
+            schema_version = "1.0"
+
         if not result_path.is_file():
             raise ProjectOperationError(
-                f"QA result.json was not produced: .qa/runs/{run_id}/result.json"
+                f"QA result.json was not produced: {result_relative}"
             )
         try:
             result = json.loads(result_path.read_text(encoding="utf-8-sig"))
@@ -200,29 +257,60 @@ class LocalProjectOperationExecutor:
             raise ProjectOperationError(f"malformed QA result.json: {exc}") from exc
         if not isinstance(result, dict):
             raise ProjectOperationError("QA result.json must contain a JSON object")
-        if result.get("schema_version") != "1.0":
-            raise ProjectOperationError(
-                f"Unsupported QA schema_version: {result.get('schema_version')!r}; supported=1.0"
-            )
-        if result.get("run_id") != run_id:
-            raise ProjectOperationError("QA result run_id does not match requested run")
 
-        screenshots: list[dict[str, Any]] = []
-        screenshot_bytes = 0
+        if schema_version == "2.0":
+            if result.get("schemaVersion") != "2.0":
+                raise ProjectOperationError(
+                    f"Unsupported QA schemaVersion: {result.get('schemaVersion')!r}; supported=2.0"
+                )
+            if result.get("runId") != run_id:
+                raise ProjectOperationError("QA result runId does not match requested run")
+        else:
+            if result.get("schema_version") != "1.0":
+                raise ProjectOperationError(
+                    f"Unsupported QA schema_version: {result.get('schema_version')!r}; supported=1.0"
+                )
+            if result.get("run_id") != run_id:
+                raise ProjectOperationError("QA result run_id does not match requested run")
+
         artifacts = result.get("artifacts")
         if not isinstance(artifacts, list):
             raise ProjectOperationError("QA result artifacts must be an array")
-        for artifact in artifacts:
+
+        candidates: list[tuple[tuple[int, int, int], dict[str, Any], Path]] = []
+        for index, artifact in enumerate(artifacts):
             if not isinstance(artifact, dict):
                 raise ProjectOperationError("QA artifact entry must be an object")
             raw_path = artifact.get("path")
             if not isinstance(raw_path, str):
                 raise ProjectOperationError("QA artifact path must be a string")
-            artifact_path = _safe_qa_artifact_path(run_dir, raw_path)
+            artifact_path = (
+                _safe_workspace_relative_path(root, raw_path)
+                if schema_version == "2.0"
+                else _safe_legacy_qa_artifact_path(root, run_id, raw_path)
+            )
             if not artifact_path.is_file():
                 raise ProjectOperationError(f"QA artifact not found: {raw_path}")
-            if artifact.get("type") != "screenshot" or len(screenshots) >= max_screenshots:
+            if artifact.get("type") != "screenshot":
                 continue
+
+            priority = artifact.get("priority") if schema_version == "2.0" else None
+            kind = artifact.get("kind") if schema_version == "2.0" else None
+            priority_rank = {"failure": 0, "important": 1, "normal": 2}.get(priority, 2)
+            kind_rank = {
+                "failure": 0,
+                "result": 1,
+                "checkpoint": 2,
+                "initial": 3,
+                "visual_diff": 4,
+            }.get(kind, 5)
+            candidates.append(((priority_rank, kind_rank, index), artifact, artifact_path))
+
+        candidates.sort(key=lambda item: item[0])
+        screenshots: list[dict[str, Any]] = []
+        screenshot_bytes = 0
+        for _rank, artifact, artifact_path in candidates[:max_screenshots]:
+            raw_path = str(artifact["path"])
             if artifact_path.suffix.casefold() not in {".png", ".jpg", ".jpeg", ".webp"}:
                 raise ProjectOperationError(
                     f"unsupported screenshot file type: {artifact_path.suffix}"
@@ -242,9 +330,14 @@ class LocalProjectOperationExecutor:
                 {
                     "name": str(artifact.get("name") or artifact_path.name),
                     "path": raw_path,
-                    "scenario": artifact.get("scenario"),
-                    "description": artifact.get("description"),
-                    "media_type": artifact.get("media_type") or _image_media_type(artifact_path),
+                    "scenario": artifact.get("scenarioId") or artifact.get("scenario"),
+                    "description": artifact.get("caption") or artifact.get("description"),
+                    "caption": artifact.get("caption"),
+                    "kind": artifact.get("kind"),
+                    "priority": artifact.get("priority"),
+                    "media_type": artifact.get("mediaType")
+                    or artifact.get("media_type")
+                    or _image_media_type(artifact_path),
                     "size_bytes": size,
                     "data_base64": base64.b64encode(artifact_path.read_bytes()).decode("ascii"),
                 }
@@ -252,11 +345,12 @@ class LocalProjectOperationExecutor:
         return {
             "result": result,
             "screenshots": screenshots,
-            "result_path": f".qa/runs/{run_id}/result.json",
+            "result_path": result_relative,
             "exit_code": None,
+            "contract_version": schema_version,
         }
 
-    async def _git_snapshot(self, root: Path) -> dict[str, Any]:
+    async def _git_snapshot    async def _git_snapshot(self, root: Path) -> dict[str, Any]:
         branch = await self._run(
             root,
             [self.git_executable, "branch", "--show-current"],
@@ -443,7 +537,101 @@ def _nonnegative_int(value: object, field: str, default: int) -> int:
     return value
 
 
-def _safe_qa_artifact_path(run_dir: Path, raw_path: str) -> Path:
+def _load_qa_manifest(path: Path) -> dict[str, Any]:
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8-sig"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise ProjectOperationError(f"malformed QA manifest: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ProjectOperationError("QA manifest must contain a mapping")
+    if payload.get("schemaVersion") != "2.0":
+        raise ProjectOperationError(
+            f"Unsupported QA manifest schemaVersion: {payload.get('schemaVersion')!r}; supported=2.0"
+        )
+    qa = payload.get("qa")
+    artifacts = payload.get("artifacts")
+    if not isinstance(qa, dict) or not isinstance(artifacts, dict):
+        raise ProjectOperationError("QA manifest requires qa and artifacts mappings")
+    command = qa.get("command")
+    stages = qa.get("stages")
+    if not isinstance(command, dict) or not command:
+        raise ProjectOperationError("QA manifest qa.command must be a non-empty mapping")
+    if not isinstance(stages, list) or not stages or not all(isinstance(x, str) and x for x in stages):
+        raise ProjectOperationError("QA manifest qa.stages must be a non-empty string array")
+    for key in ("result", "screenshots", "logs", "visual"):
+        value = artifacts.get(key)
+        if not isinstance(value, str) or not value:
+            raise ProjectOperationError(f"QA manifest artifacts.{key} is required")
+        _validate_relative_contract_path(value, f"artifacts.{key}")
+    optional_metadata = artifacts.get("metadata")
+    if optional_metadata is not None:
+        if not isinstance(optional_metadata, str) or not optional_metadata:
+            raise ProjectOperationError("QA manifest artifacts.metadata must be a path")
+        _validate_relative_contract_path(optional_metadata, "artifacts.metadata")
+    for os_key in ("windows", "unix"):
+        value = command.get(os_key)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ProjectOperationError(f"QA manifest qa.command.{os_key} must be a non-empty string")
+    timeout = qa.get("timeoutSeconds")
+    if timeout is not None and (
+        not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0
+    ):
+        raise ProjectOperationError("QA manifest qa.timeoutSeconds must be a positive integer")
+    return payload
+
+
+def _manifest_command_argv(root: Path, command: str, *, run_id: str) -> list[str]:
+    substituted = command.replace("{runId}", run_id)
+    try:
+        argv = shlex.split(substituted, posix=os.name != "nt")
+    except ValueError as exc:
+        raise ProjectOperationError(f"invalid QA command: {exc}") from exc
+    if not argv:
+        raise ProjectOperationError("QA command is empty")
+
+    executable = argv[0]
+    if "/" in executable or "\\" in executable:
+        if "\\" in executable or executable.startswith("/") or re.match(r"^[A-Za-z]:", executable):
+            raise ProjectOperationError("QA command executable must be workspace-relative or on PATH")
+        resolved = _safe_workspace_relative_path(root, executable.removeprefix("./"))
+        if not resolved.is_file():
+            raise ProjectOperationError(f"QA command executable not found: {executable}")
+        argv[0] = str(resolved)
+    else:
+        try:
+            resolution = resolve_executable(executable)
+        except ExecutableResolutionError as exc:
+            raise ProjectOperationError(str(exc)) from exc
+        argv = resolution.build_command(argv[1:])
+    return argv
+
+
+def _substitute_run_id(value: str, run_id: str) -> str:
+    return value.replace("{runId}", run_id)
+
+
+def _validate_relative_contract_path(raw_path: str, field: str) -> None:
+    if (
+        "\\" in raw_path
+        or raw_path.startswith("/")
+        or re.match(r"^[A-Za-z]:", raw_path)
+        or ".." in Path(raw_path).parts
+    ):
+        raise ProjectOperationError(f"unsafe QA manifest path {field}: {raw_path}")
+
+
+def _safe_workspace_relative_path(root: Path, raw_path: str) -> Path:
+    _validate_relative_contract_path(raw_path, "path")
+    root_resolved = root.resolve()
+    resolved = (root_resolved / Path(raw_path)).resolve()
+    try:
+        resolved.relative_to(root_resolved)
+    except ValueError as exc:
+        raise ProjectOperationError(f"QA path escapes workspace: {raw_path}") from exc
+    return resolved
+
+
+def _safe_legacy_qa_artifact_path(root: Path, run_id: str, raw_path: str) -> Path:
     if (
         not raw_path
         or "\\" in raw_path
@@ -452,6 +640,7 @@ def _safe_qa_artifact_path(run_dir: Path, raw_path: str) -> Path:
         or ".." in Path(raw_path).parts
     ):
         raise ProjectOperationError(f"unsafe QA artifact path: {raw_path}")
+    run_dir = (root / ".qa" / "runs" / run_id).resolve()
     resolved = (run_dir / Path(raw_path)).resolve()
     try:
         resolved.relative_to(run_dir)
