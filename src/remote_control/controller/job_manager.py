@@ -2761,7 +2761,7 @@ class JobManager:
                     resume_instruction=None,
                 )
                 return
-            except (QAContractError, Exception) as exc:
+            except Exception as exc:
                 if collect_only and reuse_run_id is not None:
                     await self.events.append(
                         "QA_RECOVERY_REEXECUTE",
