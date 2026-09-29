@@ -1000,7 +1000,7 @@ class JobManager:
             working_directory=Path(project.path_for(job.assigned_host)).expanduser(),
         )
         if not outcome.supported or outcome.run is None or outcome.result is None:
-            raise ValueError("Project does not provide scripts/qa.ps1")
+            raise ValueError("Project does not provide a supported Project OS QA contract")
         await self._report_qa(job.id, outcome)
         return outcome.run
 
@@ -1100,7 +1100,7 @@ class JobManager:
         if previous_task is not None and not previous_task.done():
             await asyncio.shield(previous_task)
 
-        if prompt.approval_type == "qa_ui_review":
+        if prompt.approval_type in {"qa_human_gate", "qa_ui_review"}:
             qa_run = await self.qa.latest_for_job(job.id) if self.qa is not None else None
             rejected_ui = rejected or resolved.selected_option == "REJECT"
             if qa_run is not None:
@@ -2865,20 +2865,21 @@ class JobManager:
                 if self.recovery is not None:
                     await self.recovery.delete(job_id)
                 return
-            if status == "UI_REVIEW_REQUIRED":
+            if status in {"HUMAN_GATE_REQUIRED", "UI_REVIEW_REQUIRED"}:
                 current = await self.require(job_id)
                 if JobState(current.state) == JobState.WAITING_AGENT:
                     await self._transition(job_id, JobState.RUNNING)
                 request = HumanGateRequest(
-                    approval_type="qa_ui_review",
-                    question="자동 QA는 통과했지만 UI 시각 검수가 필요합니다.",
+                    approval_type="qa_human_gate",
+                    question="자동 QA 결과에 사람의 검수가 필요합니다.",
                     details=(
                         f"QA Run: {outcome.run.run_id if outcome.run else '-'}\n"
-                        "Telegram으로 전송된 screenshot을 확인한 뒤 승인 또는 거절하세요."
+                        "Telegram으로 전송된 artifact와 warning/visual issue를 확인한 뒤 "
+                        "승인 또는 거절하세요."
                     ),
                     options=(
-                        ApprovalOption("APPROVE", "UI 승인"),
-                        ApprovalOption("REJECT", "UI 거절"),
+                        ApprovalOption("APPROVE", "검수 승인"),
+                        ApprovalOption("REJECT", "검수 거절"),
                     ),
                 )
                 approval = await self._enter_human_gate(job_id, request)
@@ -2948,20 +2949,64 @@ class JobManager:
         assert outcome.result is not None
         result = outcome.result
         run = outcome.run
+        status = str(result["status"])
+        run_id = str(result.get("runId") or result.get("run_id") or "-")
         if run is not None and run.report_sent_at is None:
-            icon = {"PASS": "✅", "FAIL": "❌", "UI_REVIEW_REQUIRED": "👀"}[result["status"]]
-            message = (
-                f"{icon} Automated QA {result['status']}\n\n"
-                f"Run: {result['run_id']}\n"
-                f"Preflight: {result['preflight']}\n"
-                f"Build: {result['build']}\n"
-                f"Launch: {result['launch']}\n"
-                f"Smoke: {result['smoke']}\n"
-                f"Functional: {result['functional']}\n"
-                f"UI: {result['ui']}\n"
-                f"Artifacts: {len(result['artifacts'])}"
-            )
-            await self._notify(job_id, message)
+            icon = {
+                "PASS": "✅",
+                "PASS_WITH_WARNINGS": "⚠️",
+                "FAIL": "❌",
+                "HUMAN_GATE_REQUIRED": "👀",
+                "UI_REVIEW_REQUIRED": "👀",
+            }.get(status, "🧪")
+            lines = [
+                f"{icon} Automated QA {status}",
+                "",
+                f"Run: {run_id}",
+            ]
+            if result.get("schemaVersion") == "2.0":
+                summary = result.get("summary")
+                if isinstance(summary, dict):
+                    lines.extend(
+                        [
+                            f"Passed: {summary.get('passed', 0)}",
+                            f"Failed: {summary.get('failed', 0)}",
+                            f"Warnings: {summary.get('warnings', 0)}",
+                            f"Skipped: {summary.get('skipped', 0)}",
+                            f"Human Gates: {summary.get('humanGates', 0)}",
+                        ]
+                    )
+                stages = result.get("stages")
+                if isinstance(stages, list) and stages:
+                    rendered = ", ".join(
+                        f"{item.get('id')}={item.get('status')}"
+                        for item in stages
+                        if isinstance(item, dict)
+                    )
+                    if rendered:
+                        lines.append(f"Stages: {rendered[:1000]}")
+                visual_reviews = result.get("visualReviews")
+                issue_count = 0
+                if isinstance(visual_reviews, list):
+                    for review in visual_reviews:
+                        if isinstance(review, dict) and isinstance(review.get("issues"), list):
+                            issue_count += len(review["issues"])
+                if issue_count:
+                    lines.append(f"Visual issues: {issue_count}")
+            else:
+                lines.extend(
+                    [
+                        f"Preflight: {result.get('preflight')}",
+                        f"Build: {result.get('build')}",
+                        f"Launch: {result.get('launch')}",
+                        f"Smoke: {result.get('smoke')}",
+                        f"Functional: {result.get('functional')}",
+                        f"UI: {result.get('ui')}",
+                    ]
+                )
+            artifacts = result.get("artifacts")
+            lines.append(f"Artifacts: {len(artifacts) if isinstance(artifacts, list) else 0}")
+            await self._notify(job_id, "\n".join(lines))
             await self.qa.runs.update(
                 run.run_id,
                 report_sent_at=datetime.now(timezone.utc),
@@ -2980,12 +3025,14 @@ class JobManager:
                 payload = {
                     "job_id": job.id,
                     "project_id": job.project_id,
-                    "run_id": result["run_id"],
-                    "status": result["status"],
+                    "run_id": run_id,
+                    "status": status,
                     "artifacts": list(outcome.screenshots),
                 }
+
                 async def send() -> None:
                     await notifier(job.requested_by_user, payload)
+
                 delivered = await self._deliver_notification(
                     job,
                     notification_type="qa_artifacts",
@@ -3005,7 +3052,7 @@ class JobManager:
         first = errors[0] if isinstance(errors[0], dict) else {}
         code = first.get("code") or "QA_FAILED"
         message = first.get("message") or "Automated QA failed"
-        stage = first.get("stage") or "unknown"
+        stage = first.get("stage") or first.get("scenarioId") or "unknown"
         return f"{code} at {stage}: {message}"
 
     async def _resume_or_fallback(
