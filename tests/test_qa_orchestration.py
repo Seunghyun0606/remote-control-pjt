@@ -7,11 +7,13 @@ from pathlib import Path
 
 import pytest
 
+from remote_control.approvals.registry import ApprovalRegistry
 from remote_control.controller.job_manager import JobManager
 from remote_control.projects.operations import LocalProjectOperationExecutor, ProjectOperationError
 from remote_control.qa import QAContractError, QAOrchestrator, validate_result
 from remote_control.runners.fake import FakeAgentRunner
 from remote_control.storage.repositories import (
+    ApprovalRepository,
     EventRepository,
     JobRepository,
     QARunRepository,
@@ -236,3 +238,187 @@ async def test_qa_fail_fails_job_but_keeps_codex_session_reusable(
     assert "ASSERTION_FAILED" in (current.error or "")
     assert current.external_session_id == "fake-session"
     assert qa_run is not None and qa_run.status == "FAIL"
+
+
+@pytest.mark.asyncio
+async def test_qa_contract_is_optional_without_entrypoint(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    executor = LocalProjectOperationExecutor()
+    contract = await executor.execute(
+        host_id="local",
+        project_id="demo",
+        working_directory=root,
+        operation="qa_contract",
+        payload={},
+    )
+    assert contract == {
+        "supported": False,
+        "entrypoint": None,
+        "schema_version": "1.0",
+    }
+
+
+@pytest.mark.asyncio
+async def test_local_qa_collect_requires_result_json(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    executor = LocalProjectOperationExecutor()
+    with pytest.raises(ProjectOperationError, match="result.json was not produced"):
+        await executor.execute(
+            host_id="local",
+            project_id="demo",
+            working_directory=root,
+            operation="qa_collect",
+            payload={"run_id": "QA-missing-001"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_local_qa_collect_rejects_malformed_result(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    run_dir = root / ".qa" / "runs" / "QA-malformed-001"
+    run_dir.mkdir(parents=True)
+    (run_dir / "result.json").write_text("{bad json", encoding="utf-8")
+    executor = LocalProjectOperationExecutor()
+    with pytest.raises(ProjectOperationError, match="malformed QA result.json"):
+        await executor.execute(
+            host_id="local",
+            project_id="demo",
+            working_directory=root,
+            operation="qa_collect",
+            payload={"run_id": "QA-malformed-001"},
+        )
+
+
+class _ExitMismatchOperations(_FakeQAOperations):
+    async def execute(self, **kwargs) -> dict:
+        response = await super().execute(**kwargs)
+        if kwargs["operation"] != "qa_contract":
+            response["exit_code"] = 1
+        return response
+
+
+@pytest.mark.asyncio
+async def test_qa_status_exit_code_mismatch_fails_closed(database, project_dir: Path) -> None:
+    events = EventRepository(database)
+    qa = QAOrchestrator(
+        runs=QARunRepository(database),
+        events=events,
+        operations=_ExitMismatchOperations("PASS"),
+    )
+    with pytest.raises(QAContractError, match="exit code/status mismatch"):
+        await qa.execute(
+            job_id="JOB-test",
+            project_id="demo",
+            host_id="lightsail-main",
+            working_directory=project_dir,
+        )
+
+
+@pytest.mark.asyncio
+async def test_ui_review_uses_existing_human_gate_and_approval(
+    project_registry,
+    database,
+) -> None:
+    events = EventRepository(database)
+    qa_runs = QARunRepository(database)
+    qa = QAOrchestrator(
+        runs=qa_runs,
+        events=events,
+        operations=_FakeQAOperations("UI_REVIEW_REQUIRED"),
+    )
+    approvals = ApprovalRegistry(
+        approvals=ApprovalRepository(database),
+        events=events,
+    )
+    manager = JobManager(
+        projects=project_registry,
+        jobs=JobRepository(database),
+        events=events,
+        runner=FakeAgentRunner(),
+        local_host_id="lightsail-main",
+        approvals=approvals,
+        qa=qa,
+    )
+    job = await manager.create(
+        project_id="demo",
+        instruction="do the work",
+        requested_by_channel="test",
+        requested_by_user="u1",
+    )
+
+    approval = None
+    for _ in range(200):
+        current = await manager.require(job.id)
+        if current.state == "WAITING_HUMAN":
+            approval = await approvals.pending_for_job(job.id)
+            break
+        await asyncio.sleep(0.01)
+
+    assert approval is not None
+    assert approval.approval_type == "qa_ui_review"
+    await manager.respond_approval(
+        approval.id,
+        user_id="u1",
+        option_key="APPROVE",
+    )
+    for _ in range(200):
+        current = await manager.require(job.id)
+        if current.state == "COMPLETED":
+            await manager.wait_until_idle(job.id)
+            break
+        await asyncio.sleep(0.01)
+
+    current = await manager.require(job.id)
+    qa_run = await qa_runs.latest_for_job(job.id)
+    assert current.state == "COMPLETED"
+    assert qa_run is not None
+    assert qa_run.status == "UI_REVIEW_REQUIRED"
+    assert qa_run.review_status == "UI_APPROVED"
+
+
+@pytest.mark.asyncio
+async def test_ui_review_rejection_fails_job(project_registry, database) -> None:
+    events = EventRepository(database)
+    qa_runs = QARunRepository(database)
+    qa = QAOrchestrator(
+        runs=qa_runs,
+        events=events,
+        operations=_FakeQAOperations("UI_REVIEW_REQUIRED"),
+    )
+    approvals = ApprovalRegistry(
+        approvals=ApprovalRepository(database),
+        events=events,
+    )
+    manager = JobManager(
+        projects=project_registry,
+        jobs=JobRepository(database),
+        events=events,
+        runner=FakeAgentRunner(),
+        local_host_id="lightsail-main",
+        approvals=approvals,
+        qa=qa,
+    )
+    job = await manager.create(
+        project_id="demo",
+        instruction="do the work",
+        requested_by_channel="test",
+        requested_by_user="u1",
+    )
+    approval = None
+    for _ in range(200):
+        if (await manager.require(job.id)).state == "WAITING_HUMAN":
+            approval = await approvals.pending_for_job(job.id)
+            break
+        await asyncio.sleep(0.01)
+    assert approval is not None
+    await manager.respond_approval(
+        approval.id,
+        user_id="u1",
+        option_key="REJECT",
+    )
+    current = await manager.require(job.id)
+    qa_run = await qa_runs.latest_for_job(job.id)
+    assert current.state == "FAILED"
+    assert qa_run is not None and qa_run.review_status == "UI_REJECTED"
