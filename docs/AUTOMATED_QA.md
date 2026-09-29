@@ -1,6 +1,6 @@
 # Automated QA
 
-Remote Control 0.16부터 Codex 개발 turn이 성공하면, 프로젝트가 Project OS QA Contract 1.0을 제공하는 경우 Job을 완료하기 전에 자동 QA를 실행합니다.
+Remote Control 0.16부터 Codex 개발 turn이 성공하면 프로젝트의 Project OS QA Contract를 탐색하고, 지원되는 경우 Job 완료 전에 자동 QA를 실행합니다.
 
 ## Architecture
 
@@ -9,40 +9,55 @@ Codex development
         ↓
 Codex return code 0
         ↓
-Project QA capability detection
+.qa/manifest.yaml detection (Contract v2)
         ↓
-scripts/qa.ps1 -RunId QA-...
+host OS command selection
         ↓
-.qa/runs/<run-id>/result.json
+QA runner
         ↓
-Contract validation + registered artifact collection
+manifest-declared result.json
         ↓
-PASS / FAIL / UI_REVIEW_REQUIRED
+contract validation + registered artifact collection
+        ↓
+PASS / PASS_WITH_WARNINGS / FAIL / HUMAN_GATE_REQUIRED
         ↓
 Telegram summary + screenshots
         ↓
-Job terminal state or Human Gate
+Job completion / failure / Human Gate
 ```
 
-Remote Control은 Playwright selector, Godot scene, Android ADB command, Chrome Extension test scenario를 알지 않습니다. 프로젝트별 QA 구현은 각 프로젝트 repository에 남고 Remote Control은 Project OS가 정의한 공통 entry point/result/artifact contract만 소비합니다.
+Remote Control은 Playwright selector, Godot scene, Android ADB command, Chrome Extension scenario를 알지 않습니다. 프로젝트별 테스트 구현은 각 repository에 있고 Remote Control은 Manifest/Result/Artifact contract만 소비합니다.
 
 ## Project OS Contract
 
-현재 지원하는 source of truth는 Project OS 0.3.0의 QA Contract 1.0입니다.
+현재 source of truth는 **Project OS 0.4.0 / QA Contract 2.0**입니다.
+
+Discovery:
 
 ```text
-entry point: scripts/qa.ps1
-run id:     -RunId QA-...
-result:     .qa/runs/<run-id>/result.json
-schema:     1.0
-exit code:  0=PASS, 1=FAIL, 2=UI_REVIEW_REQUIRED
+.qa/manifest.yaml
 ```
 
-이전 설계 문서에서 제안했던 `.qa/manifest.yaml` 또는 `.qa/output/result.json`은 현재 Project OS 정본이 아니므로 사용하지 않습니다. 지원하지 않는 schema version은 silent fallback 없이 실패합니다.
+Manifest가 제공하는 항목:
+
+- `schemaVersion: "2.0"`
+- `qa.command.windows` / `qa.command.unix`
+- `qa.stages`
+- optional `qa.timeoutSeconds`
+- `artifacts.result`
+- screenshot/log/visual artifact locations
+
+Remote Control은 안전한 `runId`를 만들고 manifest command의 `{runId}`를 치환해 실행합니다.
+
+Legacy compatibility:
+
+- v2 manifest가 있으면 v2를 우선합니다.
+- manifest가 없고 `scripts/qa.ps1`이 있으면 legacy Result Contract 1.0 adapter를 사용합니다.
+- 지원하지 않는 schema version은 silent fallback 없이 실패합니다.
 
 ## Quick Start
 
-QA를 사용할 Project OS 프로젝트에서:
+Project OS 0.4.0 이상에서:
 
 ```powershell
 projectctl qa-init
@@ -54,23 +69,21 @@ projectctl qa-init
 projectctl init --with-qa
 ```
 
-그 다음 프로젝트에 맞게 `scripts/qa.ps1`을 구현합니다. 기본 scaffold는 `QA_NOT_CONFIGURED` FAIL을 반환하므로 실제 QA 구현 전에는 성공으로 처리되지 않습니다.
+생성되는 `.qa/manifest.yaml`과 OS별 runner를 프로젝트에 맞게 구현합니다. 기본 scaffold는 실제 QA 구현 전까지 `QA_NOT_CONFIGURED`로 fail-closed 합니다.
 
-Remote Control을 최신 버전으로 다시 시작한 뒤 Telegram Project Topic에서 평소처럼 작업을 요청합니다.
+그 다음 Remote Control을 재시작하고 Telegram Project Topic에서 평소처럼 작업을 요청합니다.
 
 ```text
 다음 작업 진행해줘
 ```
 
-Codex가 성공하면 QA가 자동으로 이어집니다.
-
-수동 조회:
+조회:
 
 ```text
 /qa
 ```
 
-QA만 다시 실행:
+QA만 재실행:
 
 ```text
 /qa rerun
@@ -80,7 +93,7 @@ QA만 다시 실행:
 
 ## QA Lifecycle
 
-Top-level Job state machine은 기존 값을 유지합니다. QA 내부 상태는 `qa_runs.phase`에 저장합니다.
+Top-level Job state machine은 기존 값을 유지합니다. QA 내부 lifecycle은 `qa_runs.phase`에 저장합니다.
 
 ```text
 QA_PREPARING
@@ -91,125 +104,127 @@ QA_PREPARING
    or QA_REVIEWING
 ```
 
-결과 매핑:
+Result mapping:
 
 | Project OS QA status | Remote Control |
 |---|---|
 | `PASS` | 기존 completion / Project OS submit 계속 |
-| `FAIL` | Job `FAILED`; Codex Project Session은 재사용 가능 |
-| `UI_REVIEW_REQUIRED` | Job `WAITING_HUMAN`; Telegram UI 승인/거절 |
-| entry point 없음 | 기존 QA 미지원 프로젝트와 동일하게 완료 흐름 계속 |
+| `PASS_WITH_WARNINGS` | completion 계속 + warning metadata/report |
+| `FAIL` | Job `FAILED` |
+| `HUMAN_GATE_REQUIRED` | Job `WAITING_HUMAN` + 기존 Human Gate |
+| QA contract 없음 | 기존 QA 미지원 프로젝트와 동일하게 완료 |
 
-`UI_APPROVED` / `UI_REJECTED`는 Project OS QA result 상태가 아니라 Remote Control의 Human Gate review metadata입니다.
+Legacy v1의 `UI_REVIEW_REQUIRED`도 Human Gate로 계속 호환됩니다.
 
 ## Telegram Reports
 
-QA가 시작되면 한 번 시작 메시지를 보내고, 결과가 생성되면 stage 요약을 보냅니다.
+QA 시작 시 시작 메시지를 보내고, 결과 시 요약을 전송합니다. v2에서는 고정 stage 이름을 가정하지 않고 `stages[]`와 `summary`를 읽습니다.
 
 예:
 
 ```text
 [desktown / JOB-...]
 
-✅ Automated QA PASS
+⚠️ Automated QA PASS_WITH_WARNINGS
 
 Run: QA-...
-Preflight: PASS
-Build: PASS
-Launch: PASS
-Smoke: PASS
-Functional: PASS
-UI: PASS
+Passed: 19
+Failed: 0
+Warnings: 1
+Skipped: 0
+Human Gates: 0
+Stages: build=PASS, smoke=PASS, ui=WARN, visual=WARN
 Artifacts: 4
 ```
 
-Screenshot artifact가 있으면 최대 `QA_TELEGRAM_MAX_SCREENSHOTS`개를 Telegram media group으로 전송합니다. 각 caption에는 screenshot 이름, QA status, run id, scenario가 포함됩니다.
+Screenshot은 `artifacts[type=screenshot]` 중 우선순위에 따라 선택합니다.
 
-QA-specific final report와 screenshot 전송 완료 시각을 DB에 기록해 restart 후 동일 run의 중복 전송을 줄입니다.
+```text
+priority: failure > important > normal
+kind:     failure > result > checkpoint > initial
+```
 
-## Screenshot Policy
+최대 전송 수는 `QA_TELEGRAM_MAX_SCREENSHOTS`로 제한합니다.
 
-Remote Control은 Project directory를 PNG 확장자로 탐색하지 않습니다. 반드시 `result.json.artifacts[]`에 등록된 `type=screenshot` artifact만 읽습니다.
+## Screenshot / Artifact Security
 
-기본 제한:
+Remote Control은 workspace를 임의 탐색해 PNG를 보내지 않습니다. Result에 등록된 artifact만 처리합니다.
 
-- run directory 기준 relative path만 허용
-- absolute path 거부
-- `..` traversal 거부
-- backslash path 거부
-- screenshot은 PNG/JPEG/WebP만 허용
-- `QA_ARTIFACT_MAX_BYTES`보다 큰 screenshot 거부
-- `QA_TELEGRAM_MAX_SCREENSHOTS`로 전송 개수 제한
+v2 artifact path는 **repository root 기준 상대경로**입니다.
 
-Remote Runner를 사용할 때도 artifact validation/reading은 프로젝트가 존재하는 Runner host에서 수행하고 Controller에는 contract 결과와 허용된 screenshot bytes만 전달합니다.
+금지:
+
+- absolute path
+- drive-qualified path
+- backslash path
+- `..` traversal
+- workspace 밖 resolved path
+- unsupported screenshot type
+- file/total size limit 초과
+
+지원 screenshot 형식:
+
+- PNG
+- JPEG
+- WebP
+
+## Visual QA
+
+Project OS v2의 `visualReviews[]`를 읽어 warning/issue 수를 Telegram report에 반영할 수 있습니다.
+
+Visual review provider는 Remote Control core와 분리합니다. 향후 OpenAI, Claude 또는 다른 reviewer를 붙일 수 있지만 provider 하나와 강결합하지 않습니다.
+
+AI visual warning 하나만으로 deterministic FAIL을 만들지 않습니다. Project runner가 `PASS_WITH_WARNINGS` 또는 `HUMAN_GATE_REQUIRED`로 표현한 contract status를 따릅니다.
 
 ## Failure Handling
 
-QA command exit code만으로 PASS를 판단하지 않습니다. `result.json`이 반드시 존재해야 하며 schema/status와 exit code가 일치해야 합니다.
+최종 판단의 source of truth는 exit code가 아니라 `result.json.status`입니다. Exit code는 status와 일치하는지 fail-closed 검증하는 transport hint입니다.
 
-다음은 QA orchestration failure로 처리됩니다.
+v2:
 
+| Exit | Status |
+|---|---|
+| 0 | PASS / PASS_WITH_WARNINGS |
+| 1 | FAIL |
+| 2 | HUMAN_GATE_REQUIRED |
+
+다음은 orchestration failure입니다.
+
+- malformed/missing manifest
+- unsupported manifest/result schema version
+- host OS command 없음
 - malformed/missing result.json
-- unsupported schema version
-- run id mismatch
-- invalid result status/stage
+- runId mismatch
 - unsafe artifact path
 - missing registered artifact
-- unsupported screenshot type
+- unsupported screenshot format
 - artifact size limit 초과
-- status/exit-code mismatch
+- result status / exit-code mismatch
 - QA timeout
 
-Deterministic QA `FAIL`은 Job을 `FAILED` 처리합니다.
+## Human Gate
 
-## UI Review
-
-자동 검증은 통과했지만 사람의 시각 판단이 필요하면 프로젝트 QA는:
-
-```json
-{
-  "status": "UI_REVIEW_REQUIRED",
-  "ui": "REVIEW_REQUIRED",
-  "next_action": "REQUEST_UI_REVIEW"
-}
-```
-
-을 반환합니다.
-
-Remote Control은 screenshot을 보낸 뒤 기존 Human Gate를 사용합니다.
+`HUMAN_GATE_REQUIRED`이면 screenshot/artifact를 먼저 전달하고 기존 Approval Registry를 사용합니다.
 
 ```text
-APPROVE → UI_APPROVED → Job completion 계속
-REJECT  → UI_REJECTED → Job FAILED
+APPROVE → review_status=UI_APPROVED → Job completion 계속
+REJECT  → review_status=UI_REJECTED → Job FAILED
 ```
 
-AI Visual Reviewer warning을 contract에 추가하려면 Project OS result의 `metadata` 확장 또는 향후 reviewer abstraction을 사용해야 합니다. Remote Control core는 특정 OpenAI/Claude provider와 결합하지 않습니다.
+Review status 명칭은 기존 DB 호환을 위해 유지하지만 v2 gate는 UI 전용이 아니라 일반 QA Human Gate로 사용합니다.
 
 ## Recovery
 
-QA는 Codex session과 분리되지만 같은 Job에 속합니다.
+QA는 Codex session과 별도 실행이지만 같은 Job에 속합니다.
 
-Controller 또는 Runner 연결이 QA 중 끊기면 `RecoveryMode.QA`로 전환하고, host/lease recovery 후:
+Controller/Runner가 QA 중 끊기면 `RecoveryMode.QA`로 전환합니다.
 
-1. 동일 `run_id`의 기존 `result.json`을 먼저 수집합니다.
-2. 유효한 result가 있으면 QA command를 중복 실행하지 않고 후처리를 재개합니다.
-3. result가 없거나 불완전하면 같은 `run_id`로 QA를 다시 실행합니다.
-4. Codex session을 잘못 resume하지 않습니다.
+1. 동일 run id의 기존 result를 먼저 collect합니다.
+2. 유효하면 QA command를 중복 실행하지 않고 후처리를 재개합니다.
+3. result가 없거나 불완전하면 동일 run id로 runner를 다시 실행합니다.
+4. Codex session을 QA 때문에 resume하지 않습니다.
 
-Remote Runner 쪽 project operation이 취소되면 QA subprocess tree도 종료하도록 구성했습니다.
-
-## Job Detail
-
-`/job JOB-...`에 다음 QA metadata가 추가됩니다.
-
-- QA status/phase
-- QA run id
-- warning count
-- artifact count
-- result path
-- UI review status
-
-`/qa`는 해당 Project Topic에서 가장 최근 Job의 QA 상태를 간단히 표시합니다.
+Telegram final report/screenshot 전송 시각도 저장해 재시작 후 중복 전송을 줄입니다.
 
 ## Configuration
 
@@ -219,49 +234,63 @@ QA_TIMEOUT_SECONDS=900
 QA_TELEGRAM_SCREENSHOTS=true
 QA_TELEGRAM_MAX_SCREENSHOTS=6
 QA_ARTIFACT_MAX_BYTES=8388608
+QA_ARTIFACT_TOTAL_MAX_BYTES=8388608
 
-# Phase 4 bounded auto-fix용 예약 설정.
-# 현재 기본값은 비활성이고 무한 QA→fix loop는 구현하지 않는다.
+# bounded auto-fix extension point; default disabled
 QA_AUTO_FIX=false
 QA_AUTO_FIX_MAX_ATTEMPTS=2
 ```
+
+Manifest의 `qa.timeoutSeconds`가 더 짧으면 해당 값을 사용하며 Remote Control 설정은 상한 역할을 합니다.
+
+## Job Detail
+
+`/job JOB-...`과 `/qa`에서 다음을 확인할 수 있습니다.
+
+- QA status / phase
+- QA run id
+- failed scenarios
+- warning count
+- artifact count
+- result path
+- Human Gate review status
 
 ## Troubleshooting
 
 ### QA가 자동 실행되지 않음
 
-프로젝트 root에 `scripts/qa.ps1`이 있는지 확인합니다.
+v2:
+
+```powershell
+Test-Path .\.qa\manifest.yaml
+```
+
+legacy v1:
 
 ```powershell
 Test-Path .\scripts\qa.ps1
 ```
 
-### 기본 scaffold가 항상 FAIL
+### PASS_WITH_WARNINGS가 FAILED가 됨
 
-정상입니다. Project OS 기본 QA scaffold는 실제 프로젝트 QA가 구현되기 전에는 `QA_NOT_CONFIGURED`로 fail-closed 합니다.
+Remote Control 0.16의 최신 branch가 Project OS Contract v2를 지원하는지 확인합니다. v2에서는 exit 0 + `PASS_WITH_WARNINGS`가 정상 completion입니다.
 
 ### screenshot이 전송되지 않음
 
-다음을 확인합니다.
-
-- artifact가 `result.json.artifacts[]`에 등록됐는지
-- `type`이 `screenshot`인지
-- path가 run directory 기준 forward-slash relative path인지
-- PNG/JPEG/WebP인지
-- 크기 제한을 넘지 않았는지
+- artifact가 result의 `artifacts[]`에 등록됐는지
+- `type=screenshot`인지
+- repository-relative forward-slash path인지
+- v2 screenshot에 `caption`, `kind`, `priority`가 있는지
+- 파일 형식/크기 제한을 넘지 않는지
 - `QA_TELEGRAM_SCREENSHOTS=true`인지
 
-### QA 중 Controller/Runner 재시작
+## Extension Points
 
-Job이 `WAITING_HOST`에 들어갔다가 QA recovery로 이어질 수 있습니다. `/job`에서 Recovery와 QA run을 함께 확인하세요.
-
-## Current Extension Points
-
-향후 확장을 위해 다음은 core contract와 분리합니다.
+현재 core와 분리된 향후 확장 지점:
 
 - bounded Codex auto-fix loop
-- AI Visual Reviewer provider interface
-- screenshot prioritization metadata
-- videos/log file direct Telegram upload
+- pluggable AI Visual Reviewer
+- log/video Telegram delivery
+- richer stage progress editing
 
-특정 provider나 프로젝트 framework를 Remote Control core에 넣지 않는 원칙을 유지합니다.
+무한 QA → fix → QA loop는 만들지 않습니다.
