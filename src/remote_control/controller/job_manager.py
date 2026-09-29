@@ -2805,7 +2805,12 @@ class JobManager:
                         ApprovalOption("REJECT", "UI 거절"),
                     ),
                 )
-                await self._enter_human_gate(job_id, request)
+                approval = await self._enter_human_gate(job_id, request)
+                if approval is None:
+                    await self._fail_qa(
+                        job_id,
+                        RuntimeError("UI review required but Approval Registry is disabled"),
+                    )
                 return
 
         await self._complete_after_qa(job_id, final_message)
