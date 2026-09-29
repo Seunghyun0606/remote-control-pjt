@@ -183,6 +183,11 @@ class LocalProjectOperationExecutor:
         max_bytes = _positive_int(
             data.get("artifact_max_bytes"), "artifact_max_bytes", 8 * 1024 * 1024
         )
+        total_max_bytes = _positive_int(
+            data.get("artifact_total_max_bytes"),
+            "artifact_total_max_bytes",
+            8 * 1024 * 1024,
+        )
         run_dir = (root / ".qa" / "runs" / run_id).resolve()
         result_path = run_dir / "result.json"
         if not result_path.is_file():
@@ -203,6 +208,7 @@ class LocalProjectOperationExecutor:
             raise ProjectOperationError("QA result run_id does not match requested run")
 
         screenshots: list[dict[str, Any]] = []
+        screenshot_bytes = 0
         artifacts = result.get("artifacts")
         if not isinstance(artifacts, list):
             raise ProjectOperationError("QA result artifacts must be an array")
@@ -226,6 +232,12 @@ class LocalProjectOperationExecutor:
                 raise ProjectOperationError(
                     f"QA screenshot exceeds size limit: {raw_path} ({size} > {max_bytes})"
                 )
+            if screenshot_bytes + size > total_max_bytes:
+                raise ProjectOperationError(
+                    "QA screenshot set exceeds total size limit: "
+                    f"{screenshot_bytes + size} > {total_max_bytes}"
+                )
+            screenshot_bytes += size
             screenshots.append(
                 {
                     "name": str(artifact.get("name") or artifact_path.name),
