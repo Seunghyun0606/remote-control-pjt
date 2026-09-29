@@ -17,6 +17,7 @@ from remote_control.storage.models import (
     HostRecord,
     JobRecord,
     ProjectSessionRecord,
+    QARunRecord,
     ProjectWorkRecord,
     RecoveryRecord,
     RemoteExecutionRecord,
@@ -776,6 +777,52 @@ class ProjectWorkRepository:
             record = await session.get(ProjectWorkRecord, job_id)
             if record is None:
                 raise KeyError(f"unknown project work: {job_id}")
+            for key, value in changes.items():
+                setattr(record, key, value)
+            await session.commit()
+            await session.refresh(record)
+            return record
+
+
+class QARunRepository:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def add(self, record: QARunRecord) -> QARunRecord:
+        async with self.db.sessions() as session:
+            session.add(record)
+            await session.commit()
+            await session.refresh(record)
+            return record
+
+    async def get(self, run_id: str) -> QARunRecord | None:
+        async with self.db.sessions() as session:
+            return await session.get(QARunRecord, run_id)
+
+    async def latest_for_job(self, job_id: str) -> QARunRecord | None:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(QARunRecord)
+                .where(QARunRecord.job_id == job_id)
+                .order_by(QARunRecord.started_at.desc())
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
+
+    async def list_active(self) -> list[QARunRecord]:
+        async with self.db.sessions() as session:
+            result = await session.execute(
+                select(QARunRecord)
+                .where(QARunRecord.phase.in_(("QA_PREPARING", "QA_RUNNING", "QA_COLLECTING")))
+                .order_by(QARunRecord.started_at)
+            )
+            return list(result.scalars())
+
+    async def update(self, run_id: str, **changes: Any) -> QARunRecord:
+        async with self.db.sessions() as session:
+            record = await session.get(QARunRecord, run_id)
+            if record is None:
+                raise KeyError(f"unknown QA run: {run_id}")
             for key, value in changes.items():
                 setattr(record, key, value)
             await session.commit()
