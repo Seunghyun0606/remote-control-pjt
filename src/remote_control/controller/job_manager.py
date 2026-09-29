@@ -956,6 +956,31 @@ class JobManager:
             return None
         return await self.qa.latest_for_job(job_id)
 
+    async def latest_for_user_project(
+        self,
+        user_id: str,
+        project_id: str,
+    ) -> JobRecord | None:
+        return await self.jobs.latest_for_user_project(user_id, project_id)
+
+    async def rerun_qa(self, job_id: str):
+        if self.qa is None:
+            raise ValueError("Automated QA is disabled")
+        job = await self.require(job_id)
+        if job.assigned_host is None:
+            raise ValueError("Job has no assigned host for QA rerun")
+        project = self.projects.get(job.project_id)
+        outcome = await self.qa.execute(
+            job_id=job.id,
+            project_id=job.project_id,
+            host_id=job.assigned_host,
+            working_directory=Path(project.path_for(job.assigned_host)).expanduser(),
+        )
+        if not outcome.supported or outcome.run is None or outcome.result is None:
+            raise ValueError("Project does not provide scripts/qa.ps1")
+        await self._report_qa(job.id, outcome)
+        return outcome.run
+
     async def pending_approvals_for_user(
         self,
         user_id: str,
