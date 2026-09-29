@@ -1206,8 +1206,28 @@ class JobManager:
                 JobState.RUNNING.value,
             }
         )
+        qa_recovery_ids: set[str] = set()
+        if self.qa is not None:
+            for candidate in recoverable:
+                qa_run = await self.qa.latest_for_job(candidate.id)
+                if qa_run is None:
+                    continue
+                qa_recovery_ids.add(candidate.id)
+                state = JobState(candidate.state)
+                if state in {JobState.STARTING, JobState.RUNNING}:
+                    await self._enter_host_wait(
+                        candidate.id,
+                        mode=RecoveryMode.QA,
+                        error="controller restarted during or immediately after automated QA",
+                        assigned_host=candidate.assigned_host,
+                        resume_instruction=None,
+                    )
+                    lease_repairs += 1
+
         count = stale_locks + lease_repairs
         for job in recoverable:
+            if job.id in qa_recovery_ids:
+                continue
             existing = await self.recovery.get(job.id)
             session_id = await self._external_session_id(job)
             remote_uncertain = bool(
@@ -2166,6 +2186,10 @@ class JobManager:
         mode = RecoveryMode(record.mode)
         if mode == RecoveryMode.START:
             self._start_task(job.id, self._execute_new(job.id))
+        elif mode == RecoveryMode.QA:
+            await self._transition(job.id, JobState.STARTING)
+            await self._transition(job.id, JobState.RUNNING)
+            self._start_task(job.id, self._execute_qa_recovery(job.id))
         else:
             await self._transition(job.id, JobState.STARTING)
             await self._transition(job.id, JobState.RUNNING)
@@ -2280,6 +2304,20 @@ class JobManager:
                 last_error=record.last_error,
             )
             self._start_task(job.id, self._execute_project_finalize(job.id))
+        elif mode == RecoveryMode.QA:
+            await self._transition(job.id, JobState.STARTING)
+            await self._transition(job.id, JobState.RUNNING)
+            await self.recovery.upsert(
+                job.id,
+                kind=record.kind,
+                mode=RecoveryMode.QA.value,
+                attempt_count=record.attempt_count,
+                next_retry_at=None,
+                execution_id=None,
+                resume_instruction=None,
+                last_error=record.last_error,
+            )
+            self._start_task(job.id, self._execute_qa_recovery(job.id))
         else:
             await self._transition(job.id, JobState.STARTING)
             await self._transition(job.id, JobState.RUNNING)
@@ -2484,6 +2522,29 @@ class JobManager:
         finally:
             if self._handles.get(job_id) is handle:
                 self._handles.pop(job_id, None)
+
+    async def _execute_qa_recovery(self, job_id: str) -> None:
+        try:
+            if self.qa is None:
+                await self._complete_after_qa(job_id, (await self.require(job_id)).result)
+                return
+            run = await self.qa.latest_for_job(job_id)
+            if run is None:
+                await self._run_qa_then_finalize(
+                    job_id,
+                    (await self.require(job_id)).result,
+                )
+                return
+            await self._run_qa_then_finalize(
+                job_id,
+                (await self.require(job_id)).result,
+                collect_only=True,
+                reuse_run_id=run.run_id,
+            )
+        except asyncio.CancelledError:
+            await self._handle_cancelled_task(job_id)
+        except Exception as exc:
+            await self._fail_qa(job_id, exc)
 
     async def _execute_project_finalize(self, job_id: str) -> None:
         try:
@@ -2701,6 +2762,21 @@ class JobManager:
                 )
                 return
             except (QAContractError, Exception) as exc:
+                if collect_only and reuse_run_id is not None:
+                    await self.events.append(
+                        "QA_RECOVERY_REEXECUTE",
+                        job_id=job.id,
+                        project_id=job.project_id,
+                        host_id=job.assigned_host,
+                        payload={"qa_run_id": reuse_run_id, "reason": str(exc)},
+                    )
+                    await self._run_qa_then_finalize(
+                        job_id,
+                        final_message,
+                        collect_only=False,
+                        reuse_run_id=reuse_run_id,
+                    )
+                    return
                 await self._fail_qa(job_id, exc)
                 return
 
