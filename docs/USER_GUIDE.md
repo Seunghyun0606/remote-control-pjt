@@ -1,6 +1,6 @@
 # Remote Control User Guide
 
-이 문서는 **Remote Control 0.15.7** 기준의 실사용 가이드입니다.
+이 문서는 **Remote Control 0.16.0** 기준의 실사용 가이드입니다.
 
 목표는 설치 세부사항보다 다음 흐름을 빠르게 이해하는 것입니다.
 
@@ -10,6 +10,7 @@
 → 같은 Session에서 계속 작업
 → 작업 중 추가 지시 / 즉시 방향전환
 → 여러 작업 Queue
+→ Automated QA / UI Review
 → Human Gate
 → Host / Quota / Controller 재시작 복구
 → 결과 확인
@@ -371,10 +372,46 @@ Queue 순서는 실제 execution lease lane인 **Host + canonical working direct
 - Retry 횟수
 - 다음 Retry 시각
 - 마지막 오류
+- QA status / run id / artifact / UI review 상태
 
 ---
 
-## 10. 재시도
+## 10. Automated QA
+
+프로젝트에 Project OS QA Contract 1.0 entry point가 있으면 Codex 개발 turn 성공 후 자동으로 실행됩니다.
+
+```text
+Codex success
+→ scripts/qa.ps1 -RunId QA-...
+→ .qa/runs/<run-id>/result.json
+→ Telegram QA summary
+→ registered screenshots
+```
+
+결과는 다음처럼 처리됩니다.
+
+- `PASS`: 기존 Job 완료 또는 Project OS submit 계속
+- `FAIL`: Job `FAILED`
+- `UI_REVIEW_REQUIRED`: screenshot 확인 후 Human Gate `APPROVE` / `REJECT`
+- `scripts/qa.ps1` 없음: 기존 QA 미지원 프로젝트와 동일하게 완료
+
+현재 Project Topic의 최근 QA 상태:
+
+```text
+/qa
+```
+
+Codex 작업은 다시 실행하지 않고 QA만 재실행:
+
+```text
+/qa rerun
+```
+
+Screenshot은 임의 디렉터리 탐색이 아니라 `result.json.artifacts[]`에 등록된 파일만 전송합니다. 자세한 구조와 보안 정책은 `docs/AUTOMATED_QA.md`를 참고하세요.
+
+---
+
+## 11. 재시도
 
 ```text
 /retry JOB-...
@@ -394,7 +431,7 @@ Project OS Job의 FAILED retry는 일반 clone 방식으로 처리하지 않습�
 
 ---
 
-## 11. 자동 Recovery
+## 12. 자동 Recovery
 
 ### Host 장애
 
@@ -448,7 +485,7 @@ Controller가 재시작되면 DB의 runtime state를 기준으로 다음을 reco
 
 ---
 
-## 12. Human Gate
+## 13. Human Gate
 
 Codex가 사용자의 명시적인 결정이 필요하다고 판단하면 Job은:
 
@@ -478,7 +515,7 @@ Human Gate 상태에서는 `/retry`로 결정을 우회하지 않습니다.
 
 ---
 
-## 13. Desktop / Lightsail / Remote Runner
+## 14. Desktop / Lightsail / Remote Runner
 
 기본 권장 구조는 각 머신이 독립 Controller가 되는 형태입니다.
 
@@ -512,7 +549,7 @@ Advanced 구성에서는 Controller와 다른 머신의 WebSocket Runner도 사�
 
 ---
 
-## 14. Project OS 연동
+## 15. Project OS 연동
 
 Project 등록:
 
@@ -549,7 +586,7 @@ Remote Control Job의 `COMPLETED`는 구현 turn과 handoff submit이 끝났다�
 
 ---
 
-## 15. 진단 명령
+## 16. 진단 명령
 
 CLI:
 
@@ -583,7 +620,7 @@ Telegram:
 
 ---
 
-## 16. Job State 빠른 해석
+## 17. Job State 빠른 해석
 
 | State | 의미 | 보통의 사용자 행동 |
 |---|---|---|
@@ -600,7 +637,7 @@ Telegram:
 
 ---
 
-## 17. 권장 실사용 흐름
+## 18. 권장 실사용 흐름
 
 가장 단순한 운영 패턴입니다.
 
@@ -636,7 +673,7 @@ Telegram:
 
 ---
 
-## 18. 명령어 요약
+## 19. 명령어 요약
 
 ### 프로젝트 / 시스템
 
@@ -654,6 +691,8 @@ Telegram:
 ```text
 /run [project-id] [--host <host-id>]
 /status
+/qa
+/qa rerun
 /queue
 /jobs
 /job <job-id>
@@ -688,12 +727,13 @@ Project Topic에서는 일반 문장도 중요한 인터페이스입니다.
 
 ---
 
-## 19. 관련 문서
+## 20. 관련 문서
 
 더 깊은 동작은 다음 문서를 참고하세요.
 
 - `README.md` — 설치와 전체 설정
 - `docs/SESSIONS_AND_FEEDBACK.md` — Session, steer, redirect
+- `docs/AUTOMATED_QA.md` — Automated QA / Telegram Screenshot
 - `docs/RECOVERY.md` — Host/Lease/Quota/Restart recovery
 - `docs/HUMAN_GATE.md` — Human Gate
 - `docs/TELEGRAM_QUEUE_MANAGEMENT_015.md` — Telegram Queue 관리
