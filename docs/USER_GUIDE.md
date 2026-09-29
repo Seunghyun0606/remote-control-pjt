@@ -378,12 +378,13 @@ Queue 순서는 실제 execution lease lane인 **Host + canonical working direct
 
 ## 10. Automated QA
 
-프로젝트에 Project OS QA Contract 1.0 entry point가 있으면 Codex 개발 turn 성공 후 자동으로 실행됩니다.
+프로젝트에 Project OS QA Contract 2.0의 `.qa/manifest.yaml`이 있으면 Codex 개발 turn 성공 후 자동으로 실행됩니다. Manifest가 없는 기존 프로젝트는 `scripts/qa.ps1` 기반 Contract 1.0을 legacy 방식으로 지원합니다.
 
 ```text
 Codex success
-→ scripts/qa.ps1 -RunId QA-...
-→ .qa/runs/<run-id>/result.json
+→ .qa/manifest.yaml
+→ host OS QA command + runId
+→ manifest-declared result.json
 → Telegram QA summary
 → registered screenshots
 ```
@@ -391,9 +392,10 @@ Codex success
 결과는 다음처럼 처리됩니다.
 
 - `PASS`: 기존 Job 완료 또는 Project OS submit 계속
+- `PASS_WITH_WARNINGS`: 완료 계속 + warning/artifact 표시
 - `FAIL`: Job `FAILED`
-- `UI_REVIEW_REQUIRED`: screenshot 확인 후 Human Gate `APPROVE` / `REJECT`
-- `scripts/qa.ps1` 없음: 기존 QA 미지원 프로젝트와 동일하게 완료
+- `HUMAN_GATE_REQUIRED`: artifact 확인 후 Human Gate `APPROVE` / `REJECT`
+- QA contract 없음: 기존 QA 미지원 프로젝트와 동일하게 완료
 
 현재 Project Topic의 최근 QA 상태:
 
