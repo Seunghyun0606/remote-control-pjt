@@ -243,6 +243,7 @@ async def _run_controller(*, no_telegram: bool, env_file: Path | None = None) ->
             screenshot_enabled=settings.qa_telegram_screenshots,
             max_screenshots=settings.qa_telegram_max_screenshots,
             artifact_max_bytes=settings.qa_artifact_max_bytes,
+            artifact_total_max_bytes=settings.qa_artifact_total_max_bytes,
         )
         manager = JobManager(
             projects=projects,
