@@ -26,6 +26,8 @@ class Intent(StrEnum):
     NEW_SESSION = "NEW_SESSION"
     USE_SESSION = "USE_SESSION"
     DOCTOR = "DOCTOR"
+    QA = "QA"
+    QA_RERUN = "QA_RERUN"
     HELP = "HELP"
 
 
@@ -79,6 +81,12 @@ class CommandRouter:
             return Command(Intent.HOSTS)
         if command == "/doctor":
             return Command(Intent.DOCTOR)
+        if command == "/qa":
+            if not args:
+                return Command(Intent.QA)
+            if len(args) == 1 and args[0].casefold() == "rerun":
+                return Command(Intent.QA_RERUN)
+            raise CommandParseError("usage: /qa [rerun]")
         if command == "/sessions":
             if args:
                 raise CommandParseError("usage: /sessions")

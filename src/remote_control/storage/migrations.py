@@ -6,11 +6,16 @@ from datetime import datetime, timezone
 from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, inspect, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from remote_control.storage.models import Base, ExecutionLeaseRecord, RemoteExecutionRecord
+from remote_control.storage.models import (
+    Base,
+    ExecutionLeaseRecord,
+    QARunRecord,
+    RemoteExecutionRecord,
+)
 from remote_control.storage.schema_v1 import V1_METADATA
 
 Migration = Callable[[AsyncConnection], Awaitable[None]]
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 
 
 async def _baseline_schema(connection: AsyncConnection) -> None:
@@ -79,6 +84,15 @@ async def _process_identity(connection: AsyncConnection) -> None:
     await connection.run_sync(migrate)
 
 
+async def _qa_runs(connection: AsyncConnection) -> None:
+    await connection.run_sync(
+        lambda sync_connection: QARunRecord.__table__.create(
+            sync_connection,
+            checkfirst=True,
+        )
+    )
+
+
 MIGRATIONS: dict[int, Migration] = {
     1: _baseline_schema,
     2: _execution_leases,
@@ -86,6 +100,7 @@ MIGRATIONS: dict[int, Migration] = {
     4: _remote_executions,
     5: _process_identity,
     6: _lease_queue_position,
+    7: _qa_runs,
 }
 
 

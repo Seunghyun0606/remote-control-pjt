@@ -161,6 +161,7 @@ class ControllerService:
                     f"Remote Agent Control — {project_id}\n"
                     "/run — 이 프로젝트 작업 시작\n"
                     "/status — 이 프로젝트 active Job\n"
+                    "/qa — 최근 QA 상태, /qa rerun — QA만 재실행\n"
                     "/queue — 실행 중/대기 Queue 관리\n"
                     "/jobs — 이 프로젝트 최근 Job\n"
                     "/job <job-id>\n/retry <failed-or-waiting-job-id>\n"
@@ -174,6 +175,7 @@ class ControllerService:
             return (
                 "Remote Agent Control\n"
                 "/projects\n/status\n/queue\n/hosts\n/run <project> [--host <host-id>]\n"
+                "/qa — project topic에서 최근 QA 상태, /qa rerun — QA만 재실행\n"
                 "/jobs\n/job <job-id>\n/retry <failed-or-waiting-job-id>\n"
                 "/sessions\n/session <session-id>\n/session use <session-id>\n/doctor\n"
                 "/pause [job-id]\n/resume [job-id]\n"
@@ -203,6 +205,35 @@ class ControllerService:
             if self.diagnostics is None:
                 return "Runtime doctor가 활성화되지 않았습니다."
             return self.diagnostics()
+        if command.intent in {Intent.QA, Intent.QA_RERUN}:
+            if project_id is None:
+                raise ValueError("/qa 는 project topic에서 실행하세요")
+            latest = await self.jobs.latest_for_user_project(user_id, project_id)
+            if latest is None:
+                return "이 project에는 아직 Job이 없습니다."
+            if command.intent == Intent.QA_RERUN:
+                qa_run = await self.jobs.rerun_qa(latest.id)
+                return (
+                    "🧪 QA 재실행 완료\n"
+                    f"Job: {latest.id}\n"
+                    f"Run: {qa_run.run_id}\n"
+                    f"Status: {qa_run.status or qa_run.phase}"
+                )
+            qa_run = await self.jobs.qa_for(latest.id)
+            if qa_run is None:
+                return (
+                    f"QA status: NOT_RUN\nJob: {latest.id}\n"
+                    "Project OS QA entrypoint가 없거나 아직 QA가 실행되지 않았습니다."
+                )
+            return (
+                f"QA status: {qa_run.status or qa_run.phase}\n"
+                f"Job: {latest.id}\n"
+                f"Run: {qa_run.run_id}\n"
+                f"Result: {qa_run.result_path or '-'}\n"
+                f"Warnings: {qa_run.warning_count}\n"
+                f"Artifacts: {qa_run.artifact_count}\n"
+                f"UI review: {qa_run.review_status or '-'}"
+            )
         if command.intent == Intent.STATUS:
             active = await self.jobs.active_for_user(
                 user_id,
@@ -399,12 +430,23 @@ class ControllerService:
             )
             work = await self.jobs.project_work_for(job.id)
             recovery = await self.jobs.recovery_for(job.id)
+            qa_run = await self.jobs.qa_for(job.id)
             task_line = f"\nTask: {work.task_id}" if work and work.task_id else ""
             adapter_line = f"\nAdapter: {work.adapter}" if work else ""
+            qa_line = ""
+            if qa_run is not None:
+                qa_line = (
+                    f"\nQA status: {qa_run.status or qa_run.phase}"
+                    f"\nQA run: {qa_run.run_id}"
+                    f"\nQA warnings: {qa_run.warning_count}"
+                    f"\nQA artifacts: {qa_run.artifact_count}"
+                    f"\nQA result: {qa_run.result_path or '-'}"
+                    f"\nQA review: {qa_run.review_status or '-'}"
+                )
             return (
                 f"{job.id}\nProject: {job.project_id}\nState: {job.state}\n"
                 f"Host: {job.assigned_host or '-'}\nSession: {job.external_session_id or '-'}"
-                f"{adapter_line}{task_line}"
+                f"{adapter_line}{task_line}{qa_line}"
                 f"\nError: {job.error or '-'}"
                 f"{_recovery_detail(recovery)}"
             )

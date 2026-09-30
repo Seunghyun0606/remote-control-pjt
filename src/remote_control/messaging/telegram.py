@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
 import logging
 import re
 import time
+from io import BytesIO
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -10,6 +12,7 @@ from telegram import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
     Update,
 )
 from telegram.error import BadRequest, TelegramError
@@ -63,6 +66,7 @@ BOT_COMMANDS = (
     BotCommand("sync", "프로젝트별 Telegram Topic 동기화"),
     BotCommand("run", "프로젝트 Codex 작업 시작"),
     BotCommand("status", "현재 active Job 상태"),
+    BotCommand("qa", "최근 QA 상태 / QA 재실행"),
     BotCommand("queue", "실행 중/대기 Queue 관리"),
     BotCommand("jobs", "최근 Job 목록"),
     BotCommand("job", "특정 Job 상세 조회"),
@@ -114,6 +118,7 @@ class TelegramProvider(MessagingProvider):
         self.application.add_handler(MessageHandler(filters.TEXT, self._handle_update))
         self.controller.jobs.set_notifier(self.send_message)
         self.controller.jobs.set_approval_notifier(self.send_approval)
+        self.controller.jobs.set_qa_artifact_notifier(self.send_qa_artifacts)
         self._topics_enabled = False
         self._pending_steers: dict[str, _PendingSteer] = {}
 
@@ -163,6 +168,66 @@ class TelegramProvider(MessagingProvider):
             project_id=project_id,
             job_id=job_id,
         )
+
+    async def send_qa_artifacts(self, user_id: str, payload: dict) -> None:
+        project_id = str(payload.get("project_id") or "")
+        job_id = str(payload.get("job_id") or "")
+        run_id = str(payload.get("run_id") or "")
+        status = str(payload.get("status") or "")
+        artifacts = payload.get("artifacts")
+        if not project_id or not job_id or not isinstance(artifacts, list):
+            raise ValueError("invalid QA artifact notification payload")
+
+        topic = await self._ensure_project_topic(
+            user_id=user_id,
+            chat_id=user_id,
+            project_id=project_id,
+        )
+        thread_id = topic.message_thread_id if topic is not None else None
+
+        prepared: list[tuple[InputMediaPhoto, BytesIO]] = []
+        total = len(artifacts)
+        for index, artifact in enumerate(artifacts, start=1):
+            if not isinstance(artifact, dict):
+                continue
+            encoded = artifact.get("data_base64")
+            if not isinstance(encoded, str):
+                continue
+            raw = base64.b64decode(encoded, validate=True)
+            stream = BytesIO(raw)
+            suffix = _image_suffix(str(artifact.get("media_type") or ""))
+            stream.name = f"qa-{index}{suffix}"
+            name = str(artifact.get("name") or f"screenshot-{index}")
+            scenario = artifact.get("scenario")
+            caption = (
+                f"[UI {index}/{total}] {name}\n"
+                f"QA: {status}\n"
+                f"Run: {run_id}"
+            )
+            if isinstance(scenario, str) and scenario:
+                caption += f"\nScenario: {scenario}"
+            prepared.append((InputMediaPhoto(media=stream, caption=caption[:1024]), stream))
+
+        try:
+            for offset in range(0, len(prepared), 10):
+                batch = prepared[offset : offset + 10]
+                sent_messages = await self.application.bot.send_media_group(
+                    chat_id=int(user_id),
+                    media=[item[0] for item in batch],
+                    message_thread_id=thread_id,
+                )
+                for sent in sent_messages:
+                    await self._bind_sent_message(
+                        user_id=user_id,
+                        chat_id=str(sent.chat_id),
+                        message_id=sent.message_id,
+                        message_thread_id=sent.message_thread_id,
+                        project_id=project_id,
+                        job_id=job_id,
+                    )
+        finally:
+            for _, stream in prepared:
+                stream.close()
 
     async def send_approval(self, user_id: str, approval: ApprovalPrompt) -> None:
         job = await self.controller.jobs.require(approval.job_id)
@@ -826,6 +891,15 @@ class TelegramProvider(MessagingProvider):
             project_id=project_id,
             job_id=job_id,
         )
+
+
+
+def _image_suffix(media_type: str) -> str:
+    return {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/webp": ".webp",
+    }.get(media_type.casefold(), ".png")
 
 
 def build_approval_markup(approval: ApprovalPrompt) -> InlineKeyboardMarkup:

@@ -19,6 +19,7 @@ from remote_control.feedback import FeedbackPolicy, FeedbackThrottler
 from remote_control.hosts.registry import HostRegistry
 from remote_control.hosts.router import HostRouter, HostUnavailable
 from remote_control.human_gate import (
+    ApprovalOption,
     HumanGateRequest,
     extract_human_gate,
     extract_human_gate_from_text,
@@ -32,6 +33,7 @@ from remote_control.process_control import (
 )
 from remote_control.projects.adapters import NoProjectWork, ProjectAdapterRegistry
 from remote_control.projects.registry import ProjectRegistry
+from remote_control.qa import QAOrchestrator, QAOutcome
 from remote_control.recovery.models import RecoveryKind, RecoveryMode
 from remote_control.recovery.quota import (
     QuotaSignal,
@@ -59,6 +61,7 @@ from remote_control.transport.runner_ws import RunnerGateway
 
 Notifier = Callable[[str, str], Awaitable[None]]
 ApprovalNotifier = Callable[[str, ApprovalPrompt], Awaitable[None]]
+QAArtifactNotifier = Callable[[str, dict], Awaitable[None]]
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +111,7 @@ class JobManager:
         project_work: ProjectWorkRepository | None = None,
         execution_leases: ExecutionLeaseRegistry | None = None,
         remote_executions: RemoteExecutionRepository | None = None,
+        qa: QAOrchestrator | None = None,
         progress_interval_seconds: int = 300,
         quota_retry_initial_seconds: int = 1800,
         quota_retry_max_seconds: int = 7200,
@@ -128,6 +132,7 @@ class JobManager:
         self.project_work = project_work
         self.execution_leases = execution_leases
         self.remote_executions = remote_executions
+        self.qa = qa
         self.host_router = HostRouter(hosts) if hosts is not None else None
         self.feedback_policy = FeedbackPolicy()
         self.feedback_throttler = FeedbackThrottler(progress_interval_seconds)
@@ -144,6 +149,7 @@ class JobManager:
         self._job_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._notifiers: dict[str, Notifier] = {}
         self._approval_notifiers: dict[str, ApprovalNotifier] = {}
+        self._qa_artifact_notifiers: dict[str, QAArtifactNotifier] = {}
 
     async def validate_runner_registration(
         self,
@@ -215,6 +221,17 @@ class JobManager:
             self._approval_notifiers.pop(channel, None)
             return
         self._approval_notifiers[channel] = notifier
+
+    def set_qa_artifact_notifier(
+        self,
+        notifier: QAArtifactNotifier | None,
+        *,
+        channel: str = "telegram",
+    ) -> None:
+        if notifier is None:
+            self._qa_artifact_notifiers.pop(channel, None)
+            return
+        self._qa_artifact_notifiers[channel] = notifier
 
     async def create(
         self,
@@ -767,7 +784,30 @@ class JobManager:
                 return await self.require(job_id)
 
             task = self._tasks.get(job_id)
-            if task is not None and not task.done() and task is not asyncio.current_task():
+            qa_run = await self.qa.latest_for_job(job_id) if self.qa is not None else None
+            qa_active = (
+                qa_run is not None
+                and qa_run.phase in {"QA_PREPARING", "QA_RUNNING", "QA_COLLECTING"}
+            )
+            if (
+                qa_active
+                and task is not None
+                and not task.done()
+                and task is not asyncio.current_task()
+            ):
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                if qa_run is not None:
+                    await self.qa.runs.update(
+                        qa_run.run_id,
+                        phase="QA_FAILED",
+                        error="QA cancelled with Job",
+                        finished_at=datetime.now(timezone.utc),
+                    )
+            elif task is not None and not task.done() and task is not asyncio.current_task():
                 try:
                     await asyncio.shield(task)
                 except asyncio.CancelledError:
@@ -934,6 +974,36 @@ class JobManager:
             return None
         return await self.recovery.get(job_id)
 
+    async def qa_for(self, job_id: str):
+        if self.qa is None:
+            return None
+        return await self.qa.latest_for_job(job_id)
+
+    async def latest_for_user_project(
+        self,
+        user_id: str,
+        project_id: str,
+    ) -> JobRecord | None:
+        return await self.jobs.latest_for_user_project(user_id, project_id)
+
+    async def rerun_qa(self, job_id: str):
+        if self.qa is None:
+            raise ValueError("Automated QA is disabled")
+        job = await self.require(job_id)
+        if job.assigned_host is None:
+            raise ValueError("Job has no assigned host for QA rerun")
+        project = self.projects.get(job.project_id)
+        outcome = await self.qa.execute(
+            job_id=job.id,
+            project_id=job.project_id,
+            host_id=job.assigned_host,
+            working_directory=Path(project.path_for(job.assigned_host)).expanduser(),
+        )
+        if not outcome.supported or outcome.run is None or outcome.result is None:
+            raise ValueError("Project does not provide a supported Project OS QA contract")
+        await self._report_qa(job.id, outcome)
+        return outcome.run
+
     async def pending_approvals_for_user(
         self,
         user_id: str,
@@ -1029,6 +1099,32 @@ class JobManager:
         previous_task = self._tasks.get(job.id)
         if previous_task is not None and not previous_task.done():
             await asyncio.shield(previous_task)
+
+        if prompt.approval_type in {"qa_human_gate", "qa_ui_review"}:
+            qa_run = await self.qa.latest_for_job(job.id) if self.qa is not None else None
+            rejected_ui = rejected or resolved.selected_option == "REJECT"
+            if qa_run is not None:
+                await self.qa.runs.update(
+                    qa_run.run_id,
+                    review_status="UI_REJECTED" if rejected_ui else "UI_APPROVED",
+                )
+            if rejected_ui:
+                await self.jobs.update(job.id, error="UI QA review rejected")
+                if self.sessions is not None:
+                    await self.sessions.mark(job.id, SessionStatus.IDLE)
+                await self._transition(job.id, JobState.FAILED)
+                if self.recovery is not None:
+                    await self.recovery.delete(job.id)
+                await self._notify(job.id, "❌ UI QA 검수가 거절되어 Job을 실패 처리했습니다.")
+                return resolved
+            await self._transition(job.id, JobState.RUNNING)
+            if self.sessions is not None:
+                await self.sessions.mark(job.id, SessionStatus.ACTIVE)
+            self._start_task(
+                job.id,
+                self._complete_after_qa(job.id, job.result),
+            )
+            return resolved
 
         instruction = _approval_instruction(
             prompt,
@@ -1158,8 +1254,28 @@ class JobManager:
                 JobState.RUNNING.value,
             }
         )
+        qa_recovery_ids: set[str] = set()
+        if self.qa is not None:
+            for candidate in recoverable:
+                qa_run = await self.qa.latest_for_job(candidate.id)
+                if qa_run is None:
+                    continue
+                qa_recovery_ids.add(candidate.id)
+                state = JobState(candidate.state)
+                if state in {JobState.STARTING, JobState.RUNNING}:
+                    await self._enter_host_wait(
+                        candidate.id,
+                        mode=RecoveryMode.QA,
+                        error="controller restarted during or immediately after automated QA",
+                        assigned_host=candidate.assigned_host,
+                        resume_instruction=None,
+                    )
+                    lease_repairs += 1
+
         count = stale_locks + lease_repairs
         for job in recoverable:
+            if job.id in qa_recovery_ids:
+                continue
             existing = await self.recovery.get(job.id)
             session_id = await self._external_session_id(job)
             remote_uncertain = bool(
@@ -1200,6 +1316,30 @@ class JobManager:
 
         waiting_agent = await self.jobs.list_states({JobState.WAITING_AGENT.value})
         for job in waiting_agent:
+            qa_run = await self.qa.latest_for_job(job.id) if self.qa is not None else None
+            if qa_run is not None:
+                if self.sessions is not None:
+                    await self.sessions.mark(job.id, SessionStatus.WAITING_HOST)
+                await self._transition(job.id, JobState.WAITING_HOST)
+                await self.recovery.upsert(
+                    job.id,
+                    kind=RecoveryKind.RESTART.value,
+                    mode=RecoveryMode.QA.value,
+                    attempt_count=0,
+                    next_retry_at=current,
+                    execution_id=None,
+                    resume_instruction=None,
+                    last_error="controller restarted during or after automated QA",
+                )
+                await self.events.append(
+                    "QA_RECONCILE_WAIT",
+                    job_id=job.id,
+                    project_id=job.project_id,
+                    host_id=job.assigned_host,
+                    payload={"qa_run_id": qa_run.run_id},
+                )
+                count += 1
+                continue
             work = await self.project_work_for(job.id)
             project = self.projects.get(job.project_id)
             adapter = (
@@ -2118,6 +2258,10 @@ class JobManager:
         mode = RecoveryMode(record.mode)
         if mode == RecoveryMode.START:
             self._start_task(job.id, self._execute_new(job.id))
+        elif mode == RecoveryMode.QA:
+            await self._transition(job.id, JobState.STARTING)
+            await self._transition(job.id, JobState.RUNNING)
+            self._start_task(job.id, self._execute_qa_recovery(job.id))
         else:
             await self._transition(job.id, JobState.STARTING)
             await self._transition(job.id, JobState.RUNNING)
@@ -2232,6 +2376,20 @@ class JobManager:
                 last_error=record.last_error,
             )
             self._start_task(job.id, self._execute_project_finalize(job.id))
+        elif mode == RecoveryMode.QA:
+            await self._transition(job.id, JobState.STARTING)
+            await self._transition(job.id, JobState.RUNNING)
+            await self.recovery.upsert(
+                job.id,
+                kind=record.kind,
+                mode=RecoveryMode.QA.value,
+                attempt_count=record.attempt_count,
+                next_retry_at=None,
+                execution_id=None,
+                resume_instruction=None,
+                last_error=record.last_error,
+            )
+            self._start_task(job.id, self._execute_qa_recovery(job.id))
         else:
             await self._transition(job.id, JobState.STARTING)
             await self._transition(job.id, JobState.RUNNING)
@@ -2437,6 +2595,29 @@ class JobManager:
             if self._handles.get(job_id) is handle:
                 self._handles.pop(job_id, None)
 
+    async def _execute_qa_recovery(self, job_id: str) -> None:
+        try:
+            if self.qa is None:
+                await self._complete_after_qa(job_id, (await self.require(job_id)).result)
+                return
+            run = await self.qa.latest_for_job(job_id)
+            if run is None:
+                await self._run_qa_then_finalize(
+                    job_id,
+                    (await self.require(job_id)).result,
+                )
+                return
+            await self._run_qa_then_finalize(
+                job_id,
+                (await self.require(job_id)).result,
+                collect_only=True,
+                reuse_run_id=run.run_id,
+            )
+        except asyncio.CancelledError:
+            await self._handle_cancelled_task(job_id)
+        except Exception as exc:
+            await self._fail_qa(job_id, exc)
+
     async def _execute_project_finalize(self, job_id: str) -> None:
         try:
             job = await self.require(job_id)
@@ -2565,8 +2746,7 @@ class JobManager:
                 )
                 return
 
-            completed = False
-            finalize_project_os = False
+            ready_to_finalize = False
             async with self._job_locks[job_id]:
                 current = await self.require(job_id)
                 if JobState(current.state) in {
@@ -2577,32 +2757,13 @@ class JobManager:
                     return
                 steering = self._drain_steering(job_id)
                 if steering is None:
-                    project = self.projects.get(current.project_id)
-                    adapter = (
-                        self.project_adapters.get(project)
-                        if self.project_adapters is not None
-                        else None
+                    await self.jobs.update(
+                        job_id,
+                        result=current_result.final_message,
+                        error=None,
                     )
-                    if adapter is not None and adapter.requires_submission:
-                        await self.jobs.update(
-                            job_id,
-                            result=current_result.final_message,
-                            error=None,
-                        )
-                        await self._transition(job_id, JobState.WAITING_AGENT)
-                        finalize_project_os = True
-                    else:
-                        await self.jobs.update(
-                            job_id,
-                            result=current_result.final_message,
-                            error=None,
-                        )
-                        if self.sessions is not None:
-                            await self.sessions.mark(job_id, SessionStatus.IDLE)
-                        await self._transition(job_id, JobState.COMPLETED)
-                        if self.recovery is not None:
-                            await self.recovery.delete(job_id)
-                        completed = True
+                    await self._transition(job_id, JobState.WAITING_AGENT)
+                    ready_to_finalize = True
                 else:
                     job = await self.require(job_id)
                     await self.events.append(
@@ -2613,20 +2774,11 @@ class JobManager:
                         payload={"instruction": steering},
                     )
 
-            if finalize_project_os:
+            if ready_to_finalize:
                 await self._ack_result_handle(job_id, result_handle)
-                await self._finalize_project_adapter(
+                await self._run_qa_then_finalize(
                     job_id,
                     current_result.final_message,
-                )
-                return
-
-            if completed:
-                await self._ack_result_handle(job_id, result_handle)
-                await self._notify(
-                    job_id,
-                    "✅ 작업이 완료되었습니다."
-                    + _optional_detail(current_result.final_message),
                 )
                 return
 
@@ -2641,6 +2793,267 @@ class JobManager:
             if next_result is None:
                 return
             current_result = next_result
+
+    async def _run_qa_then_finalize(
+        self,
+        job_id: str,
+        final_message: str | None,
+        *,
+        collect_only: bool = False,
+        reuse_run_id: str | None = None,
+    ) -> None:
+        job = await self.require(job_id)
+        if JobState(job.state) not in {JobState.RUNNING, JobState.WAITING_AGENT}:
+            return
+        project = self.projects.get(job.project_id)
+        if job.assigned_host is None:
+            raise RuntimeError("QA execution requires an assigned host")
+
+        outcome: QAOutcome | None = None
+        if self.qa is not None:
+            if reuse_run_id is None and not collect_only:
+                await self._notify(job_id, "🧪 Automated QA started")
+            try:
+                outcome = await self.qa.execute(
+                    job_id=job.id,
+                    project_id=job.project_id,
+                    host_id=job.assigned_host,
+                    working_directory=Path(project.path_for(job.assigned_host)).expanduser(),
+                    reuse_run_id=reuse_run_id,
+                    collect_only=collect_only,
+                )
+            except ConnectionError as exc:
+                if self.recovery is None:
+                    await self._fail_qa(job_id, exc)
+                    return
+                await self._enter_host_wait(
+                    job_id,
+                    mode=RecoveryMode.QA,
+                    error=str(exc),
+                    assigned_host=job.assigned_host,
+                    resume_instruction=None,
+                )
+                return
+            except Exception as exc:
+                if collect_only and reuse_run_id is not None:
+                    await self.events.append(
+                        "QA_RECOVERY_REEXECUTE",
+                        job_id=job.id,
+                        project_id=job.project_id,
+                        host_id=job.assigned_host,
+                        payload={"qa_run_id": reuse_run_id, "reason": str(exc)},
+                    )
+                    await self._run_qa_then_finalize(
+                        job_id,
+                        final_message,
+                        collect_only=False,
+                        reuse_run_id=reuse_run_id,
+                    )
+                    return
+                await self._fail_qa(job_id, exc)
+                return
+
+        if outcome is not None and outcome.supported and outcome.result is not None:
+            await self._report_qa(job_id, outcome)
+            status = outcome.result["status"]
+            if status == "FAIL":
+                detail = self._qa_failure_detail(outcome.result)
+                await self.jobs.update(job_id, error=detail)
+                if self.sessions is not None:
+                    await self.sessions.mark(job_id, SessionStatus.IDLE)
+                await self._transition(job_id, JobState.FAILED)
+                if self.recovery is not None:
+                    await self.recovery.delete(job_id)
+                return
+            if status in {"HUMAN_GATE_REQUIRED", "UI_REVIEW_REQUIRED"}:
+                current = await self.require(job_id)
+                if JobState(current.state) == JobState.WAITING_AGENT:
+                    await self._transition(job_id, JobState.RUNNING)
+                request = HumanGateRequest(
+                    approval_type="qa_human_gate",
+                    question="자동 QA 결과에 사람의 검수가 필요합니다.",
+                    details=(
+                        f"QA Run: {outcome.run.run_id if outcome.run else '-'}\n"
+                        "Telegram으로 전송된 artifact와 warning/visual issue를 확인한 뒤 "
+                        "승인 또는 거절하세요."
+                    ),
+                    options=(
+                        ApprovalOption("APPROVE", "검수 승인"),
+                        ApprovalOption("REJECT", "검수 거절"),
+                    ),
+                )
+                approval = await self._enter_human_gate(job_id, request)
+                if approval is None:
+                    await self._fail_qa(
+                        job_id,
+                        RuntimeError("UI review required but Approval Registry is disabled"),
+                    )
+                return
+
+        await self._complete_after_qa(job_id, final_message)
+
+    async def _complete_after_qa(
+        self,
+        job_id: str,
+        final_message: str | None,
+    ) -> None:
+        current = await self.require(job_id)
+        project = self.projects.get(current.project_id)
+        adapter = (
+            self.project_adapters.get(project)
+            if self.project_adapters is not None
+            else None
+        )
+        if adapter is not None and adapter.requires_submission:
+            if JobState(current.state) == JobState.RUNNING:
+                await self._transition(job_id, JobState.WAITING_AGENT)
+            await self._finalize_project_adapter(job_id, final_message)
+            return
+
+        if self.sessions is not None:
+            await self.sessions.mark(job_id, SessionStatus.IDLE)
+        if JobState(current.state) == JobState.WAITING_HUMAN:
+            await self._transition(job_id, JobState.RUNNING)
+        await self._transition(job_id, JobState.COMPLETED)
+        if self.recovery is not None:
+            await self.recovery.delete(job_id)
+        await self._notify(
+            job_id,
+            "✅ 작업이 완료되었습니다." + _optional_detail(final_message),
+        )
+
+    async def _fail_qa(self, job_id: str, exc: Exception) -> None:
+        if self.qa is not None:
+            qa_run = await self.qa.latest_for_job(job_id)
+            if qa_run is not None and qa_run.phase in {
+                "QA_PREPARING", "QA_RUNNING", "QA_COLLECTING"
+            }:
+                await self.qa.runs.update(
+                    qa_run.run_id,
+                    phase="QA_FAILED",
+                    error=str(exc),
+                    finished_at=datetime.now(timezone.utc),
+                )
+        await self.jobs.update(job_id, error=f"Automated QA failed: {exc}")
+        if self.sessions is not None:
+            await self.sessions.mark(job_id, SessionStatus.IDLE)
+        current = await self.require(job_id)
+        if JobState(current.state) == JobState.WAITING_HUMAN:
+            await self._transition(job_id, JobState.RUNNING)
+        await self._transition(job_id, JobState.FAILED)
+        if self.recovery is not None:
+            await self.recovery.delete(job_id)
+        await self._notify(job_id, f"❌ Automated QA orchestration failed\n\n{exc}")
+
+    async def _report_qa(self, job_id: str, outcome: QAOutcome) -> None:
+        assert outcome.result is not None
+        result = outcome.result
+        run = outcome.run
+        status = str(result["status"])
+        run_id = str(result.get("runId") or result.get("run_id") or "-")
+        if run is not None and run.report_sent_at is None:
+            icon = {
+                "PASS": "✅",
+                "PASS_WITH_WARNINGS": "⚠️",
+                "FAIL": "❌",
+                "HUMAN_GATE_REQUIRED": "👀",
+                "UI_REVIEW_REQUIRED": "👀",
+            }.get(status, "🧪")
+            lines = [
+                f"{icon} Automated QA {status}",
+                "",
+                f"Run: {run_id}",
+            ]
+            if result.get("schemaVersion") == "2.0":
+                summary = result.get("summary")
+                if isinstance(summary, dict):
+                    lines.extend(
+                        [
+                            f"Passed: {summary.get('passed', 0)}",
+                            f"Failed: {summary.get('failed', 0)}",
+                            f"Warnings: {summary.get('warnings', 0)}",
+                            f"Skipped: {summary.get('skipped', 0)}",
+                            f"Human Gates: {summary.get('humanGates', 0)}",
+                        ]
+                    )
+                stages = result.get("stages")
+                if isinstance(stages, list) and stages:
+                    rendered = ", ".join(
+                        f"{item.get('id')}={item.get('status')}"
+                        for item in stages
+                        if isinstance(item, dict)
+                    )
+                    if rendered:
+                        lines.append(f"Stages: {rendered[:1000]}")
+                visual_reviews = result.get("visualReviews")
+                issue_count = 0
+                if isinstance(visual_reviews, list):
+                    for review in visual_reviews:
+                        if isinstance(review, dict) and isinstance(review.get("issues"), list):
+                            issue_count += len(review["issues"])
+                if issue_count:
+                    lines.append(f"Visual issues: {issue_count}")
+            else:
+                lines.extend(
+                    [
+                        f"Preflight: {result.get('preflight')}",
+                        f"Build: {result.get('build')}",
+                        f"Launch: {result.get('launch')}",
+                        f"Smoke: {result.get('smoke')}",
+                        f"Functional: {result.get('functional')}",
+                        f"UI: {result.get('ui')}",
+                    ]
+                )
+            artifacts = result.get("artifacts")
+            lines.append(f"Artifacts: {len(artifacts) if isinstance(artifacts, list) else 0}")
+            await self._notify(job_id, "\n".join(lines))
+            await self.qa.runs.update(
+                run.run_id,
+                report_sent_at=datetime.now(timezone.utc),
+            )
+
+        if (
+            run is not None
+            and run.artifacts_sent_at is None
+            and outcome.screenshots
+        ):
+            notifier = self._qa_artifact_notifiers.get(
+                (await self.require(job_id)).requested_by_channel
+            )
+            if notifier is not None:
+                job = await self.require(job_id)
+                payload = {
+                    "job_id": job.id,
+                    "project_id": job.project_id,
+                    "run_id": run_id,
+                    "status": status,
+                    "artifacts": list(outcome.screenshots),
+                }
+
+                async def send() -> None:
+                    await notifier(job.requested_by_user, payload)
+
+                delivered = await self._deliver_notification(
+                    job,
+                    notification_type="qa_artifacts",
+                    send=send,
+                )
+                if delivered:
+                    await self.qa.runs.update(
+                        run.run_id,
+                        artifacts_sent_at=datetime.now(timezone.utc),
+                    )
+
+    @staticmethod
+    def _qa_failure_detail(result: dict) -> str:
+        errors = result.get("errors") or []
+        if not errors:
+            return "Automated QA failed"
+        first = errors[0] if isinstance(errors[0], dict) else {}
+        code = first.get("code") or "QA_FAILED"
+        message = first.get("message") or "Automated QA failed"
+        stage = first.get("stage") or first.get("scenarioId") or "unknown"
+        return f"{code} at {stage}: {message}"
 
     async def _resume_or_fallback(
         self,

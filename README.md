@@ -2,7 +2,7 @@
 
 Telegram/Slack에서 **현재 머신의 Codex**를 실행하고, 진행 상태·추가 지시·Human Gate·사용량 제한 복구·Project OS 연동까지 관리하는 Runtime Control Plane입니다.
 
-현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.15.7**입니다.
+현재 **R0 ~ R6 + Telegram Project Topics + production hardening**이 구현되어 있으며 package version은 **0.16.0**입니다.
 
 ## 전체 개요
 
@@ -72,6 +72,8 @@ Remote Agent Control과 Project OS의 역할도 분리됩니다.
 
 0.15.7에서는 Telegram이 삭제된 Topic에 대해 반환할 수 있는 `TOPIC_ID_INVALID` 오류도 stale Topic으로 인식해 자동 재생성합니다.
 
+0.16.0에서는 Codex 작업 성공 후 Project OS QA Contract 2.0의 `.qa/manifest.yaml`을 탐색해 host OS에 맞는 QA command를 자동 실행하고, QA 결과와 등록된 screenshot artifact를 Telegram으로 전달합니다. `PASS`와 `PASS_WITH_WARNINGS`는 기존 완료 흐름을 이어가고, `FAIL`은 Job 실패, `HUMAN_GATE_REQUIRED`는 기존 Human Gate로 연결합니다. Manifest가 없는 기존 프로젝트는 `scripts/qa.ps1` 기반 Contract 1.0을 legacy adapter로 계속 지원합니다. 자세한 내용은 [Automated QA](docs/AUTOMATED_QA.md)를 참고하세요.
+
 0.13.1에서는 pip/Hatchling build toolchain을 wheel hash까지 고정하고 PEP 517/660 build isolation을 제거했습니다. Windows CI도 선택된 smoke module이 아니라 **전체 pytest suite**를 실행합니다. 상세 내용은 [P3 Reproducible Build & Windows Full CI](docs/P3_REPRODUCIBLE_BUILD_WINDOWS_CI_0131.md)을 참고하세요.
 
 실제 사용 방법만 빠르게 보려면 [Remote Control User Guide](docs/USER_GUIDE.md)를 먼저 참고하세요.
@@ -90,6 +92,7 @@ Remote Agent Control과 Project OS의 역할도 분리됩니다.
 - Controller restart recovery
 - Generic Git 프로젝트
 - Project OS 프로젝트
+- Project OS Automated QA + Telegram screenshot report
 - read-only Web Dashboard
 
 > Advanced: Controller와 다른 머신을 WebSocket Runner로 연결하는 remote-runner 기능도 유지됩니다. 하지만 **Desktop과 Lightsail을 각각 Messenger로 독립 제어**하려는 경우에는 필요하지 않습니다.
@@ -218,6 +221,7 @@ Remote Control은 Controller 시작 시 Telegram command menu를 자동 등록�
 /sync
 /run
 /status
+/qa
 /queue
 /jobs
 /job
