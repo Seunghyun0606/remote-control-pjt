@@ -24,11 +24,14 @@ def _result(run_id: str, *, status: str = "PASS") -> dict:
     warnings = 1 if status == "PASS_WITH_WARNINGS" else 0
     failed = 1 if status == "FAIL" else 0
     gates = 1 if status == "HUMAN_GATE_REQUIRED" else 0
-    scenario_status = (
+    stage_status = (
         "FAIL" if status == "FAIL"
         else "WARN" if status == "PASS_WITH_WARNINGS"
-        else "HUMAN_GATE_REQUIRED" if status == "HUMAN_GATE_REQUIRED"
         else "PASS"
+    )
+    scenario_status = (
+        "HUMAN_GATE_REQUIRED" if status == "HUMAN_GATE_REQUIRED"
+        else stage_status
     )
     result = {
         "schemaVersion": "2.0",
@@ -45,7 +48,7 @@ def _result(run_id: str, *, status: str = "PASS") -> dict:
             "skipped": 0,
             "humanGates": gates,
         },
-        "stages": [{"id": "functional", "status": scenario_status}],
+        "stages": [{"id": "functional", "status": stage_status}],
         "scenarios": [{"id": "main-flow", "status": scenario_status, "required": True}],
         "artifacts": [],
         "visualReviews": [],
@@ -125,6 +128,9 @@ def test_validate_rejects_unsafe_artifact_path() -> None:
 @pytest.mark.asyncio
 async def test_local_qa_collect_reads_only_registered_artifacts(tmp_path: Path) -> None:
     root = tmp_path / "project"
+    scripts = root / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "qa.ps1").write_text("# legacy QA test entrypoint\n", encoding="utf-8")
     run_id = "QA-local-001"
     run_dir = root / ".qa" / "runs" / run_id
     screenshot_dir = run_dir / "screenshots"
@@ -156,8 +162,83 @@ async def test_local_qa_collect_reads_only_registered_artifacts(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_v2_manifest_collects_repository_relative_screenshot_by_priority(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    run_id = "QA-v2-001"
+    qa_dir = root / ".qa"
+    run_dir = qa_dir / "runs" / run_id
+    screenshot_dir = run_dir / "screenshots"
+    screenshot_dir.mkdir(parents=True)
+    (qa_dir / "manifest.yaml").write_text(
+        """
+schemaVersion: "2.0"
+qa:
+  command:
+    unix: "./.qa/scripts/run-qa.sh --run-id {runId}"
+  stages: [smoke, ui]
+artifacts:
+  result: ".qa/runs/{runId}/result.json"
+  screenshots: ".qa/runs/{runId}/screenshots"
+  logs: ".qa/runs/{runId}/logs"
+  visual: ".qa/runs/{runId}/visual"
+""".strip(),
+        encoding="utf-8",
+    )
+    normal = b"normal"
+    failure = b"failure"
+    (screenshot_dir / "normal.png").write_bytes(normal)
+    (screenshot_dir / "failure.png").write_bytes(failure)
+    payload = _result(run_id)
+    payload["artifacts"] = [
+        {
+            "type": "screenshot",
+            "name": "normal",
+            "path": f".qa/runs/{run_id}/screenshots/normal.png",
+            "caption": "normal",
+            "kind": "checkpoint",
+            "priority": "normal",
+        },
+        {
+            "type": "screenshot",
+            "name": "failure",
+            "path": f".qa/runs/{run_id}/screenshots/failure.png",
+            "caption": "failure",
+            "kind": "failure",
+            "priority": "failure",
+        },
+    ]
+    (run_dir / "result.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    executor = LocalProjectOperationExecutor()
+    contract = await executor.execute(
+        host_id="local",
+        project_id="demo",
+        working_directory=root,
+        operation="qa_contract",
+        payload={},
+    )
+    assert contract["contract_version"] == "2.0"
+
+    collected = await executor.execute(
+        host_id="local",
+        project_id="demo",
+        working_directory=root,
+        operation="qa_collect",
+        payload={"run_id": run_id, "max_screenshots": 1},
+    )
+    assert collected["contract_version"] == "2.0"
+    assert collected["screenshots"][0]["name"] == "failure"
+    assert base64.b64decode(collected["screenshots"][0]["data_base64"]) == failure
+
+
+@pytest.mark.asyncio
 async def test_local_qa_collect_rejects_workspace_escape(tmp_path: Path) -> None:
     root = tmp_path / "project"
+    scripts = root / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "qa.ps1").write_text("# legacy QA test entrypoint\n", encoding="utf-8")
     run_id = "QA-local-002"
     run_dir = root / ".qa" / "runs" / run_id
     run_dir.mkdir(parents=True)
@@ -361,6 +442,9 @@ async def test_qa_contract_is_optional_without_entrypoint(tmp_path: Path) -> Non
 async def test_local_qa_collect_requires_result_json(tmp_path: Path) -> None:
     root = tmp_path / "project"
     root.mkdir()
+    scripts = root / "scripts"
+    scripts.mkdir()
+    (scripts / "qa.ps1").write_text("# legacy QA test entrypoint\n", encoding="utf-8")
     executor = LocalProjectOperationExecutor()
     with pytest.raises(ProjectOperationError, match="result.json was not produced"):
         await executor.execute(
@@ -375,6 +459,9 @@ async def test_local_qa_collect_requires_result_json(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_local_qa_collect_rejects_malformed_result(tmp_path: Path) -> None:
     root = tmp_path / "project"
+    scripts = root / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "qa.ps1").write_text("# legacy QA test entrypoint\n", encoding="utf-8")
     run_dir = root / ".qa" / "runs" / "QA-malformed-001"
     run_dir.mkdir(parents=True)
     (run_dir / "result.json").write_text("{bad json", encoding="utf-8")
