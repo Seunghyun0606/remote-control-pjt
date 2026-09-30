@@ -3,13 +3,18 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from remote_control.approvals.registry import ApprovalRegistry
 from remote_control.controller.job_manager import JobManager
-from remote_control.projects.operations import LocalProjectOperationExecutor, ProjectOperationError
+from remote_control.projects.operations import (
+    LocalProjectOperationExecutor,
+    ProjectOperationError,
+    _manifest_command_argv,
+)
 from remote_control.qa import QAContractError, QAOrchestrator, validate_result
 from remote_control.runners.fake import FakeAgentRunner
 from remote_control.storage.repositories import (
@@ -102,6 +107,27 @@ def _legacy_result(run_id: str, *, status: str = "PASS") -> dict:
         result["next_action"] = "REQUEST_UI_REVIEW"
     return result
 
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell runner behavior")
+def test_manifest_unix_relative_shell_runner_does_not_require_executable_bit(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    script = root / ".qa" / "scripts" / "run-qa.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/usr/bin/env sh\nexit 0\n", encoding="utf-8")
+    assert not os.access(script, os.X_OK)
+
+    argv = _manifest_command_argv(
+        root,
+        "./.qa/scripts/run-qa.sh --run-id QA-shell-001",
+        run_id="QA-shell-001",
+    )
+
+    assert Path(argv[0]).name == "sh"
+    assert Path(argv[1]) == script.resolve()
+    assert argv[-2:] == ["--run-id", "QA-shell-001"]
 
 
 def test_validate_project_os_qa_contract() -> None:
