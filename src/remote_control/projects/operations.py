@@ -350,7 +350,7 @@ class LocalProjectOperationExecutor:
             "contract_version": schema_version,
         }
 
-    async def _git_snapshot    async def _git_snapshot(self, root: Path) -> dict[str, Any]:
+    async def _git_snapshot(self, root: Path) -> dict[str, Any]:
         branch = await self._run(
             root,
             [self.git_executable, "branch", "--show-current"],
