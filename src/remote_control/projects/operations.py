@@ -596,7 +596,16 @@ def _manifest_command_argv(root: Path, command: str, *, run_id: str) -> list[str
         resolved = _safe_workspace_relative_path(root, executable.removeprefix("./"))
         if not resolved.is_file():
             raise ProjectOperationError(f"QA command executable not found: {executable}")
-        argv[0] = str(resolved)
+        if os.name != "nt" and resolved.suffix.casefold() == ".sh":
+            try:
+                shell = resolve_executable("sh")
+            except ExecutableResolutionError as exc:
+                raise ProjectOperationError(
+                    "sh is required to run a workspace-relative QA .sh runner"
+                ) from exc
+            argv = shell.build_command([str(resolved), *argv[1:]])
+        else:
+            argv[0] = str(resolved)
     else:
         try:
             resolution = resolve_executable(executable)
